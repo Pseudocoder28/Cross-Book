@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M0 — repository scaffold.**
+**M1 — shared core (types, Book, interfaces).**
 
 ## What works
+
+- `src/arb/types.py`: `Ticks` ($0.0001 units), exact dollar-string ↔ ticks conversion, price bounds, complement, `BookSide`, `RawMessage` envelope (`recv_ts_ns`, `recv_mono_ns`, `run_id`, `ingest_seq`).
+- `src/arb/book.py`: normalized `Book` — YES bid/ask ladders best-first, complement-derived NO views, snapshot + SET/DELTA level updates, sequence-gap/crossed/bad-level/staleness validity rules, sticky structural invalidation with `needs_resync`.
+- `src/arb/interfaces.py`: `EventSource` and `MarketDataAdapter` protocols, `BookEvent`, `ParseError`.
+- `src/arb/metrics.py`: first counters (`arb_book_invalidations_total`, `arb_parse_errors_total`).
+- 53 tests (unit + hypothesis) covering tick math and all book validity transitions; ruff and pyright clean.
+
+### From M0
 
 - Repository structure and Python packaging (`pyproject.toml`, src layout, `arb` entry point).
 - Tooling config: ruff, pyright (standard mode), pytest (+ pytest-asyncio, hypothesis).
@@ -18,9 +26,8 @@
 
 Day 1 (data, read-only):
 
-- Verify Polymarket US API facts against docs.polymarket.us and record them in `docs/venue-notes.md`.
-- Shared interfaces: `EventSource`, `MarketDataAdapter`, `Book` (integer ticks, complement-derived NO ladders).
-- WebSocket client with reconnect/backoff/jitter, heartbeat, stall detection, resubscribe and gap-triggered resnapshot.
+- Verify Polymarket US API facts against docs.polymarket.us and record them in `docs/venue-notes.md` (in progress).
+- WebSocket client with reconnect/backoff/jitter, heartbeat, stall detection, resubscribe and gap-triggered resnapshot; supervised tasks.
 - Raw-message recorder (enqueue before parse) and Postgres storage (SQLAlchemy 2.0 async + Alembic).
 - Venue adapters under `src/arb/venues/`, parser tests against real captured fixtures.
 - Pair matcher for equivalent markets.
