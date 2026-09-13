@@ -2,6 +2,31 @@
 
 Design choices and why. Newest first.
 
+## M3 — config, storage, recorder, compose stack
+
+- **Recorder never blocks the ingest path.** `enqueue` is non-blocking; on a
+  full queue the message is dropped and counted
+  (`arb_recorder_dropped_total`) — losing one message beats stalling a venue
+  feed and losing the connection. The queue (default 100k) absorbs Postgres
+  hiccups.
+- **Failed sink writes retry in place with backoff.** Batches are never
+  reordered or silently discarded; the writer runs under `supervise()`.
+- **`raw_messages` stores payload bytes verbatim** (BYTEA), with BIGINT
+  nanosecond timestamps (no floats, per project rules) and a unique
+  `(run_id, ingest_seq)` so the archive is totally ordered per run and
+  duplicate writes fail loudly. Index on `(venue, recv_ts_ns)` for replay
+  queries.
+- **Alembic reads the database URL from `AppConfig`** (environment / `.env`),
+  never from `alembic.ini` — no connection strings in git.
+- **Models stay dialect-portable; migrations are Postgres-only.** Fast tests
+  run the real models against in-memory SQLite (aiosqlite, dev-only dep);
+  the one concession is a `with_variant(Integer, "sqlite")` on the PK since
+  SQLite only autoincrements INTEGER keys.
+- **Compose images are pinned** (pgvector/pgvector:pg16, prometheus v2.53,
+  grafana 11.1) and every host port binds to 127.0.0.1. The app service's
+  command is a placeholder until `arb record` exists; inside the network its
+  `DATABASE_URL` points at the `postgres` service.
+
 ## M2 — reliability layer (run identity, backoff, supervision, WS client)
 
 - **The connector owns URL and auth; the WS client owns reliability.** Both

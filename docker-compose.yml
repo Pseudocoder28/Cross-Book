@@ -1,0 +1,56 @@
+# All host ports bind to 127.0.0.1 only. On the VM these are reached over an
+# SSH tunnel — never exposed publicly.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: arb
+      POSTGRES_PASSWORD: arb
+      POSTGRES_DB: arb
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arb -d arb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+
+  app:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Inside the compose network the DB host is the service name.
+      DATABASE_URL: postgresql+asyncpg://arb:arb@postgres:5432/arb
+    volumes:
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Replaced with the recorder entrypoint once `arb record` exists.
+    command: ["sleep", "infinity"]
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:

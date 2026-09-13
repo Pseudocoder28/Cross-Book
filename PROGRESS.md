@@ -2,9 +2,18 @@
 
 ## Current milestone
 
-**M2 — reliability layer (run identity, backoff, supervision, WS client).**
+**M3 — config, storage, recorder, compose stack.**
 
 ## What works
+
+- `src/arb/config.py`: `AppConfig` (pydantic-settings, `.env`) with doc-verified endpoint defaults; secrets only as file paths.
+- `src/arb/storage/`: SQLAlchemy 2.0 async `raw_messages` model + Alembic (async env, URL from `AppConfig`); migration `0001` renders correct Postgres DDL (BIGSERIAL, BYTEA, timestamptz, unique `(run_id, ingest_seq)`).
+- `src/arb/recorder.py`: bounded-queue recorder — non-blocking `enqueue` (drop+count on overflow), batching writer, in-place retry with backoff, supervised.
+- Infra: `docker-compose.yml` (Postgres+pgvector, Prometheus, Grafana, app — all on 127.0.0.1), `Dockerfile` (uv, layer-cached), Prometheus scrape config, Grafana datasource provisioning.
+- Recorder metrics: enqueued/dropped/written/write-failures counters + queue-depth gauge.
+- 71 tests; ruff and pyright clean.
+
+### From M2
 
 - `src/arb/run.py`: `RunContext` — `run_id` (sortable UTC stamp + suffix) and the per-run cross-source `ingest_seq`.
 - `src/arb/supervise.py`: `Backoff` (exponential, jittered, resettable) and `supervise()` — restarts long-running tasks with backoff, never swallows cancellation.
@@ -35,11 +44,10 @@
 
 Day 1 (data, read-only):
 
-- Raw-message recorder (enqueue before parse) and Postgres storage (SQLAlchemy 2.0 async + Alembic).
-- Venue adapters under `src/arb/venues/`, parser tests against real captured fixtures.
+- Venue adapters under `src/arb/venues/`, parser tests against real captured fixtures. Polymarket US REST fixtures can be captured now (public gateway); Kalshi and both WS feeds need credentials first.
+- `arb record` CLI wiring sources → recorder → Postgres.
 - Pair matcher for equivalent markets.
 - `uv run arb doctor`.
-- `docker compose` for Postgres (pgvector), Prometheus, Grafana, app.
 
 ## Open questions
 

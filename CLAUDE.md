@@ -48,6 +48,7 @@ Detects and trades price gaps between equivalent binary markets on Kalshi and Po
 ## Commands
 
 - `uv run pytest`, `uv run ruff check .` and `uv run pyright`
+- `uv run alembic upgrade head` migrates the database (URL from `.env` via `AppConfig`)
 - `docker compose up -d` starts Postgres with pgvector, Prometheus, Grafana and the app
 - `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk
 - Keep this list current as commands are added.

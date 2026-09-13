@@ -25,6 +25,7 @@ dev = [
     "hypothesis>=6.100",
     "ruff>=0.5",
     "pyright>=1.1.370",
+    "aiosqlite>=0.22.1",
 ]
 
 [build-system]
