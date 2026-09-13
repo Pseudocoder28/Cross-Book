@@ -1,0 +1,43 @@
+# Secrets — never commit. Keys load from file paths set in .env.
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p8
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# uv
+# (uv.lock IS committed; nothing to ignore here)
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Local data / captures
+*.log
+data/
+captures/
+
+# Conductor workspace scratch
+.context/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
