@@ -1,7 +1,7 @@
 """arb command-line entry point.
 
-Scaffold only. Subcommands (e.g. ``doctor``) are wired up in later milestones.
-Works both locally (``uv run arb ...``) and on the VM (``docker compose exec app arb ...``).
+Every command works both locally (``uv run arb ...``) and on the VM
+(``docker compose exec app arb ...``).
 """
 
 from __future__ import annotations
@@ -9,11 +9,25 @@ from __future__ import annotations
 import argparse
 import sys
 
+import uvloop
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="arb", description="arb command-line entry point.")
-    parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser(
+        "doctor",
+        help="check env, keys, clock skew, database, venue reachability and disk",
+    )
     return parser
+
+
+def _run_doctor() -> int:
+    from arb.doctor import exit_code, format_results, run_doctor
+
+    results = uvloop.run(run_doctor())
+    print(format_results(results))
+    return exit_code(results)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,7 +36,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-    print(f"arb: command '{args.command}' is not implemented yet", file=sys.stderr)
+    if args.command == "doctor":
+        return _run_doctor()
+    print(f"arb: command {args.command!r} is not implemented yet", file=sys.stderr)
     return 1
 
 
