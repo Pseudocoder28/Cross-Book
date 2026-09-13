@@ -21,12 +21,12 @@
 - Package skeleton: `src/arb/` with `metrics.py` placeholder, `venues/{kalshi,polymarket_us}/`, and a minimal `cli.py` (`arb` prints "not implemented yet").
 - Test scaffolding: `tests/` with `fixtures/{kalshi,polymarket_us}/`.
 - Kalshi API facts verified against docs.kalshi.com and recorded in `docs/venue-notes.md` (hosts, RSA-PSS auth, WS channels, orderbook snapshot/delta format, fixed-point dollar-string prices, rate limits, discovery endpoints).
+- Polymarket US API facts verified against docs.polymarket.us and recorded in `docs/venue-notes.md` (gateway REST is public; markets WS needs Ed25519 API-key auth on handshake; full-book WS messages with no seq numbers; whole contracts; limit/offset pagination; fee formula Θ·C·p·(1−p)).
 
 ## What's next
 
 Day 1 (data, read-only):
 
-- Verify Polymarket US API facts against docs.polymarket.us and record them in `docs/venue-notes.md` (in progress).
 - WebSocket client with reconnect/backoff/jitter, heartbeat, stall detection, resubscribe and gap-triggered resnapshot; supervised tasks.
 - Raw-message recorder (enqueue before parse) and Postgres storage (SQLAlchemy 2.0 async + Alembic).
 - Venue adapters under `src/arb/venues/`, parser tests against real captured fixtures.
@@ -36,6 +36,6 @@ Day 1 (data, read-only):
 
 ## Open questions
 
-- Credentials not yet provisioned. Kalshi requires an authenticated WebSocket even for public market data, so a Kalshi API key (Key ID + RSA PEM) blocks all Kalshi streaming — demo or production, user's choice. Polymarket US requirements unknown until its docs are verified.
+- Credentials not yet provisioned, and **both venues require authenticated WebSockets even for public market data**. Kalshi: Key ID + RSA PEM (demo or production, user's choice). Polymarket US: Key ID + Ed25519 secret from polymarket.us/developer (app signup + KYC; no sandbox). Until then, Polymarket books can be polled over unauthenticated gateway REST at 20 req/s/IP; Kalshi has no unauthenticated fallback.
 - Kalshi: WS gap-recovery procedure unspecified in docs (we chose resubscribe + fresh snapshot); exact WS field names to confirm against asyncapi.yaml; whether `GET /markets`/`GET /events` need auth; market categorization source; fractional contract counts vs integer-quantity assumption.
-- Polymarket US: everything — auth, endpoints, WS format — still to be read from docs.polymarket.us.
+- Polymarket US: WS wire format is contradictory in the docs (snake_case + numeric enums vs camelCase + string enums) — settle from captured payloads; no seq numbers on the markets WS, so validity rests on staleness + `transactTime` + periodic REST reconciliation; REST book depth and heartbeat cadence undocumented; rules-text field unclear (`description` vs `rulesDisclaimer`).

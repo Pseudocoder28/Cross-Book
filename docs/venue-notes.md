@@ -128,11 +128,148 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
 Scope: **only** docs.polymarket.us. The international Polymarket
 (polymarket.com, its CLOB and Gamma APIs) is out of scope.
 
-_Nothing verified yet._
+_Verified 2026-09-13 against docs.polymarket.us. We use the retail API; the
+"Trader Guide" institutional surface (polymarketexchange.com, gRPC/FIX,
+Auth0) is separate credentialing and out of scope for now._
 
-- Docs: https://docs.polymarket.us
-- Auth scheme:
-- REST base URL:
-- WebSocket URL:
-- Order book message format (one YES instrument; buying NO is selling YES):
-- Sequencing / snapshot semantics:
+### Hosts (retail API)
+
+- Public REST (market data, **no auth**): `https://gateway.polymarket.us`
+  — https://docs.polymarket.us/api-reference/introduction
+- Authenticated REST (trading/portfolio): `https://api.polymarket.us`
+  — same source.
+- WebSocket market data: `wss://api.polymarket.us/v1/ws/markets`
+  (books + trades); private: `wss://api.polymarket.us/v1/ws/private`.
+  — https://docs.polymarket.us/api-reference/websocket/overview
+- No sandbox/demo documented for the retail API.
+
+### Auth
+
+- API key pair: Key ID + Secret Key, created at polymarket.us/developer
+  (app signup + KYC; secret shown once).
+  — https://docs.polymarket.us/api-reference/authentication
+- Headers: `X-PM-Access-Key`, `X-PM-Timestamp` (ms, within 30 s of server
+  time), `X-PM-Signature` (base64).
+- Signing: **Ed25519** (not RSA). String to sign =
+  `timestamp + HTTP_METHOD + path`, e.g.
+  `1234567890GET/v1/portfolio/positions`. Secret is base64-decoded, message
+  signed, signature base64-encoded.
+  — https://docs.polymarket.us/api-reference/authentication
+- Public REST market data needs **no** auth (`security: []` on gateway
+  endpoints). But the **market-data WebSocket requires API-key auth on the
+  connection handshake** (same `X-PM-*` headers; string to sign
+  `timestamp + "GET" + "/v1/ws/markets"`). So live streaming needs
+  credentials on both venues; unauthenticated REST polling (20 req/s/IP) is
+  the fallback.
+  — https://docs.polymarket.us/api-reference/websocket/markets
+
+### Market structure
+
+- Hierarchy: Series → Events → Markets. **One instrument per market** (the
+  YES outcome); "to take the NO side, you short the instrument" — buying NO
+  is selling YES. Confirms our book model. Settles at $1.00 / $0.00.
+  — https://docs.polymarket.us/concepts/events-and-markets
+  — https://docs.polymarket.us/learn/trading/basics/buying-yes-vs-selling-no
+- `slug` is the identifier used everywhere (orders, books, WS subscribe);
+  also `id` and event-level `ticker`.
+- Market object (gateway `GET /v1/markets`): `question`, `slug`,
+  `description`, `category`, `active`/`closed`/`archived`/`hidden` booleans,
+  `startDate`/`endDate`/`gameStartTime`, `orderPriceMinTickSize`,
+  `minimumTradeQty`, `feeCoefficient`, `bestBidQuote`/`bestAskQuote`
+  (Amount objects), volumes, `marketSides`, `tags`.
+  — https://docs.polymarket.us/api-reference/markets/get-markets
+- No dedicated rules-text field documented; candidates are `description`
+  and `rulesDisclaimer`. Open question.
+- Live trading state comes from the book's `state` enum
+  (`MARKET_STATE_PREOPEN|OPEN|SUSPENDED|HALTED|EXPIRED|TERMINATED|
+  MATCH_AND_CLOSE_AUCTION`).
+  — https://docs.polymarket.us/api-reference/markets/get-market-book
+
+### Order book data
+
+- REST snapshot (public): `GET /v1/markets/{slug}/book` →
+  `marketData { marketSlug, bids[], offers[], state, stats, transactTime }`;
+  each level `{ "px": { "value": "0.55", "currency": "USD" }, "qty": "..." }`.
+  Depth of response: undocumented.
+  — https://docs.polymarket.us/api-reference/markets/get-market-book
+- BBO (public): `GET /v1/markets/{slug}/bbo`.
+  — https://docs.polymarket.us/api-reference/markets/get-market-bbo
+- WS subscribe: `{"subscribe": {"requestId": ..., "subscriptionType":
+  "SUBSCRIPTION_TYPE_MARKET_DATA", "marketSlugs": [...]}}`, optional
+  `responsesDebounced`; max 100 markets per subscription. Types:
+  `MARKET_DATA` (full book + stats), `MARKET_DATA_LITE`, `TRADE`.
+  Heartbeat message `{"heartbeat": {}}` exists; cadence undocumented.
+  — https://docs.polymarket.us/api-reference/websocket/markets
+- **No sequence numbers and no documented snapshot-then-delta protocol.**
+  MARKET_DATA messages carry full `bids[]`/`offers[]` arrays plus
+  `transactTime` — apparently a full book per message, though the docs never
+  state that explicitly. Book validity must lean on `transactTime` /
+  staleness plus periodic REST snapshot reconciliation, not seq gaps.
+- **Wire-format conflict in the docs**: the WS overview page shows
+  snake_case fields with numeric enums (`"subscription_type": 1`); the
+  markets page shows camelCase with string enums. Real captured payloads
+  decide; parser is written against fixtures.
+  — https://docs.polymarket.us/api-reference/websocket/overview vs
+  https://docs.polymarket.us/api-reference/websocket/markets
+
+### Price and quantity encoding
+
+- Prices are Amount objects with decimal **dollar strings**
+  (`{"value": "0.55", "currency": "USD"}`), $0–$1 range; fee formula domain
+  implies tradable prices $0.01–$0.99. Maps exactly onto our $0.0001 ticks.
+- Tick size is **per-market** (`orderPriceMinTickSize`); no global tick
+  documented.
+- Quantities: "Polymarket US only supports whole contracts" — integer
+  contracts, confirming our assumption. `qty` values arrive as strings.
+  — https://docs.polymarket.us/learn/faq/whole-contracts
+
+### Trades and history
+
+- WS `SUBSCRIPTION_TYPE_TRADE`: `marketSlug`, `price`, `quantity`,
+  `tradeTime`, `maker`/`taker` (side, intent). No public REST trades
+  endpoint on the gateway; public tape is daily CSVs at
+  polymarketexchange.com/time-and-sales.html.
+  — https://docs.polymarket.us/faqs/execution-tape
+- Price history (public): `GET /v1/price-history?symbol=<slug>` with
+  `fidelity` (minutes) and interval/timestamp params; returns
+  `{timestamp, longPrice, shortPrice}`.
+  — https://docs.polymarket.us/api-reference/price-history/get-price-history
+
+### Market discovery
+
+- `GET /v1/markets` and `GET /v1/events` on the gateway, no auth.
+  Pagination is **`limit` + `offset`** (not cursor); documented max page
+  size: not found. Rich filters (`active`, `closed`, `categories[]`,
+  `sportsMarketTypes[]`, date ranges, `tagIds[]`, ...).
+  — https://docs.polymarket.us/api-reference/markets/get-markets
+  — https://docs.polymarket.us/api-reference/events/get-events
+- Settlement: `GET /v1/markets/{slug}/settlement` → `{slug, settlement}`
+  (404 until settled).
+
+### Rate limits
+
+- Authenticated: 20 req/s per API key. Public gateway: 20 req/s per IP.
+  429 with JSON body on limit; docs recommend exponential backoff from 1 s.
+  WS: only documented cap is 100 markets per subscription.
+  — https://docs.polymarket.us/api-reference/rate-limits
+
+### Fees (for the arb math)
+
+- `Fee = Θ × C × p × (1 − p)`, p in dollars ($0.01–$0.99), C contracts.
+  Taker Θ = 0.06; maker Θ = −0.0125 (rebate, applied on fill). Volume tiers
+  add 10%/25%/50% extra maker rebate at ≥$250K/$1M/$10M monthly. Banker's
+  rounding to the cent per fill, capped at the rounded cumulative exact fee.
+  Effective 2026-07-01. Markets carry per-market `feeCoefficient`.
+  — https://docs.polymarket.us/fees
+
+### Open items
+
+- WS wire format (casing + enum encoding) must be settled from captured
+  payloads before the parser is written.
+- No seq numbers on the markets WS → validity via staleness +
+  `transactTime` + periodic REST reconciliation.
+- REST book depth, WS heartbeat cadence and stall behavior: measure
+  empirically during day-1 recording.
+- Which field carries full rules text (`description` vs `rulesDisclaimer`).
+- Whether `qty`/"shares" strings can ever be fractional despite
+  whole-contract trading (validate on capture).
