@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M3 — config, storage, recorder, compose stack.**
+**M4 — REST adapters with real captured fixtures.**
 
 ## What works
+
+- Quantities generalized to fixed-point `Qty` (0.0001-contract units) after live Kalshi books showed fractional counts (`"15.17"`).
+- `src/arb/venues/kalshi/rest.py`: `parse_markets_response` (cursor pagination) and `parse_orderbook_response` — NO bids folded into YES asks by complement at the edge.
+- `src/arb/venues/polymarket_us/rest.py`: `parse_markets_response` (Decimal-exact tick size / fee coefficient) and `parse_book_response`.
+- Real fixtures captured live 2026-09-13 into `tests/fixtures/{kalshi,polymarket_us}/` (markets pages + liquid order books); parser tests pin exact normalized values and apply snapshots into `Book` cleanly.
+- Empirical findings recorded in venue-notes: Kalshi REST market data is public in practice (docs conflict noted), `/markets` listing is flooded with zero-volume multivariate shards (discover via `/events`), Polymarket market objects carry undocumented fields.
+
+### From M3
 
 - `src/arb/config.py`: `AppConfig` (pydantic-settings, `.env`) with doc-verified endpoint defaults; secrets only as file paths.
 - `src/arb/storage/`: SQLAlchemy 2.0 async `raw_messages` model + Alembic (async env, URL from `AppConfig`); migration `0001` renders correct Postgres DDL (BIGSERIAL, BYTEA, timestamptz, unique `(run_id, ingest_seq)`).
@@ -44,9 +52,9 @@
 
 Day 1 (data, read-only):
 
-- Venue adapters under `src/arb/venues/`, parser tests against real captured fixtures. Polymarket US REST fixtures can be captured now (public gateway); Kalshi and both WS feeds need credentials first.
-- `arb record` CLI wiring sources → recorder → Postgres.
-- Pair matcher for equivalent markets.
+- WS adapters for both venues — blocked on credentials (both venues authenticate the WS handshake even for market data). REST polling sources can proceed without.
+- `arb record` CLI wiring sources → recorder → Postgres (REST polling first).
+- Pair matcher for equivalent markets (Kalshi discovery via `/events`).
 - `uv run arb doctor`.
 
 ## Open questions

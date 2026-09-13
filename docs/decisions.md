@@ -2,6 +2,28 @@
 
 Design choices and why. Newest first.
 
+## M4 — REST adapters and real fixtures
+
+- **Quantities are integer units of 0.0001 contracts (`Qty`), not integer
+  contracts.** CLAUDE.md assumed integer contracts "unless a venue's docs
+  prove otherwise" — the live Kalshi book proved otherwise (counts like
+  `"15.17"`; see venue-notes). Same fixed-point discipline as prices: exact
+  parse or loud failure, no floats.
+- **`market_id` is venue-qualified: `kalshi:<ticker>` /
+  `polymarket_us:<slug>`.** Native identifiers stay untouched for API calls;
+  the qualified form is globally unique across the book map and storage.
+- **Polymarket JSON numbers are parsed as `Decimal`** (`parse_float=Decimal`)
+  so `orderPriceMinTickSize` and `feeCoefficient` stay exact for the fee
+  engine. Kalshi encodes everything as strings already.
+- **Fixtures are live captures, committed.** Both venues' market-data REST
+  answered unauthenticated (Kalshi's docs claim auth on the orderbook — the
+  conflict is recorded in venue-notes; the client will sign anyway once
+  credentials exist). WS parsers wait for captured WS payloads — they need
+  credentials on both venues.
+- **Parsers normalize at the edge**: Kalshi NO bids become YES asks by
+  complement inside the adapter, so a `BookSnapshot` is venue-agnostic the
+  moment it leaves venue code.
+
 ## M3 — config, storage, recorder, compose stack
 
 - **Recorder never blocks the ingest path.** `enqueue` is non-blocking; on a

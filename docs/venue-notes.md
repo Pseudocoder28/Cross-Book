@@ -70,9 +70,11 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
   — https://docs.kalshi.com/getting_started/orderbook_responses.md
   — https://docs.kalshi.com/changelog/index.md
 - Four-decimal dollar strings map exactly onto our $0.0001 integer ticks
-  (`"0.4200"` → 4200). Contract counts are fixed-point strings — whether
-  fractional contracts actually occur must be confirmed from captured data
-  before we hard-code integer quantities for Kalshi.
+  (`"0.4200"` → 4200). **Fractional contract counts are real**: the live
+  KXWC-30-POR book (captured 2026-09-13, in
+  `tests/fixtures/kalshi/rest_orderbook_kxwc-30-por.json`) contains counts
+  like `"4903190.79"` and `"15.17"`. Quantities therefore use integer
+  fixed-point units of 0.0001 contracts (`Qty`), not integer contracts.
 - REST orderbook response wraps arrays under top-level `orderbook_fp` with
   `yes_dollars` / `no_dollars`; WS snapshot names them `yes_dollars_fp` /
   `no_dollars_fp`. Same data, different field names — parsers must not share a
@@ -112,16 +114,30 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
   — https://docs.kalshi.com/api-reference/milestone/get-milestones.md
   — https://docs.kalshi.com/api-reference/structured-targets/get-structured-targets.md
 
+### Observed live behavior (2026-09-13, production API, unauthenticated)
+
+- `GET /markets`, `GET /events` and `GET /markets/{ticker}/orderbook` all
+  returned **200 without auth headers**. The docs say the orderbook endpoint
+  requires auth — conflict noted; per project rules the docs win for client
+  design (we sign requests once credentials exist), but unauthenticated
+  capture works today and produced our fixtures.
+- The default `GET /markets?status=open` listing is dominated by
+  `KXMVECROSSCATEGORY-SHARD*` multivariate combo markets with zero volume.
+  Discovery should go through `GET /events` (which excludes multivariate
+  events by design) rather than raw `/markets`.
+- Real payloads match the documented field names (`orderbook_fp` with
+  `yes_dollars`/`no_dollars` arrays of `[price, count]` strings; market
+  objects with `ticker`, `event_ticker`, `rules_primary`, `yes_sub_title`,
+  `volume_24h_fp`, status `active`, type `binary`).
+
 ### Open items
 
 - WS gap recovery is unspecified in docs — our resubscribe+snapshot policy is
   self-imposed.
 - Exact WS array field names to be confirmed against
-  https://docs.kalshi.com/asyncapi.yaml before coding the parser.
-- Whether `GET /markets` / `GET /events` require auth was not explicitly
-  stated; `GET /markets/{ticker}/orderbook` explicitly does.
+  https://docs.kalshi.com/asyncapi.yaml before coding the parser (WS needs
+  credentials, unlike REST in practice).
 - Reliable market categorization (event `category` is deprecated).
-- Fractional contract counts (`*_fp`) vs our integer-quantity assumption.
 
 ## Polymarket US
 
@@ -261,6 +277,20 @@ Auth0) is separate credentialing and out of scope for now._
   rounding to the cent per fill, capped at the rounded cumulative exact fee.
   Effective 2026-07-01. Markets carry per-market `feeCoefficient`.
   — https://docs.polymarket.us/fees
+
+### Observed live behavior (2026-09-13, public gateway, unauthenticated)
+
+- `GET /v1/markets` and `GET /v1/markets/{slug}/book` returned 200 with no
+  auth, as documented. Captured payloads are the fixtures in
+  `tests/fixtures/polymarket_us/`.
+- Real market objects carry fields beyond the documented list: a `status`
+  string enum (`"MARKET_STATUS_OPEN"`), `outcomePrices` / `outcomes` as
+  JSON-encoded *strings*, `sportsMarketTypeV2`, `manualActivation`,
+  `ep3Status`. `feeCoefficient` arrived as `0.06`, `orderPriceMinTickSize`
+  as `0.001` (JSON numbers — we parse them as Decimal).
+- Book `qty` strings are four-decimal (`"45.0000"`, `"13002.0000"`) — whole
+  numbers in the captured book, consistent with whole-contract trading, but
+  parsed as fixed-point 0.0001-contract units anyway.
 
 ### Open items
 

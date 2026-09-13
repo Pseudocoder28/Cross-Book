@@ -1,9 +1,11 @@
 """Venue-agnostic core types.
 
 Prices are integer ticks of $0.0001 (``Ticks``): 1¢ is 100 and $0.555 is 5550.
-No floats for prices or fees in book state or storage; floats are fine for
-analytics. Quantities are integer contracts unless a venue's docs prove
-otherwise.
+Quantities are integer units of 0.0001 contracts (``Qty``): live Kalshi books
+contain fractional contract counts (e.g. ``"15.17"``), so plain integer
+contracts don't survive contact with real data — see docs/venue-notes.md.
+No floats for prices, quantities or fees in book state or storage; floats are
+fine for analytics.
 """
 
 from __future__ import annotations
@@ -12,8 +14,10 @@ import enum
 from dataclasses import dataclass
 
 type Ticks = int
+type Qty = int
 
 TICKS_PER_DOLLAR: int = 10_000
+QTY_PER_CONTRACT: int = 10_000
 
 _ASCII_DIGITS = frozenset("0123456789")
 
@@ -31,33 +35,50 @@ def complement(price: Ticks) -> Ticks:
     return TICKS_PER_DOLLAR - price
 
 
-def ticks_from_dollars(text: str) -> Ticks:
-    """Parse a decimal dollar string (``"0.4200"``, ``"1"``, ``".5"``) to exact ticks.
+def _fixed_point_from_str(text: str, *, scale: int) -> int:
+    """Parse a non-negative decimal string to an int in ``10**-scale`` units.
 
     Rejects signs, exponents, whitespace, non-ASCII digits and anything finer
-    than $0.0001 — venue payloads must land exactly on a tick or fail loudly.
+    than the scale — venue payloads must land exactly on a unit or fail loudly.
     """
-    whole, sep, frac = text.partition(".")
+    whole, _, frac = text.partition(".")
     if not whole and not frac:
-        raise ValueError(f"not a decimal dollar amount: {text!r}")
+        raise ValueError(f"not a decimal amount: {text!r}")
     if whole and not _ASCII_DIGITS.issuperset(whole):
-        raise ValueError(f"not a decimal dollar amount: {text!r}")
+        raise ValueError(f"not a decimal amount: {text!r}")
     if frac and not _ASCII_DIGITS.issuperset(frac):
-        raise ValueError(f"not a decimal dollar amount: {text!r}")
-    if sep and not frac and not whole:
-        raise ValueError(f"not a decimal dollar amount: {text!r}")
-    if len(frac) > 4:
-        raise ValueError(f"finer than one $0.0001 tick: {text!r}")
-    frac_ticks = int(frac.ljust(4, "0")) if frac else 0
-    return int(whole or "0") * TICKS_PER_DOLLAR + frac_ticks
+        raise ValueError(f"not a decimal amount: {text!r}")
+    if len(frac) > scale:
+        raise ValueError(f"finer than 1e-{scale}: {text!r}")
+    frac_units = int(frac.ljust(scale, "0")) if frac else 0
+    return int(whole or "0") * 10**scale + frac_units
+
+
+def _fixed_point_to_str(units: int, *, scale: int) -> str:
+    if units < 0:
+        raise ValueError(f"negative amount: {units}")
+    whole, frac = divmod(units, 10**scale)
+    return f"{whole}.{frac:0{scale}d}"
+
+
+def ticks_from_dollars(text: str) -> Ticks:
+    """Parse a decimal dollar string (``"0.4200"``, ``"1"``, ``".5"``) to exact ticks."""
+    return _fixed_point_from_str(text, scale=4)
 
 
 def dollars_from_ticks(ticks: Ticks) -> str:
     """Format ticks as a four-decimal dollar string (``4200`` → ``"0.4200"``)."""
-    if ticks < 0:
-        raise ValueError(f"negative ticks: {ticks}")
-    whole, frac = divmod(ticks, TICKS_PER_DOLLAR)
-    return f"{whole}.{frac:04d}"
+    return _fixed_point_to_str(ticks, scale=4)
+
+
+def qty_from_contracts(text: str) -> Qty:
+    """Parse a decimal contract count (``"15.17"``, ``"45.0000"``) to exact Qty units."""
+    return _fixed_point_from_str(text, scale=4)
+
+
+def contracts_from_qty(qty: Qty) -> str:
+    """Format Qty units as a four-decimal contract count (``151700`` → ``"15.1700"``)."""
+    return _fixed_point_to_str(qty, scale=4)
 
 
 class BookSide(enum.Enum):
