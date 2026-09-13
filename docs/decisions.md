@@ -2,6 +2,32 @@
 
 Design choices and why. Newest first.
 
+## M2 — reliability layer (run identity, backoff, supervision, WS client)
+
+- **The connector owns URL and auth; the WS client owns reliability.** Both
+  venues sign a timestamp into the WebSocket handshake, so headers must be
+  recomputed on every attempt — hence a `connector()` factory called per
+  connect, with `headers_factory` in the default websockets-based connector.
+  Venue code composes a connector + `on_connected` (resubscribe) callback;
+  the shared client does reconnect, backoff+jitter, stall detection and
+  envelope stamping.
+- **Stall detection = no inbound frame within `stall_timeout_s`.**
+  Protocol-level ping/pong (websockets' built-in) is the heartbeat;
+  the recv timeout catches half-open connections where pings survive but
+  data stops. The timeout must sit above the venue's heartbeat cadence
+  (Polymarket US cadence is undocumented — measure, then configure).
+- **Backoff resets only after a connection proves healthy**
+  (`healthy_after_s` uptime), not on mere connect success — a flapping
+  endpoint that accepts connections and immediately drops them still gets
+  slowed down. Jitter multiplies the delay by a random factor in
+  `[1 - jitter_frac, 1]`.
+- **`supervise()` never swallows cancellation.** Everything else is logged,
+  counted (`arb_supervisor_restarts_total`) and restarted; a clean return of
+  a long-running task is treated as a failure and restarted too.
+- **`ingest_seq` is allocated per run across all sources** (one
+  `RunContext`), so the recorder's stream is totally ordered even when both
+  venues are live; `run_id` is a sortable UTC timestamp + random suffix.
+
 ## M1 — shared core (types, Book, interfaces)
 
 - **`Book` is a pure data structure.** No I/O, no clocks (callers pass

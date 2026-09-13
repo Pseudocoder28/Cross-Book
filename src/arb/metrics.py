@@ -21,3 +21,28 @@ PARSE_ERRORS = Counter(
     "Malformed venue payloads rejected by adapters",
     labelnames=["venue", "stream"],
 )
+
+WS_CONNECTS = Counter(
+    "arb_ws_connects_total",
+    "Successful WebSocket connections (including reconnects)",
+    labelnames=["venue", "stream"],
+)
+
+WS_CONNECT_FAILURES = Counter(
+    "arb_ws_connect_failures_total",
+    "WebSocket connection attempts that failed before establishment",
+    labelnames=["venue", "stream"],
+)
+
+# reason is "stall" or the exception class name that dropped the connection.
+WS_DISCONNECTS = Counter(
+    "arb_ws_disconnects_total",
+    "WebSocket disconnects after establishment, by reason",
+    labelnames=["venue", "stream", "reason"],
+)
+
+SUPERVISOR_RESTARTS = Counter(
+    "arb_supervisor_restarts_total",
+    "Supervised task restarts (crash or unexpected exit)",
+    labelnames=["task"],
+)

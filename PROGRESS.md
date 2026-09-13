@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M1 — shared core (types, Book, interfaces).**
+**M2 — reliability layer (run identity, backoff, supervision, WS client).**
 
 ## What works
+
+- `src/arb/run.py`: `RunContext` — `run_id` (sortable UTC stamp + suffix) and the per-run cross-source `ingest_seq`.
+- `src/arb/supervise.py`: `Backoff` (exponential, jittered, resettable) and `supervise()` — restarts long-running tasks with backoff, never swallows cancellation.
+- `src/arb/ws.py`: `ReconnectingWebSocket` (an `EventSource`) — per-attempt connector (fresh signed headers every attempt), resubscribe callback on every connect, stall detection via recv timeout, protocol ping/pong heartbeat in the default `websockets` connector, `RawMessage` stamping.
+- New metrics: `arb_ws_connects_total`, `arb_ws_connect_failures_total`, `arb_ws_disconnects_total{reason}`, `arb_supervisor_restarts_total`.
+- 64 tests; ruff and pyright clean.
+
+### From M1
 
 - `src/arb/types.py`: `Ticks` ($0.0001 units), exact dollar-string ↔ ticks conversion, price bounds, complement, `BookSide`, `RawMessage` envelope (`recv_ts_ns`, `recv_mono_ns`, `run_id`, `ingest_seq`).
 - `src/arb/book.py`: normalized `Book` — YES bid/ask ladders best-first, complement-derived NO views, snapshot + SET/DELTA level updates, sequence-gap/crossed/bad-level/staleness validity rules, sticky structural invalidation with `needs_resync`.
@@ -27,7 +35,6 @@
 
 Day 1 (data, read-only):
 
-- WebSocket client with reconnect/backoff/jitter, heartbeat, stall detection, resubscribe and gap-triggered resnapshot; supervised tasks.
 - Raw-message recorder (enqueue before parse) and Postgres storage (SQLAlchemy 2.0 async + Alembic).
 - Venue adapters under `src/arb/venues/`, parser tests against real captured fixtures.
 - Pair matcher for equivalent markets.
