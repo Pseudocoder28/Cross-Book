@@ -64,7 +64,9 @@ class PolymarketUSMarket(BaseModel):
     start_date: datetime | None = Field(default=None, alias="startDate")
     end_date: datetime | None = Field(default=None, alias="endDate")
     game_start_time: datetime | None = Field(default=None, alias="gameStartTime")
-    minimum_trade_qty: int | None = Field(default=None, alias="minimumTradeQty")
+    # Docs say whole contracts only; live listings carry 0.01 for some
+    # markets (venue-notes), so this is a Decimal, not an int.
+    minimum_trade_qty: Decimal | None = Field(default=None, alias="minimumTradeQty")
     order_price_min_tick_size: Decimal | None = Field(default=None, alias="orderPriceMinTickSize")
     fee_coefficient: Decimal | None = Field(default=None, alias="feeCoefficient")
     best_bid_quote: Amount | None = Field(default=None, alias="bestBidQuote")

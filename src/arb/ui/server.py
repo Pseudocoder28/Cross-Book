@@ -47,6 +47,7 @@ from arb.books import BookManager, level_deltas
 from arb.config import AppConfig
 from arb.interfaces import ParseError, ResyncRequired
 from arb.metrics import PARSE_ERRORS, UI_WS_CLIENTS, UI_WS_CLIENTS_DROPPED
+from arb.pairs import store as pairs_store
 from arb.recorder import Recorder
 from arb.run import RunContext
 from arb.storage.db import insert_raw_messages, make_engine
@@ -83,6 +84,7 @@ LATENCY_WINDOW = 512
 SEND_QUEUE_MAX = 1024
 # DES metadata is re-fetched from the venue at most this often per market.
 DETAIL_TTL_MS = 30_000
+PAIR_STATUSES = ("proposed", "confirmed", "rejected")
 
 # (ticker, cached event or None) -> fresh (market, event)
 type DetailRefreshFn = Callable[
@@ -125,6 +127,12 @@ class UIState(Protocol):
     async def market_detail(self, market_id: str) -> dict[str, Any] | None:
         """DES payload for one market, or None if the market is unknown."""
         ...
+
+    async def list_pairs(self, status: str | None) -> list[dict[str, Any]]: ...
+
+    async def decide_pair(self, pair_id: int, status: str) -> dict[str, Any] | None: ...
+
+    async def decide_pairs(self, pair_ids: list[int], status: str) -> int: ...
 
     def add_client(self, ws: WebSocket) -> asyncio.Queue[str]:
         """Register a client; returns its bounded outbound frame queue."""
@@ -177,6 +185,37 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
                 {"error": "unknown market", "market_id": market_id}, status_code=404
             )
         return JSONResponse(detail)
+
+    @app.get("/api/pairs")
+    async def api_pairs(status: str | None = None) -> Response:
+        if status is not None and status not in PAIR_STATUSES:
+            return JSONResponse({"error": "invalid status"}, status_code=400)
+        return JSONResponse({"pairs": await state.list_pairs(status)})
+
+    @app.post("/api/pairs/decide")
+    async def api_pairs_decide_many(body: dict[str, Any]) -> Response:
+        status = body.get("status")
+        ids = body.get("ids")
+        if status not in PAIR_STATUSES or not isinstance(ids, list) or not ids:
+            return JSONResponse({"error": "need ids[] and a valid status"}, status_code=400)
+        try:
+            pair_ids = [int(i) for i in ids]
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "ids must be integers"}, status_code=400)
+        updated = await state.decide_pairs(pair_ids, str(status))
+        return JSONResponse({"updated": updated, "status": status})
+
+    @app.post("/api/pairs/{pair_id}/decide")
+    async def api_pair_decide(pair_id: int, body: dict[str, Any]) -> Response:
+        status = body.get("status")
+        if status not in PAIR_STATUSES:
+            return JSONResponse(
+                {"error": "status must be one of " + ", ".join(PAIR_STATUSES)}, status_code=400
+            )
+        row = await state.decide_pair(pair_id, str(status))
+        if row is None:
+            return JSONResponse({"error": "unknown pair", "id": pair_id}, status_code=404)
+        return JSONResponse(row)
 
     @app.get("/metrics")
     async def metrics() -> Response:
@@ -250,6 +289,7 @@ class ServerState:
         self.pm_adapter: PolymarketUSMarketDataAdapter | None = None
         self._pm_last_frame_mono_ns: int | None = None
         self._pm_detail_meta: dict[str, tuple[PolymarketUSMarket, PolymarketUSEvent | None]] = {}
+        self._pairs_engine: AsyncEngine | None = None
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
         self._dirty: set[str] = set()
@@ -304,6 +344,30 @@ class ServerState:
 
     def add_markets(self, markets: list[dict[str, Any]]) -> None:
         self._markets = [*self._markets, *markets]
+
+    # -- pairs ----------------------------------------------------------------
+
+    def set_pairs_engine(self, engine: AsyncEngine | None) -> None:
+        self._pairs_engine = engine
+
+    async def list_pairs(self, status: str | None) -> list[dict[str, Any]]:
+        if self._pairs_engine is None:
+            return []
+        try:
+            return await pairs_store.list_pairs(self._pairs_engine, status=status)
+        except Exception:
+            log.warning("pairs query failed", exc_info=True)
+            return []
+
+    async def decide_pair(self, pair_id: int, status: str) -> dict[str, Any] | None:
+        if self._pairs_engine is None:
+            return None
+        return await pairs_store.decide(self._pairs_engine, pair_id, status)
+
+    async def decide_pairs(self, pair_ids: list[int], status: str) -> int:
+        if self._pairs_engine is None:
+            return 0
+        return await pairs_store.decide_many(self._pairs_engine, pair_ids, status)
 
     def seed_detail_pm(self, market: PolymarketUSMarket, event: PolymarketUSEvent | None) -> None:
         mid = pm_market_id(market.slug)
@@ -549,6 +613,7 @@ async def run_ui(
         books=books,
         database_status_fn=partial(fetch_database_status, engine),
     )
+    state.set_pairs_engine(engine)
 
     recorder: Recorder | None = None
     writer: asyncio.Task[object] | None = None

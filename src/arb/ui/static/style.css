@@ -512,6 +512,35 @@ body.has-sel #depth { border-left-color: var(--amber); }
 body.des-open #monitor, body.des-open #depth, body.des-open #tape-col,
 body.des-open #system, body.des-open #poly { visibility: hidden; }
 
+/* ---------- PAIRS: cross-venue pair review ---------- */
+
+.pairs-body { grid-template-columns: minmax(0, 1fr) 460px; }
+.pairs-left { padding: 0; display: flex; flex-direction: column; }
+.pair-cols, .pair-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) minmax(0, 1fr) 84px;
+  gap: 10px; padding: 0 12px; align-items: center;
+}
+.pair-cols {
+  flex: none; height: 16px; line-height: 16px;
+  color: var(--ink2); font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  background: var(--raised);
+}
+.pair-rows { flex: 1; min-height: 0; overflow-y: auto; }
+.pair-row { height: 32px; cursor: pointer; border-bottom: 1px solid var(--hair); }
+.pair-row .pr-score { text-align: right; font-weight: 700; }
+.pair-row .pr-leg { display: flex; flex-direction: column; min-width: 0; line-height: 15px; }
+.pair-row .pr-leg .pr-id { color: var(--ink2); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pair-row .pr-leg .pr-out { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pair-row .pr-status { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; color: var(--ink2); }
+.pair-row .pr-status.st-confirmed { color: var(--bid); }
+.pair-row .pr-status.st-rejected { color: var(--ask); }
+.pair-row.sel { background: var(--raised); box-shadow: inset 2px 0 0 var(--amber); }
+.pair-row.sel .pr-out { color: var(--amber); }
+.pair-event { font-size: 13px; line-height: 18px; }
+.pair-rules { max-height: 120px; overflow-y: auto; font-size: 11px; line-height: 16px; }
+.pairs-right .sys-title:first-child { margin-top: 0; }
+
 /* ---------- select-to-copy toast ---------- */
 
 .copy-toast {

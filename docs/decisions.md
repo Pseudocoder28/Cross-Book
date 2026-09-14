@@ -34,6 +34,30 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M13 — pair matcher with human review
+
+- **The matcher proposes; a human confirms.** Equivalence lives in the
+  resolution rules, which no lexical score can judge (Kalshi's presidential
+  market resolves on who is *inaugurated*; another venue's may resolve on
+  who *wins*). Proposals carry both rules texts and the scoring features so
+  the reviewer sees exactly what the matcher saw; only confirmed pairs feed
+  the arb engine.
+- **Two-stage, explainable, deterministic scoring.** Events pair on
+  IDF-weighted title similarity plus *outcome overlap* (how many outcomes
+  have a name twin on the other side) — the overlap is what separates a
+  pennant race from a chess league sharing the word "champion", and the IDF
+  weighting is what stops "American League" outweighing "Silver Slugger".
+  Markets then pair one-to-one on outcome-name similarity (party suffixes,
+  accents, "Jr." stripped; containment counts so "Dodgers" ⊂ "Los Angeles
+  Dodgers"). Dates are a weak feature because Kalshi ``close_time`` trails
+  the real event by up to a year. No LLM: reproducible and free.
+- **Blocking makes it cheap.** An inverted index on informative title tokens
+  keeps 6,000 × 3,500 events to ~0.5 s. Universes are fetched with
+  documented params only and recorded before parsing like all REST.
+- **Batch review is a first-class action.** Shift+Y / Shift+N decide a whole
+  event pairing (a 30-team pennant is one judgement, not thirty). Decisions
+  are never overwritten by re-proposal: upserts refresh score/detail only.
+
 ## M12 — Polymarket US REST poller (both venues live)
 
 - **Poll the public gateway now; swap in the WebSocket later behind the

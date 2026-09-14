@@ -7,10 +7,13 @@ floats; `recv_mono_ns` is only comparable within one `run_id`.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     DateTime,
+    Float,
     Index,
     Integer,
     LargeBinary,
@@ -49,4 +52,28 @@ class RawMessageRow(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "ingest_seq", name="uq_raw_messages_run_seq"),
         Index("ix_raw_messages_venue_recv_ts_ns", "venue", "recv_ts_ns"),
+    )
+
+
+class PairRow(Base):
+    """A proposed or human-decided equivalence between one Kalshi market and
+    one Polymarket US market. ``detail`` snapshots both legs and the scoring
+    features at proposal time."""
+
+    __tablename__ = "pairs"
+
+    id: Mapped[int] = mapped_column(_BigIntPK, primary_key=True, autoincrement=True)
+    kalshi_market_id: Mapped[str] = mapped_column(Text, nullable=False)
+    polymarket_market_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="proposed")
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("kalshi_market_id", "polymarket_market_id", name="uq_pairs_legs"),
+        Index("ix_pairs_status", "status"),
     )

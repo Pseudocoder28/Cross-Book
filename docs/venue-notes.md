@@ -342,7 +342,13 @@ Auth0) is separate credentialing and out of scope for now._
   `slug`, `ticker`, `title`, `category`, `seriesSlug`, `startDate`,
   `endDate`, nested `markets` (full Market objects incl. `description`).
 - Live census: 200 open markets — 196 sports, 4 politics (House/Senate
-  midterm winners); gubernatorial markets appear on later pages.
+  midterm winners); gubernatorial markets appear on later pages. The full
+  active universe (paged at `limit=500`, which the gateway accepts) is
+  ~3,560 events / ~89,000 markets, mostly per-game sports; only ~60 events
+  have markets that are `active` and not `closed` at any moment.
+- `minimumTradeQty` is **0.01 on some markets** (e.g. futures/awards) even
+  though the docs say whole contracts only — parsed as Decimal; the sizing
+  engine must read it per market rather than assume 1.
 
 ### Observed latency (2026-09-14, from a residential connection; VM will differ)
 

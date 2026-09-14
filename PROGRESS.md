@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M12 — Polymarket US REST poller: both venues live in the terminal and the recorder.**
+**M13 — pair matcher with human review (the missing Day-1 deliverable).**
 
 ## What works
+
+- `src/arb/pairs/`: `text.py` (venue-vocabulary normalization, name similarity with containment), `matcher.py` (blocked, IDF-weighted title similarity + outcome overlap → one-to-one outcome pairing; explainable features), `store.py` (chunked upserts that never overwrite a human decision; list/decide/decide-many), `run.py` (`arb pairs propose` fetches both universes — Kalshi `/events` cursor pages, Polymarket `/v1/events` at `limit=500` — records them, proposes, persists). Alembic `0002` adds the `pairs` table.
+- Universe fetchers: `kalshi.discovery.fetch_universe` / `event_refs`, `polymarket_us.discovery.fetch_active_markets` (429-retry) / `event_refs`.
+- Review in the terminal: `PAIRS` command → list sorted by score with both legs, right-hand detail with both rules texts and match features; ↑↓ select, Y/N decide, Shift+Y/Shift+N decide the whole event pairing, U undecide, TAB cycles proposed/confirmed/rejected/all. API: `GET /api/pairs`, `POST /api/pairs/{id}/decide`, `POST /api/pairs/decide` (batch).
+- Evaluated on the live universes (6,000 Kalshi events × 3,563 Polymarket events, 88k markets): thousands of high-confidence proposals — identical-title events (NFL divisions, EPL/Serie A, Bitcoin/Musk/gas-price ladders, Supreme Court) at 1.0, MVP/Cy Young/ROTY at ~0.96, state governor/senate races at 0.95. Real data fixes along the way: Polymarket `minimumTradeQty` can be `0.01` (Decimal now), asyncpg's 32,767-parameter cap (chunked upserts).
+- 138 tests; ruff, pyright, `node --check` clean.
+
+### From M12
 
 - `src/arb/venues/polymarket_us/{discovery,source,adapter,detail}.py`: category-ranked discovery over `/v1/events` (recorded), a rate-budgeted round-robin book poller (`PolymarketUSRestSource`, an `EventSource`), an adapter emitting unsequenced snapshots + book stats, and a DES payload (tick size, fee coefficient, min qty). `level_deltas` in `books.py` diffs consecutive snapshots into tape events. Per-venue staleness in `BookManager`.
 - `arb ui`/`arb record` take `--poly-top N` / `--poly-slugs`; both venues are recorded (`rest:events`, `rest:book`). Status reports `polled`; the terminal shows K/P badges, an amber `POLY US POLLED` pill, and live poll stats in the Polymarket panel; DES works for both venues.

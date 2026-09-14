@@ -205,6 +205,48 @@
     </div>
   </section>
 
+  <section id="pairs" class="des pairs" role="dialog" aria-modal="true" aria-label="Pair review" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">PAIRS</span><span id="pairs-filter">PROPOSED</span></span>
+      <span id="pairs-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body pairs-body">
+      <div class="des-left pairs-left">
+        <div class="pair-cols" aria-hidden="true">
+          <span class="num">SCORE</span><span>KALSHI</span><span>POLYMARKET US</span><span>STATUS</span>
+        </div>
+        <div id="pair-rows" class="pair-rows" role="listbox" aria-label="Pair candidates" tabindex="0"></div>
+      </div>
+      <div class="des-right pairs-right">
+        <div id="pair-empty" class="quiet-line">NO PAIR SELECTED</div>
+        <div id="pair-detail" hidden>
+          <div class="sys-title">KALSHI</div>
+          <div id="pd-k-event" class="des-event pair-event">&#8212;</div>
+          <div id="pd-k-outcome" class="des-sub">&#8212;</div>
+          <div class="kv"><span class="k">TICKER</span><span id="pd-k-ticker" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">CLOSES</span><span id="pd-k-close" class="v">&#8212;</span></div>
+          <div class="des-section">RULES</div>
+          <div id="pd-k-rules" class="des-rules pair-rules">&#8212;</div>
+          <div class="sys-title">POLYMARKET US</div>
+          <div id="pd-p-event" class="des-event pair-event">&#8212;</div>
+          <div id="pd-p-outcome" class="des-sub">&#8212;</div>
+          <div class="kv"><span class="k">SLUG</span><span id="pd-p-ticker" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">CLOSES</span><span id="pd-p-close" class="v">&#8212;</span></div>
+          <div class="des-section">RULES</div>
+          <div id="pd-p-rules" class="des-rules pair-rules">&#8212;</div>
+          <div class="sys-title">MATCH FEATURES</div>
+          <div class="kv"><span class="k">SCORE</span><span id="pd-score" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">TITLE SIM</span><span id="pd-title" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">OUTCOME SIM</span><span id="pd-outcome" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">OUTCOME OVERLAP</span><span id="pd-overlap" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">DAYS APART</span><span id="pd-days" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">STATUS</span><span id="pd-status" class="v">&#8212;</span></div>
+        </div>
+        <div class="des-foot">&#8593;&#8595; SELECT &#183; Y / N DECIDE &#183; SHIFT+Y / SHIFT+N WHOLE EVENT &#183; U UNDECIDE &#183; TAB FILTER &#183; ESC CLOSE</div>
+      </div>
+    </div>
+  </section>
+
   <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden>
     <div class="ct-head"><span id="ct-label" class="ct-label">COPIED</span><span id="ct-count" class="ct-count"></span></div>
     <div id="ct-preview" class="ct-preview"></div>

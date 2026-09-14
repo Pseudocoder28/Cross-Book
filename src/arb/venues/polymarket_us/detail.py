@@ -72,7 +72,9 @@ def build_market_detail(
         "fee_coefficient": str(market.fee_coefficient)
         if market.fee_coefficient is not None
         else None,
-        "min_trade_qty": market.minimum_trade_qty,
+        "min_trade_qty": (
+            str(market.minimum_trade_qty) if market.minimum_trade_qty is not None else None
+        ),
         "source": source,
         "fetched_at_ms": fetched_at_ms,
     }

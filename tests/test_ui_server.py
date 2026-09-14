@@ -55,6 +55,19 @@ class StubState:
             return None
         return {"market_id": market_id, "ticker": "AAA", "source": "discovery"}
 
+    async def list_pairs(self, status: str | None) -> list[dict[str, Any]]:
+        rows = [
+            {"id": 1, "status": "proposed", "score": 0.9},
+            {"id": 2, "status": "confirmed", "score": 0.8},
+        ]
+        return [r for r in rows if status is None or r["status"] == status]
+
+    async def decide_pair(self, pair_id: int, status: str) -> dict[str, Any] | None:
+        return {"id": pair_id, "status": status, "score": 0.9} if pair_id == 1 else None
+
+    async def decide_pairs(self, pair_ids: list[int], status: str) -> int:
+        return len([i for i in pair_ids if i in (1, 2)])
+
     def add_client(self, ws: object) -> asyncio.Queue[str]:
         self.added += 1
         return asyncio.Queue()
@@ -102,6 +115,29 @@ async def test_market_detail_route(tmp_path: Path) -> None:
     assert ok.json()["ticker"] == "AAA"
     assert missing.status_code == 404
     assert missing.json()["market_id"] == "kalshi:NOPE"
+
+
+async def test_pairs_routes(tmp_path: Path) -> None:
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        all_rows = await client.get("/api/pairs")
+        confirmed = await client.get("/api/pairs?status=confirmed")
+        bad = await client.get("/api/pairs?status=nope")
+        decided = await client.post("/api/pairs/1/decide", json={"status": "rejected"})
+        missing = await client.post("/api/pairs/9/decide", json={"status": "confirmed"})
+        invalid = await client.post("/api/pairs/1/decide", json={"status": "maybe"})
+        batch = await client.post(
+            "/api/pairs/decide", json={"ids": [1, 2, 7], "status": "confirmed"}
+        )
+        batch_bad = await client.post("/api/pairs/decide", json={"ids": [], "status": "confirmed"})
+    assert batch.status_code == 200 and batch.json() == {"updated": 2, "status": "confirmed"}
+    assert batch_bad.status_code == 400
+    assert [r["id"] for r in all_rows.json()["pairs"]] == [1, 2]
+    assert [r["id"] for r in confirmed.json()["pairs"]] == [2]
+    assert bad.status_code == 400
+    assert decided.status_code == 200 and decided.json()["status"] == "rejected"
+    assert missing.status_code == 404
+    assert invalid.status_code == 400
 
 
 async def test_root_falls_back_when_assets_missing(tmp_path: Path) -> None:

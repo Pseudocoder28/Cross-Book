@@ -7,6 +7,7 @@ is flooded with zero-volume multivariate shard markets — see venue-notes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
@@ -15,11 +16,13 @@ from dataclasses import dataclass
 import httpx
 
 from arb.config import AppConfig
+from arb.pairs.matcher import EventRef, MarketRef
 from arb.run import RunContext
 from arb.types import RawMessage
 from arb.venues.kalshi.rest import (
     KalshiEvent,
     KalshiMarket,
+    market_id,
     parse_event_response,
     parse_market_response,
 )
@@ -140,6 +143,85 @@ async def fetch_liquid_markets(
                 break
     ranked = sorted(found.values(), key=lambda m: m.volume_24h, reverse=True)
     return ranked[:top_n]
+
+
+async def fetch_universe(
+    config: AppConfig,
+    run: RunContext,
+    *,
+    sink: Callable[[RawMessage], object] | None = None,
+    max_pages: int = 80,
+) -> list[tuple[KalshiEvent, list[KalshiMarket]]]:
+    """Every open (event, markets) page via ``/events?with_nested_markets``.
+
+    Multivariate combo events are excluded by the endpoint; ``KXMVE*``
+    tickers that slip through are dropped here.
+    """
+    out: list[tuple[KalshiEvent, list[KalshiMarket]]] = []
+    cursor = ""
+    async with httpx.AsyncClient(timeout=20) as client:
+        for _ in range(max_pages):
+            params: dict[str, str | int] = {
+                "limit": 200,
+                "status": "open",
+                "with_nested_markets": "true",
+            }
+            if cursor:
+                params["cursor"] = cursor
+            response = await client.get(f"{config.kalshi_api_base}/events", params=params)
+            if sink is not None:
+                sink(_stamp(run, "rest:events", response.content))
+            response.raise_for_status()
+            doc = json.loads(response.content)
+            for event_doc in doc["events"]:
+                try:
+                    event = KalshiEvent.model_validate(event_doc)
+                except ValueError:
+                    continue
+                if event.event_ticker.startswith("KXMVE"):
+                    continue
+                markets: list[KalshiMarket] = []
+                for market_doc in event_doc.get("markets") or []:
+                    try:
+                        markets.append(KalshiMarket.model_validate(market_doc))
+                    except ValueError:
+                        continue
+                out.append((event, markets))
+            cursor = doc.get("cursor") or ""
+            if not cursor:
+                break
+            await asyncio.sleep(0.15)  # ~7 req/s, far under the basic read tier
+    return out
+
+
+def event_refs(pairs: list[tuple[KalshiEvent, list[KalshiMarket]]]) -> list[EventRef]:
+    """Matcher view of Kalshi events: binary, active markets only."""
+    refs: list[EventRef] = []
+    for event, markets in pairs:
+        legs = tuple(
+            MarketRef(
+                venue="kalshi",
+                market_id=market_id(m.ticker),
+                ticker=m.ticker,
+                outcome=m.yes_sub_title or m.ticker,
+                rules=m.rules_primary,
+                close_time=m.close_time,
+            )
+            for m in markets
+            if m.market_type == "binary" and m.status == "active"
+        )
+        if legs:
+            refs.append(
+                EventRef(
+                    venue="kalshi",
+                    event_id=event.event_ticker,
+                    title=event.title,
+                    category=event.category,
+                    markets=legs,
+                    end_time=min((m.close_time for m in markets if m.close_time), default=None),
+                )
+            )
+    return refs
 
 
 async def fetch_liquid_tickers(

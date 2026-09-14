@@ -47,7 +47,7 @@ class TestParseMarkets:
         # Exact decimals — no float contamination for tick size or fees.
         assert first.order_price_min_tick_size == Decimal("0.001")
         assert first.fee_coefficient == Decimal("0.06")
-        assert first.minimum_trade_qty == 1
+        assert first.minimum_trade_qty == Decimal("1")
 
     def test_garbage_payload_raises_parse_error(self) -> None:
         with pytest.raises(ParseError):

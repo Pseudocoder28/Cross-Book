@@ -50,6 +50,7 @@
     statusAt: 0,               // Date.now() of last successful poll
     conn: "connecting",
     des: { open: false, marketId: null, detail: null, error: null, ctl: null },
+    pairs: { open: false, rows: [], idx: 0, filter: "proposed", loading: false, msg: "" },
   };
 
   const dirtyBooks = new Set();
@@ -809,6 +810,11 @@
     // "DES" opens the description of the selected market; "<TICKER> DES"
     // selects first. Bloomberg muscle memory, kept deliberately.
     let wantDes = false;
+    if (q === "PAIRS") {
+      openPairs();
+      cmdMsg("PAIRS", "ok");
+      return;
+    }
     if (q === "DES") {
       if (!state.selectedId) { cmdMsg("NO MARKET SELECTED", "err"); return; }
       openDes(state.selectedId);
@@ -835,6 +841,10 @@
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     const k = e.key;
+    if (state.pairs.open && onPairsKey(e)) {
+      e.preventDefault();
+      return;
+    }
     if (k === "ArrowUp" || k === "ArrowDown") {
       e.preventDefault();
       moveSel(k === "ArrowUp" ? -1 : 1);
@@ -1022,6 +1032,175 @@
   function setText(id, text) {
     const e = $(id);
     if (e && e.textContent !== text) e.textContent = text;
+  }
+
+  // ---------- PAIRS: cross-venue pair review ----------
+  const PAIR_FILTERS = ["proposed", "confirmed", "rejected", "all"];
+
+  function openPairs() {
+    const p = state.pairs;
+    p.open = true;
+    if (state.des.open) closeDes();
+    $("pairs").hidden = false;
+    document.body.classList.add("des-open");
+    loadPairs();
+  }
+
+  function closePairs() {
+    state.pairs.open = false;
+    $("pairs").hidden = true;
+    document.body.classList.remove("des-open");
+  }
+
+  async function loadPairs() {
+    const p = state.pairs;
+    p.loading = true;
+    renderPairs();
+    try {
+      const q = p.filter === "all" ? "" : "?status=" + encodeURIComponent(p.filter);
+      const r = await fetch("/api/pairs" + q, { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      p.rows = (await r.json()).pairs || [];
+      p.idx = Math.min(p.idx, Math.max(0, p.rows.length - 1));
+      p.msg = "";
+    } catch (err) {
+      p.rows = [];
+      p.msg = "LOAD FAILED · " + String(err.message || err).toUpperCase();
+    }
+    p.loading = false;
+    renderPairs();
+  }
+
+  async function decidePair(status) {
+    const p = state.pairs;
+    const row = p.rows[p.idx];
+    if (!row) return;
+    try {
+      const r = await fetch("/api/pairs/" + row.id + "/decide", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status }),
+        cache: "no-store",
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const updated = await r.json();
+      p.rows[p.idx] = { ...row, ...updated };
+      p.msg = "#" + row.id + " " + status.toUpperCase();
+      // Under a status filter the decided row no longer belongs; drop it and
+      // keep the cursor on the next candidate — review flows top to bottom.
+      if (p.filter !== "all" && updated.status !== p.filter) {
+        p.rows.splice(p.idx, 1);
+        p.idx = Math.min(p.idx, Math.max(0, p.rows.length - 1));
+      }
+    } catch (err) {
+      p.msg = "DECIDE FAILED · " + String(err.message || err).toUpperCase();
+    }
+    renderPairs();
+  }
+
+  async function decideEventGroup(status) {
+    // Shift+Y / Shift+N: every candidate in the selected row's event pairing
+    // (same Kalshi event ↔ same Polymarket event) gets the same decision —
+    // a 30-team pennant race is one judgement, not thirty.
+    const p = state.pairs;
+    const row = p.rows[p.idx];
+    if (!row) return;
+    const key = (r) => (r.kalshi.event_title || "") + " " + (r.polymarket_us.event_title || "");
+    const group = p.rows.filter((r) => key(r) === key(row));
+    try {
+      const r = await fetch("/api/pairs/decide", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: group.map((g) => g.id), status }),
+        cache: "no-store",
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const res = await r.json();
+      p.msg = res.updated + " " + status.toUpperCase() + " · " + (row.kalshi.event_title || "").slice(0, 40).toUpperCase();
+      await loadPairs();
+    } catch (err) {
+      p.msg = "DECIDE FAILED · " + String(err.message || err).toUpperCase();
+      renderPairs();
+    }
+  }
+
+  function movePair(d) {
+    const p = state.pairs;
+    if (!p.rows.length) return;
+    p.idx = Math.max(0, Math.min(p.rows.length - 1, p.idx + d));
+    renderPairs();
+  }
+
+  function cyclePairFilter() {
+    const p = state.pairs;
+    p.filter = PAIR_FILTERS[(PAIR_FILTERS.indexOf(p.filter) + 1) % PAIR_FILTERS.length];
+    p.idx = 0;
+    loadPairs();
+  }
+
+  function renderPairs() {
+    const p = state.pairs;
+    if (!p.open) return;
+    setText("pairs-filter", p.filter.toUpperCase());
+    setText("pairs-stat", p.loading ? "LOADING" : (p.msg || (nf.format(p.rows.length) + " PAIRS")));
+    const c = $("pair-rows");
+    c.textContent = "";
+    if (!p.rows.length && !p.loading) {
+      c.append(el("div", "pair-row quiet-line", p.filter === "proposed" ? "NO PROPOSALS — RUN: arb pairs propose" : "NONE"));
+    }
+    p.rows.forEach((row, i) => {
+      const r = el("div", "pair-row" + (i === p.idx ? " sel" : ""));
+      r.setAttribute("role", "option");
+      r.setAttribute("aria-selected", i === p.idx ? "true" : "false");
+      const k = el("span", "pr-leg"), q = el("span", "pr-leg");
+      k.append(el("span", "pr-id", row.kalshi.ticker || ""), el("span", "pr-out", row.kalshi.outcome || ""));
+      q.append(el("span", "pr-id", row.polymarket_us.ticker || ""), el("span", "pr-out", row.polymarket_us.outcome || ""));
+      r.append(
+        el("span", "pr-score num", Number(row.score).toFixed(2)),
+        k, q,
+        el("span", "pr-status st-" + row.status, String(row.status).toUpperCase()),
+      );
+      r.addEventListener("click", () => { p.idx = i; renderPairs(); });
+      c.append(r);
+    });
+    const row = p.rows[p.idx];
+    $("pair-empty").hidden = !!row;
+    $("pair-detail").hidden = !row;
+    if (!row) return;
+    const kk = row.kalshi || {}, pp = row.polymarket_us || {}, f = row.features || {};
+    setText("pd-k-event", kk.event_title || "—");
+    setText("pd-k-outcome", kk.outcome || "—");
+    setText("pd-k-ticker", kk.ticker || "—");
+    setText("pd-k-close", fmtWhen(kk.close_time));
+    setText("pd-k-rules", kk.rules || "—");
+    setText("pd-p-event", pp.event_title || "—");
+    setText("pd-p-outcome", pp.outcome || "—");
+    setText("pd-p-ticker", pp.ticker || "—");
+    setText("pd-p-close", fmtWhen(pp.close_time));
+    setText("pd-p-rules", pp.rules || "—");
+    setText("pd-score", Number(row.score).toFixed(3));
+    setText("pd-title", f.title_similarity != null ? Number(f.title_similarity).toFixed(2) : "—");
+    setText("pd-outcome", f.outcome_similarity != null ? Number(f.outcome_similarity).toFixed(2) : "—");
+    setText("pd-overlap", f.outcome_overlap != null ? Number(f.outcome_overlap).toFixed(2) : "—");
+    setText("pd-days", f.days_apart != null ? String(f.days_apart) : "—");
+    const st = $("pd-status");
+    st.textContent = String(row.status).toUpperCase();
+    st.className = "v " + (row.status === "confirmed" ? "st-live" : row.status === "rejected" ? "st-off" : "");
+    const selRow = c.children[p.idx];
+    if (selRow && selRow.scrollIntoView) selRow.scrollIntoView({ block: "nearest" });
+  }
+
+  function onPairsKey(e) {
+    const k = e.key;
+    if (k === "Escape") { closePairs(); return true; }
+    if (k === "ArrowUp" || k === "ArrowDown") { movePair(k === "ArrowUp" ? -1 : 1); return true; }
+    if (k === "Tab") { cyclePairFilter(); return true; }
+    const up = k.length === 1 ? k.toUpperCase() : k;
+    if (up === "Y") { (e.shiftKey ? decideEventGroup : decidePair)("confirmed"); return true; }
+    if (up === "N") { (e.shiftKey ? decideEventGroup : decidePair)("rejected"); return true; }
+    if (up === "U") { decidePair("proposed"); return true; }
+    if (up === "R") { loadPairs(); return true; }
+    return false;
   }
 
   // ---------- select-to-copy ----------

@@ -68,6 +68,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="don't write raw messages to Postgres while serving the UI",
     )
     _add_poly_args(ui)
+
+    pairs = subparsers.add_parser("pairs", help="cross-venue pair matching (propose / review)")
+    pairs_sub = pairs.add_subparsers(dest="pairs_command")
+    propose = pairs_sub.add_parser("propose", help="fetch both universes and propose pairs")
+    propose.add_argument("--min-score", type=float, default=0.75)
+    propose.add_argument("--no-record", action="store_true")
+    listing = pairs_sub.add_parser("list", help="list stored pairs")
+    listing.add_argument("--status", choices=["proposed", "confirmed", "rejected"], default=None)
+    for name in ("confirm", "reject"):
+        sub = pairs_sub.add_parser(name, help=f"{name} a proposed pair by id")
+        sub.add_argument("pair_id", type=int)
     return parser
 
 
@@ -144,6 +155,44 @@ def _run_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_pairs(args: argparse.Namespace) -> int:
+    from arb.config import AppConfig
+    from arb.pairs import run as pairs_run
+    from arb.pairs.store import decide, list_pairs
+    from arb.storage.db import make_engine
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    config = AppConfig()
+    if args.pairs_command == "propose":
+        candidates = uvloop.run(
+            pairs_run.propose(config, min_score=args.min_score, record=not args.no_record)
+        )
+        print(pairs_run.format_candidates(candidates))
+        return 0
+
+    async def with_engine(coro_fn):  # type: ignore[no-untyped-def]
+        engine = make_engine(config.database_url)
+        try:
+            return await coro_fn(engine)
+        finally:
+            await engine.dispose()
+
+    if args.pairs_command == "list":
+        rows = uvloop.run(with_engine(lambda e: list_pairs(e, status=args.status)))
+        print(pairs_run.format_rows(rows))
+        return 0
+    if args.pairs_command in ("confirm", "reject"):
+        status = "confirmed" if args.pairs_command == "confirm" else "rejected"
+        row = uvloop.run(with_engine(lambda e: decide(e, args.pair_id, status)))
+        if row is None:
+            print(f"pair {args.pair_id} not found", file=sys.stderr)
+            return 1
+        print(pairs_run.format_rows([row]))
+        return 0
+    print("usage: arb pairs {propose|list|confirm|reject}", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -156,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_record(args)
     if args.command == "ui":
         return _run_ui(args)
+    if args.command == "pairs":
+        return _run_pairs(args)
     print(f"arb: command {args.command!r} is not implemented yet", file=sys.stderr)
     return 1
 
