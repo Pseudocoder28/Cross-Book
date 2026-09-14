@@ -5,12 +5,12 @@ Code: [`src/arb/fees.py`](../src/arb/fees.py),
 [`src/arb/arbmon.py`](../src/arb/arbmon.py),
 [`src/arb/paper.py`](../src/arb/paper.py),
 [`src/arb/paper_store.py`](../src/arb/paper_store.py),
-[`src/arb/replay.py`](../src/arb/replay.py). This is day 2 of the build: once
-a pair is confirmed ([`pairs.md`](pairs.md)) and both legs have live books
+[`src/arb/replay.py`](../src/arb/replay.py). Once a pair is confirmed
+([`pairs.md`](pairs.md)) and both legs have live books
 ([`data-model.md`](data-model.md)), this layer measures whether there's
 money on the table, and simulates taking it. **Nothing here places, amends
-or cancels a real order** — day 1's read-only rule holds throughout day 2;
-paper trading talks to no venue at all.
+or cancels a real order** — the read-only rule from `CLAUDE.md` holds
+throughout; paper trading talks to no venue at all.
 
 ## Fees
 
@@ -159,7 +159,7 @@ that's exactly why pair confirmation is a human gate (see
 ### Risk limits: `PaperLimits`
 
 Three explicit caps, deliberately simple — this is the same shape the real
-trader inherits on day 3:
+(live) trader will inherit once one exists:
 
 - `min_net_ticks` (default 50 = $0.005/contract) — a floor below which an
   edge isn't worth the operational risk of taking it at all.
