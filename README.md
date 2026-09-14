@@ -2,17 +2,15 @@
 
 `arb` detects — and, from a later milestone on, trades — price gaps between
 equivalent binary markets listed on both **Kalshi** and **Polymarket US**
-(docs.polymarket.us; the international Polymarket is out of scope). It is
-being built as a three-day project:
+(docs.polymarket.us; the international Polymarket is out of scope).
 
-- **Day 1 — data**: venue adapters, a normalized order book, a raw-message
-  recorder, and a cross-venue pair matcher. Read-only.
-- **Day 2 — engine**: fee models, depth-aware edge measurement, sizing/risk
-  limits, and paper execution.
-- **Day 3 — control plane**: operational tooling and live trading at tiny
-  size.
+Everything built so far is **read-only measurement and simulation**: venue
+adapters, a normalized order book, a raw-message recorder, a cross-venue
+pair matcher, fee models, depth-aware edge measurement, and paper execution.
+No code that places, amends or cancels a real order exists yet — that's a
+later milestone.
 
-The project is currently on milestone **M16** of day 2 — see
+The project is currently on milestone **M16** — see
 [`PROGRESS.md`](PROGRESS.md) for exactly what works today. The build plan,
 hard rules and conventions that govern every change live in
 [`CLAUDE.md`](CLAUDE.md); read it before adding code.
