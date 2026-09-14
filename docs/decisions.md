@@ -34,6 +34,27 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M10 — select-to-copy in the terminal UI
+
+- **Copy fires on `mouseup`, not `selectionchange`.** The async clipboard API
+  needs transient user activation; `selectionchange` fires mid-drag without
+  it and would be rejected. `mouseup` (and `keyup` for Cmd/Ctrl+A) carries
+  activation. Fallback is `document.execCommand("copy")`, which copies the
+  live selection as-is; if both fail the toast says COPY BLOCKED rather than
+  lying about success.
+- **Tabular selections are rebuilt as TSV.** The ladder, monitor, tape and
+  system rows are flex grids, so the DOM's own serialization loses the
+  column boundaries. Multi-row selections copy as tab-separated cells, one
+  row per line, so a book selection pastes into a spreadsheet intact.
+  Selecting inside a single cell returns the exact highlighted substring —
+  half a number stays half a number.
+- **Rendering pauses for the duration of a drag.** A live re-render replaces
+  the text nodes a selection is anchored in, which destroys it mid-gesture.
+  `frame()` returns early while the pointer is down and `drainTape()` stops
+  prepending rows; dirty flags accumulate and flush on release, so data is
+  only ever delayed, never dropped. Stale-pause is impossible: a `mousemove`
+  reporting no buttons held, or a window blur, ends the pause.
+
 ## M6 — Kalshi signing, WS parser, live capture
 
 - **Kalshi WS books get unsequenced events.** The live capture proved `seq`

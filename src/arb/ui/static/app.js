@@ -60,6 +60,9 @@
   let tapeTotal = 0;
   let cmdBuf = "";
   let cmdMsgTimer = 0;
+  let selecting = false;       // pointer is down: DOM writes are held off
+  let copyToastTimer = 0;
+  let copyFadeTimer = 0;
   let sparkHover = null;       // hover x in CSS px, or null
 
   // ---------- formatting ----------
@@ -177,6 +180,10 @@
 
   function frame() {
     rafPending = false;
+    // A live re-render replaces the text nodes a drag is anchored in, which
+    // destroys the selection mid-gesture. Hold the paint (never the data):
+    // dirty flags accumulate and flush the moment the pointer is released.
+    if (selecting) return;
     if (dirty.monitor) {
       dirty.monitor = false;
       if (dirtyBooks.size) {
@@ -452,6 +459,7 @@
   }
 
   function drainTape() {
+    if (selecting) return;  // prepending rows would shift a drag in progress
     if (!tapeQueue.length) return;
     const take = tapeQueue.splice(0, TAPE_PER_DRAIN);
     const c = $("tape-rows");
@@ -831,6 +839,109 @@
     }
   }
 
+  // ---------- select-to-copy ----------
+  // Anything you select on the terminal lands on the clipboard. Tabular
+  // regions are rebuilt cell-by-cell as TSV, because the DOM's own
+  // serialization of a flex grid loses the column boundaries — a ladder
+  // selection should paste into a spreadsheet with its columns intact.
+  const ROW_SEL = ".ladder-row, .mon-row, .tape-row, .mid-row, .kv";
+
+  function cellsOf(row) {
+    return row.children.length ? Array.from(row.children) : [row];
+  }
+
+  function cellText(node) {
+    return node.textContent.replace(/\s+/g, " ").trim();
+  }
+
+  function selectionText(sel) {
+    const plain = sel.toString();
+    let range;
+    try {
+      range = sel.getRangeAt(0);
+    } catch (err) {
+      return plain;
+    }
+    const rows = [];
+    for (const row of document.querySelectorAll(ROW_SEL)) {
+      if (range.intersectsNode(row)) rows.push(row);
+    }
+    if (!rows.length) return plain;
+
+    if (rows.length === 1) {
+      const hit = cellsOf(rows[0]).filter((c) => range.intersectsNode(c));
+      // One cell touched: hand back exactly what was highlighted, so half a
+      // number stays half a number. Several: re-join them with tabs.
+      if (hit.length <= 1) return plain;
+      return hit.map(cellText).filter(Boolean).join("\t");
+    }
+    const lines = [];
+    for (const row of rows) {
+      const line = cellsOf(row).map(cellText).filter(Boolean).join("\t");
+      if (line) lines.push(line);
+    }
+    return lines.length ? lines.join("\n") : plain;
+  }
+
+  function showCopyToast(text, ok) {
+    const box = $("copy-toast");
+    const chars = text.length;
+    const lines = text.split("\n").length;
+    $("ct-label").textContent = ok ? "COPIED" : "COPY BLOCKED";
+    $("ct-count").textContent = ok
+      ? nf.format(chars) + (chars === 1 ? " CHAR" : " CHARS") + (lines > 1 ? " · " + lines + " ROWS" : "")
+      : "CLIPBOARD DENIED";
+    $("ct-preview").textContent = text.replace(/\s+/g, " ").trim().slice(0, 120);
+    box.classList.toggle("err", !ok);
+    box.classList.remove("fading");
+    box.hidden = false;
+    clearTimeout(copyToastTimer);
+    clearTimeout(copyFadeTimer);
+    copyToastTimer = setTimeout(() => {
+      if (reducedMotion) {
+        box.hidden = true;
+        return;
+      }
+      box.classList.add("fading");
+      copyFadeTimer = setTimeout(() => {
+        box.hidden = true;
+        box.classList.remove("fading");
+      }, 160);
+    }, 1500);
+  }
+
+  async function copySelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const text = selectionText(sel).replace(/\u00a0/g, " ");  // nbsp -> plain space
+    if (!text.trim()) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        showCopyToast(text, true);
+        return;
+      }
+    } catch (err) {
+      /* permission or insecure context — fall back below */
+    }
+    try {
+      // Legacy path copies the live selection as-is (no TSV rebuild).
+      if (document.execCommand && document.execCommand("copy")) {
+        showCopyToast(sel.toString(), true);
+        return;
+      }
+    } catch (err) {
+      /* fall through to the honest failure toast */
+    }
+    showCopyToast(text, false);
+  }
+
+  function endSelecting() {
+    if (!selecting) return;
+    selecting = false;
+    schedule();  // flush whatever the drag held back
+  }
+
   // ---------- WS message handlers ----------
   function onHello(m) {
     state.runId = typeof m.run_id === "string" ? m.run_id : null;
@@ -963,6 +1074,28 @@
   schedule("depth", "status", "poly", "system", "spark");
 
   document.addEventListener("keydown", onKey);
+
+  // Select-to-copy. mouseup carries the transient user activation the async
+  // clipboard API requires, so the write is done there rather than on
+  // selectionchange (which fires mid-drag and without activation).
+  document.addEventListener("mousedown", (e) => {
+    if (e.button === 0) selecting = true;
+  });
+  window.addEventListener("mouseup", (e) => {
+    if (e.button !== 0) return;
+    endSelecting();
+    copySelection();
+  });
+  // Button released outside the window: the next move over the page reports
+  // no buttons held, which is when we un-pause rendering.
+  document.addEventListener("mousemove", (e) => {
+    if (selecting && e.buttons === 0) endSelecting();
+  });
+  window.addEventListener("blur", endSelecting);
+  // Select-all is a keyboard gesture, and it also carries activation.
+  document.addEventListener("keyup", (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "a" || e.key === "A")) copySelection();
+  });
   spark.addEventListener("mousemove", (e) => {
     const r = spark.getBoundingClientRect();
     sparkHover = e.clientX - r.left;

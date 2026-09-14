@@ -2,9 +2,14 @@
 
 ## Current milestone
 
-**M9 — Bloomberg-style terminal UI (`arb ui`).**
+**M10 — select-to-copy in the terminal UI.**
 
 ## What works
+
+- Selecting anything in the terminal copies it to the clipboard and shows a bottom-right `COPIED · N CHARS · N ROWS` toast (red `COPY BLOCKED` if the browser refuses). Multi-row selections copy as TSV (tab-separated cells, one row per line) so ladder/tape/system selections paste into a spreadsheet with columns intact; a selection inside a single cell copies the exact highlighted substring. Live re-rendering pauses while the pointer is down so updates can't wipe a selection mid-drag, then flushes on release.
+- Verified in real Chrome over the DevTools protocol: multi-row ladder → `"1.90\t98.10\t8,838.22\n1.80\t98.20\t1,550"`, system rows → `"MSG TOTAL\t507\nRATE 1S\t0.0/s"`, partial cell → exact substring, plain click copies nothing, UI resumes after the drag, toast auto-hides.
+
+### From M9
 
 - `uv run arb ui` at http://127.0.0.1:8080 — black/amber terminal: live market monitor (real volumes + event titles from discovery), depth ladder with complement NO prices, mid/spread seam and flash-on-change, tape, latency sparkline (last/median/p95), system panel (recorder, parse errors, seq gaps, DB rows by run), Polymarket US down-screen driven by live REST reachability, keyboard navigation, dual UTC/ET clocks.
 - Backend: `BookManager` (`src/arb/books.py`) + `KalshiMarketDataAdapter` (per-`sid` seq tracking; gap → metric + `ResyncRequired` + forced WS reconnect for fresh snapshots per the reliability rules); FastAPI server (`src/arb/ui/server.py`) with `/api/status`, `/metrics`, and a WS push protocol (integer ticks / 0.0001-contract units on the wire); recorder-first ingest identical to `arb record`; per-client bounded send queues so a slow browser can never stall the feed.
