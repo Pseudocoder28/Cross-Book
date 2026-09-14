@@ -47,6 +47,11 @@ class StubState:
     def book_payloads(self) -> list[dict[str, Any]]:
         return []
 
+    async def market_detail(self, market_id: str) -> dict[str, Any] | None:
+        if market_id != "kalshi:AAA":
+            return None
+        return {"market_id": market_id, "ticker": "AAA", "source": "discovery"}
+
     def add_client(self, ws: object) -> asyncio.Queue[str]:
         self.added += 1
         return asyncio.Queue()
@@ -83,6 +88,17 @@ async def test_api_status_matches_contract(tmp_path: Path) -> None:
             "runs": [{"run_id": "run-b", "count": 30}, {"run_id": "run-a", "count": 12}],
         },
     }
+
+
+async def test_market_detail_route(tmp_path: Path) -> None:
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        ok = await client.get("/api/markets/kalshi:AAA")
+        missing = await client.get("/api/markets/kalshi:NOPE")
+    assert ok.status_code == 200
+    assert ok.json()["ticker"] == "AAA"
+    assert missing.status_code == 404
+    assert missing.json()["market_id"] == "kalshi:NOPE"
 
 
 async def test_root_falls_back_when_assets_missing(tmp_path: Path) -> None:

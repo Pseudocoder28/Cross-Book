@@ -150,6 +150,20 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
   objects with `ticker`, `event_ticker`, `rules_primary`, `yes_sub_title`,
   `volume_24h_fp`, status `active`, type `binary`).
 
+- `GET /markets/{ticker}` → `{"market": Market}` (verified,
+  https://docs.kalshi.com/api-reference/market/get-market.md; fixture
+  `tests/fixtures/kalshi/rest_market_kxpresperson-28-tgab.json`). Extra
+  live fields beyond the get-markets list: `expected_expiration_time`,
+  `can_close_early`, `previous_price_dollars`, `yes_bid_size_fp`, etc.
+- `GET /events/{event_ticker}` → `{"event": EventData, "markets": [...]}`
+  (verified, https://docs.kalshi.com/api-reference/events/get-event.md;
+  fixture `tests/fixtures/kalshi/rest_event_kxpresperson-28.json`).
+  EventData carries `series_ticker`, `title`, `sub_title`, `category`
+  (deprecated but populated), `mutually_exclusive` and
+  **`settlement_sources`** (`[{name, url}]`) — the resolution sources the
+  pair matcher and DES page need. Ticker anatomy confirmed:
+  `KXPRESPERSON` (series) → `KXPRESPERSON-28` (event) →
+  `KXPRESPERSON-28-TGAB` (market).
 - `GET /events` supports `with_nested_markets=true` (verified,
   https://docs.kalshi.com/api-reference/events/get-events.md) — used for
   liquidity-ranked discovery. `GET /markets` also supports `event_ticker`

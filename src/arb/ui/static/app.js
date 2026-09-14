@@ -49,10 +49,11 @@
     status: null,              // latest /api/status payload
     statusAt: 0,               // Date.now() of last successful poll
     conn: "connecting",
+    des: { open: false, marketId: null, detail: null, error: null, ctl: null },
   };
 
   const dirtyBooks = new Set();
-  const dirty = { monitor: false, depth: false, latnums: false, system: false, poly: false, status: false, spark: false };
+  const dirty = { monitor: false, depth: false, latnums: false, system: false, poly: false, status: false, spark: false, des: false };
   let rafPending = false;
 
   let latBucket = [];          // delta latencies inside the current 1s bucket
@@ -190,7 +191,10 @@
         const ids = Array.from(dirtyBooks);
         dirtyBooks.clear();
         renderMonitorRows(ids);
-        if (state.selectedId && ids.includes(state.selectedId)) dirty.depth = true;
+        if (state.selectedId && ids.includes(state.selectedId)) {
+          dirty.depth = true;
+          if (state.des.open) dirty.des = true; // live-book block on the DES page
+        }
       }
     }
     if (dirty.depth) { dirty.depth = false; renderDepth(); }
@@ -199,6 +203,7 @@
     if (dirty.poly) { dirty.poly = false; renderPoly(); }
     if (dirty.status) { dirty.status = false; renderStatusBar(); }
     if (dirty.spark) { dirty.spark = false; drawSpark(); }
+    if (dirty.des) { dirty.des = false; renderDes(); }
   }
 
   // ---------- monitor ----------
@@ -227,6 +232,7 @@
       const spr = el("span", "num", "—");
       row.append(idx, ticker, bid, ask, mid, spr);
       row.addEventListener("click", () => select(m.market_id));
+      row.addEventListener("dblclick", () => { select(m.market_id); openDes(m.market_id); });
       c.append(row);
       monRefs.set(m.market_id, { row, ticker, bid, ask, mid, spr, prev: {} });
     });
@@ -283,6 +289,7 @@
       row.classList.toggle("sel", row.dataset.id === id);
     }
     schedule("depth");
+    if (state.des.open && state.des.marketId !== id) openDes(id); // arrows page through DES
   }
 
   function moveSel(d) {
@@ -784,8 +791,18 @@
     cmdBuf = "";
     renderCmd();
     if (!raw) return;
-    const q = raw.replace(/\s*<\s*GO\s*>\s*$/i, "").replace(/\s+GO$/i, "").trim().toUpperCase();
+    let q = raw.replace(/\s*<\s*GO\s*>\s*$/i, "").replace(/\s+GO$/i, "").trim().toUpperCase();
     if (!q) return;
+    // "DES" opens the description of the selected market; "<TICKER> DES"
+    // selects first. Bloomberg muscle memory, kept deliberately.
+    let wantDes = false;
+    if (q === "DES") {
+      if (!state.selectedId) { cmdMsg("NO MARKET SELECTED", "err"); return; }
+      openDes(state.selectedId);
+      cmdMsg((state.byId.get(state.selectedId) || {}).ticker + " DES", "ok");
+      return;
+    }
+    if (/\s+DES$/.test(q)) { wantDes = true; q = q.replace(/\s+DES$/, "").trim(); }
     const tickers = state.markets;
     const hit =
       tickers.find((m) => (m.ticker || "").toUpperCase() === q) ||
@@ -793,7 +810,8 @@
       tickers.find((m) => (m.ticker || "").toUpperCase().includes(q));
     if (hit) {
       select(hit.market_id);
-      cmdMsg(hit.ticker + " <GO>", "ok");
+      if (wantDes) openDes(hit.market_id);
+      cmdMsg(hit.ticker + (wantDes ? " DES" : " <GO>"), "ok");
     } else {
       cmdMsg("NO MATCH · " + q, "err");
     }
@@ -811,10 +829,15 @@
     }
     if (k === "Enter") {
       e.preventDefault();
-      execCmd();
+      if (cmdBuf.trim() === "") {
+        if (state.selectedId) openDes(state.selectedId); // Enter on a market = DES
+      } else {
+        execCmd();
+      }
       return;
     }
     if (k === "Escape") {
+      if (state.des.open) { closeDes(); return; }
       cmdBuf = "";
       renderCmd();
       return;
@@ -837,6 +860,145 @@
         renderCmd();
       }
     }
+  }
+
+  // ---------- DES: market description page ----------
+  const etWhenFmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+
+  function fmtWhen(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    const utc = d.toISOString().slice(0, 16).replace("T", " ") + "Z";
+    return utc + " · " + etWhenFmt.format(d).replace(",", "") + " ET";
+  }
+
+  // Ticks are $0.0001, so cents and implied probability share a number:
+  // 50 ticks = 0.50¢ = 0.50%.
+  function fmtCentsPct(ticks) {
+    if (ticks == null) return "—";
+    return fmtCents(ticks) + "¢ · " + (ticks / 100).toFixed(2) + "%";
+  }
+
+  function fmtCount(v) {
+    return v == null || !isFinite(v) ? "—" : nf.format(Math.round(v));
+  }
+
+  function openDes(id) {
+    if (!id || !state.byId.has(id)) return;
+    const des = state.des;
+    if (des.ctl) des.ctl.abort();
+    des.open = true;
+    des.marketId = id;
+    des.detail = null;
+    des.error = null;
+    $("des").hidden = false;
+    document.body.classList.add("des-open");
+    schedule("des");
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    des.ctl = ctl;
+    fetch("/api/markets/" + encodeURIComponent(id), { cache: "no-store", signal: ctl ? ctl.signal : undefined })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+      .then((detail) => {
+        if (des.marketId !== id) return; // paged away while loading
+        des.detail = detail;
+        schedule("des");
+      })
+      .catch((err) => {
+        if (des.marketId !== id || (err && err.name === "AbortError")) return;
+        des.error = "NO DESCRIPTION AVAILABLE · " + String(err.message || err).toUpperCase();
+        schedule("des");
+      });
+  }
+
+  function closeDes() {
+    const des = state.des;
+    if (des.ctl) des.ctl.abort();
+    des.open = false;
+    des.ctl = null;
+    $("des").hidden = true;
+    document.body.classList.remove("des-open");
+  }
+
+  function renderDes() {
+    const des = state.des;
+    if (!des.open) return;
+    const m = state.byId.get(des.marketId) || {};
+    const d = des.detail;
+    setText("des-ticker", m.ticker || des.marketId);
+    setText("des-stat", des.error ? "ERROR" : d ? (d.source === "live" ? "LIVE" : "DISCOVERY") + " · " + fmtAgo(Date.now() - d.fetched_at_ms) + " AGO" : "LOADING");
+    const errEl = $("des-error");
+    errEl.hidden = !des.error;
+    errEl.textContent = des.error || "";
+
+    setText("des-event", d ? d.event_title || m.title || "—" : m.title || "—");
+    setText("des-sub", d ? [d.yes_sub_title, d.event_sub_title].filter(Boolean).join(" · ") || "—" : "—");
+    setText("des-series", d ? d.series_ticker || "—" : "—");
+    setText("des-eventtk", d ? d.event_ticker || "—" : "—");
+    setText("des-mkt", m.ticker || "—");
+    setText("des-rules", d ? d.rules_primary || "—" : "—");
+    const r2 = d && d.rules_secondary;
+    $("des-rules2-wrap").hidden = !r2;
+    setText("des-rules2", r2 || "");
+    const src = $("des-sources");
+    src.textContent = "";
+    if (d && d.settlement_sources && d.settlement_sources.length) {
+      for (const s of d.settlement_sources) {
+        const line = el("div", "src-line");
+        line.append(el("span", "src-name", s.name || "—"));
+        if (s.url) line.append(el("span", "src-url", "  " + s.url));
+        src.append(line);
+      }
+    } else {
+      src.textContent = d ? "NONE LISTED" : "—";
+    }
+
+    const statusEl = $("des-status");
+    statusEl.textContent = d ? (d.status || "—").toUpperCase() + (d.result ? " · " + d.result.toUpperCase() : "") : "—";
+    statusEl.className = "v " + (d && d.status === "active" ? "st-live" : "st-off");
+    setText("des-cat", d ? d.category || "—" : "—");
+    setText("des-type", d ? (d.market_type || "—").toUpperCase() : "—");
+    setText("des-mx", d ? (d.mutually_exclusive == null ? "—" : d.mutually_exclusive ? "YES" : "NO") : "—");
+    setText("des-early", d ? (d.can_close_early == null ? "—" : d.can_close_early ? "ALLOWED" : "NO") : "—");
+
+    if (d) {
+      const vb = d.yes_bid_ticks, va = d.yes_ask_ticks;
+      const vmid = vb != null && va != null ? (vb + va) / 2 : null;
+      setText("des-implied", fmtCentsPct(vmid == null ? null : Math.round(vmid)));
+      setText("des-vq", vb == null || va == null ? "—" : fmtCents(vb) + " / " + fmtCents(va));
+      setText("des-last", fmtCentsPct(d.last_price_ticks));
+      setText("des-vol", fmtCount(d.volume));
+      setText("des-vol24", fmtCount(d.volume_24h));
+      setText("des-oi", fmtCount(d.open_interest));
+      setText("des-open", fmtWhen(d.open_time));
+      setText("des-close", fmtWhen(d.close_time));
+      setText("des-exp", fmtWhen(d.expected_expiration_time));
+    } else {
+      for (const k of ["implied", "vq", "last", "vol", "vol24", "oi", "open", "close", "exp"]) setText("des-" + k, "—");
+    }
+
+    const book = state.books.get(des.marketId);
+    if (book) {
+      const bb = book.bids[0], ba = book.asks[0];
+      const sum = (lv) => lv.reduce((a, l) => a + (l[1] || 0), 0);
+      setText("des-bb", bb ? fmtCents(bb[0]) + "¢ × " + fmtQty(bb[1]) : "—");
+      setText("des-ba", ba ? fmtCents(ba[0]) + "¢ × " + fmtQty(ba[1]) : "—");
+      setText("des-ms", bb && ba ? fmtMid((bb[0] + ba[0]) / 2) + " / " + fmtCents(ba[0] - bb[0]) : "—");
+      setText("des-bd", fmtQty(sum(book.bids)));
+      setText("des-ad", fmtQty(sum(book.asks)));
+      setText("des-lv", book.bids.length + " / " + book.asks.length);
+      setText("des-age", fmtAge(book.age_ms + (performance.now() - book.recvAt)));
+    } else {
+      for (const k of ["bb", "ba", "ms", "bd", "ad", "lv", "age"]) setText("des-" + k, "—");
+    }
+  }
+
+  function setText(id, text) {
+    const e = $(id);
+    if (e && e.textContent !== text) e.textContent = text;
   }
 
   // ---------- select-to-copy ----------
@@ -1119,5 +1281,6 @@
     renderClocks();
     if (state.selectedId) schedule("depth"); // client-side book aging -> STALE banner
     if (state.status) schedule("poly");      // "checked Ns ago" ticks
+    if (state.des.open) schedule("des");     // book age / fetched-ago tick
   }, 1000);
 })();

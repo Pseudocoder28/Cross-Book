@@ -34,6 +34,24 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M11 — DES (market description) page
+
+- **Bloomberg's `DES` is the drill-down.** Enter on a selected market (or
+  `DES` / `<TICKER> DES` on the command line, or a double-click) replaces
+  the workspace with a description page; Esc returns; arrows page through
+  markets without leaving it. Familiar to anyone who has used a terminal,
+  and it keeps the workspace layout untouched.
+- **Metadata is seeded from discovery and refreshed on demand.** The
+  `/events?with_nested_markets=true` pages already carry full Market and
+  EventData objects, so DES works instantly with no extra calls; opening a
+  page refreshes via the documented `GET /markets/{ticker}` (and
+  `GET /events/{event_ticker}` when the event isn't cached) behind a 30 s
+  TTL, and falls back to the seed if the venue call fails. Every refresh
+  response goes through the recorder before parsing, like all REST.
+- **Implied probability is shown next to cents.** With $0.0001 ticks the
+  two share a number (50 ticks = 0.50¢ = 0.50%), which is exactly the kind
+  of thing a reader shouldn't have to work out for a long-shot market.
+
 ## M10 — select-to-copy in the terminal UI
 
 - **Copy fires on `mouseup`, not `selectionchange`.** The async clipboard API

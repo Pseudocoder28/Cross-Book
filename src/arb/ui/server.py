@@ -36,7 +36,7 @@ from typing import Any, Protocol
 import httpx
 import uvicorn
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, select
@@ -54,7 +54,9 @@ from arb.storage.models import RawMessageRow
 from arb.supervise import supervise
 from arb.types import RawMessage
 from arb.venues.kalshi.adapter import KalshiMarketDataAdapter
-from arb.venues.kalshi.discovery import fetch_liquid_markets
+from arb.venues.kalshi.detail import build_market_detail
+from arb.venues.kalshi.discovery import fetch_event, fetch_liquid_markets, fetch_market
+from arb.venues.kalshi.rest import KalshiEvent, KalshiMarket
 from arb.venues.kalshi.rest import market_id as kalshi_market_id
 from arb.venues.kalshi.source import KalshiWSSource
 
@@ -73,6 +75,13 @@ LATENCY_WINDOW = 512
 # Per-client outbound frame queue. A client that falls this far behind is
 # dropped: a slow UI consumer must never stall market-data ingest.
 SEND_QUEUE_MAX = 1024
+# DES metadata is re-fetched from the venue at most this often per market.
+DETAIL_TTL_MS = 30_000
+
+# (ticker, cached event or None) -> fresh (market, event)
+type DetailRefreshFn = Callable[
+    [str, KalshiEvent | None], Awaitable[tuple[KalshiMarket, KalshiEvent | None]]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +110,10 @@ class UIState(Protocol):
 
     def book_payloads(self) -> list[dict[str, Any]]:
         """Current full-state "book" messages, for freshly connected clients."""
+        ...
+
+    async def market_detail(self, market_id: str) -> dict[str, Any] | None:
+        """DES payload for one market, or None if the market is unknown."""
         ...
 
     def add_client(self, ws: WebSocket) -> asyncio.Queue[str]:
@@ -144,6 +157,15 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
                 "runs": [{"run_id": run_id, "count": count} for run_id, count in db.runs],
             },
         }
+
+    @app.get("/api/markets/{market_id}")
+    async def api_market_detail(market_id: str) -> Response:
+        detail = await state.market_detail(market_id)
+        if detail is None:
+            return JSONResponse(
+                {"error": "unknown market", "market_id": market_id}, status_code=404
+            )
+        return JSONResponse(detail)
 
     @app.get("/metrics")
     async def metrics() -> Response:
@@ -208,6 +230,10 @@ class ServerState:
         self._database_status_fn = database_status_fn
         self._started_mono_ns = time.monotonic_ns()
         self._markets: list[dict[str, Any]] = []
+        # DES metadata: market_id -> (market, event); refreshed on demand.
+        self._detail_meta: dict[str, tuple[KalshiMarket, KalshiEvent | None]] = {}
+        self._detail_cache: dict[str, dict[str, Any]] = {}
+        self._detail_refresh_fn: DetailRefreshFn | None = None
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
         self._dirty: set[str] = set()
@@ -270,6 +296,40 @@ class ServerState:
 
     def set_markets(self, markets: list[dict[str, Any]]) -> None:
         self._markets = markets
+
+    # -- DES (market description) ----------------------------------------------
+
+    def set_detail_refresh(self, fn: DetailRefreshFn | None) -> None:
+        self._detail_refresh_fn = fn
+
+    def seed_detail(self, market: KalshiMarket, event: KalshiEvent | None) -> None:
+        """Startup metadata from discovery; served until a live refresh lands."""
+        mid = kalshi_market_id(market.ticker)
+        self._detail_meta[mid] = (market, event)
+        self._detail_cache[mid] = build_market_detail(
+            market, event, source="discovery", fetched_at_ms=time.time_ns() // 1_000_000
+        )
+
+    async def market_detail(self, market_id: str) -> dict[str, Any] | None:
+        known = any(m["market_id"] == market_id for m in self._markets)
+        if not known and market_id not in self._detail_cache:
+            return None
+        cached = self._detail_cache.get(market_id)
+        now_ms = time.time_ns() // 1_000_000
+        if cached is not None and now_ms - cached["fetched_at_ms"] < DETAIL_TTL_MS:
+            return cached
+        if self._detail_refresh_fn is not None:
+            ticker = market_id.split(":", 1)[1]
+            prior = self._detail_meta.get(market_id)
+            try:
+                market, event = await self._detail_refresh_fn(ticker, prior[1] if prior else None)
+            except Exception:
+                log.warning("market detail refresh failed for %s", market_id, exc_info=True)
+            else:
+                self._detail_meta[market_id] = (market, event)
+                cached = build_market_detail(market, event, source="live", fetched_at_ms=now_ms)
+                self._detail_cache[market_id] = cached
+        return cached
 
     def on_kalshi_frame(self) -> None:
         self.msg_total += 1
@@ -449,6 +509,8 @@ async def run_ui(
                     for m in discovered
                 ]
             )
+            for m in discovered:
+                state.seed_detail(m.market, m.event)
         else:
             # Explicit tickers: no discovery metadata available.
             state.set_markets(
@@ -457,6 +519,18 @@ async def run_ui(
                     for t in tickers
                 ]
             )
+
+        async def refresh_detail(
+            ticker: str, cached_event: KalshiEvent | None
+        ) -> tuple[KalshiMarket, KalshiEvent | None]:
+            sink = record_raw if record else None
+            market = await fetch_market(config, run, ticker, sink=sink)
+            event = cached_event
+            if event is None or event.event_ticker != market.event_ticker:
+                event = await fetch_event(config, run, market.event_ticker, sink=sink)
+            return market, event
+
+        state.set_detail_refresh(refresh_detail)
 
         source = KalshiWSSource(config=config, run=run, market_tickers=tickers)
         adapter = KalshiMarketDataAdapter()

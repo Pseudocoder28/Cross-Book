@@ -139,12 +139,68 @@
 
   <footer id="keys" class="keys" aria-label="Keyboard shortcuts">
     <span><b>&#8593;&#8595;</b> SELECT</span>
-    <span><b>&#9166;</b> &lt;GO&gt;</span>
+    <span><b>&#9166;</b> DES</span>
     <span><b>1-9</b> QUICK</span>
     <span><b>&#9003;</b> EDIT</span>
-    <span><b>ESC</b> CLEAR</span>
+    <span><b>ESC</b> CLOSE</span>
     <span class="keys-note">TYPE ANYWHERE TO COMMAND</span>
   </footer>
+
+  <section id="des" class="des" role="dialog" aria-modal="true" aria-label="Market description" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">DES</span><span id="des-ticker">&#8212;</span></span>
+      <span id="des-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body">
+      <div class="des-left">
+        <div id="des-event" class="des-event">&#8212;</div>
+        <div id="des-sub" class="des-sub">&#8212;</div>
+        <div class="des-anatomy" aria-label="Ticker anatomy">
+          <span class="kv"><span class="k">SERIES</span><span id="des-series" class="v">&#8212;</span></span>
+          <span class="kv"><span class="k">EVENT</span><span id="des-eventtk" class="v">&#8212;</span></span>
+          <span class="kv"><span class="k">MARKET</span><span id="des-mkt" class="v">&#8212;</span></span>
+        </div>
+        <div class="des-section">RESOLUTION RULES</div>
+        <div id="des-rules" class="des-rules">&#8212;</div>
+        <div id="des-rules2-wrap" hidden>
+          <div class="des-section">SECONDARY RULES</div>
+          <div id="des-rules2" class="des-rules"></div>
+        </div>
+        <div class="des-section">SETTLEMENT SOURCES</div>
+        <div id="des-sources" class="des-sources">&#8212;</div>
+        <div id="des-error" class="des-error" hidden></div>
+      </div>
+      <div class="des-right">
+        <div class="sys-title">MARKET</div>
+        <div class="kv"><span class="k">STATUS</span><span id="des-status" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">CATEGORY</span><span id="des-cat" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">TYPE</span><span id="des-type" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">MUTUALLY EXCL</span><span id="des-mx" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">EARLY CLOSE</span><span id="des-early" class="v">&#8212;</span></div>
+        <div class="sys-title">VENUE QUOTE</div>
+        <div class="kv"><span class="k">IMPLIED YES</span><span id="des-implied" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BID / ASK</span><span id="des-vq" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">LAST</span><span id="des-last" class="v num">&#8212;</span></div>
+        <div class="sys-title">LIVE BOOK</div>
+        <div class="kv"><span class="k">BEST BID</span><span id="des-bb" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BEST ASK</span><span id="des-ba" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">MID / SPREAD</span><span id="des-ms" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BID DEPTH</span><span id="des-bd" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">ASK DEPTH</span><span id="des-ad" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">LEVELS</span><span id="des-lv" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BOOK AGE</span><span id="des-age" class="v num">&#8212;</span></div>
+        <div class="sys-title">ACTIVITY</div>
+        <div class="kv"><span class="k">VOLUME</span><span id="des-vol" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">VOL 24H</span><span id="des-vol24" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">OPEN INT</span><span id="des-oi" class="v num">&#8212;</span></div>
+        <div class="sys-title">TIMELINE</div>
+        <div class="kv"><span class="k">OPENED</span><span id="des-open" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">CLOSES</span><span id="des-close" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">EXPECTED EXP</span><span id="des-exp" class="v">&#8212;</span></div>
+        <div id="des-foot" class="des-foot">&#8593;&#8595; NEXT MARKET &#183; ESC CLOSE</div>
+      </div>
+    </div>
+  </section>
 
   <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden>
     <div class="ct-head"><span id="ct-label" class="ct-label">COPIED</span><span id="ct-count" class="ct-count"></span></div>

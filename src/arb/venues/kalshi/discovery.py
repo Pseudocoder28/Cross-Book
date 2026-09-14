@@ -17,6 +17,12 @@ import httpx
 from arb.config import AppConfig
 from arb.run import RunContext
 from arb.types import RawMessage
+from arb.venues.kalshi.rest import (
+    KalshiEvent,
+    KalshiMarket,
+    parse_event_response,
+    parse_market_response,
+)
 
 MAX_PAGES = 10
 ENOUGH_CANDIDATES = 200
@@ -27,6 +33,54 @@ class DiscoveredMarket:
     ticker: str
     volume_24h: float  # analytics/display only — float is fine here
     title: str  # "<event title> — <yes_sub_title>", best effort
+    market: KalshiMarket
+    event: KalshiEvent
+
+
+def _stamp(run: RunContext, stream: str, payload: bytes) -> RawMessage:
+    return RawMessage(
+        venue="kalshi",
+        stream=stream,
+        payload=payload,
+        recv_ts_ns=time.time_ns(),
+        recv_mono_ns=time.monotonic_ns(),
+        run_id=run.run_id,
+        ingest_seq=run.next_ingest_seq(),
+    )
+
+
+async def fetch_market(
+    config: AppConfig,
+    run: RunContext,
+    ticker: str,
+    *,
+    sink: Callable[[RawMessage], object] | None = None,
+) -> KalshiMarket:
+    """``GET /markets/{ticker}`` (documented), recorded before parsing."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{config.kalshi_api_base}/markets/{ticker}")
+    raw = _stamp(run, "rest:market", response.content)
+    if sink is not None:
+        sink(raw)
+    response.raise_for_status()
+    return parse_market_response(raw)
+
+
+async def fetch_event(
+    config: AppConfig,
+    run: RunContext,
+    event_ticker: str,
+    *,
+    sink: Callable[[RawMessage], object] | None = None,
+) -> KalshiEvent:
+    """``GET /events/{event_ticker}`` (documented), recorded before parsing."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{config.kalshi_api_base}/events/{event_ticker}")
+    raw = _stamp(run, "rest:event", response.content)
+    if sink is not None:
+        sink(raw)
+    response.raise_for_status()
+    return parse_event_response(raw)
 
 
 async def fetch_liquid_markets(
@@ -54,29 +108,32 @@ async def fetch_liquid_markets(
                 params["cursor"] = cursor
             response = await client.get(f"{config.kalshi_api_base}/events", params=params)
             if sink is not None:
-                sink(
-                    RawMessage(
-                        venue="kalshi",
-                        stream="rest:events",
-                        payload=response.content,
-                        recv_ts_ns=time.time_ns(),
-                        recv_mono_ns=time.monotonic_ns(),
-                        run_id=run.run_id,
-                        ingest_seq=run.next_ingest_seq(),
-                    )
-                )
+                sink(_stamp(run, "rest:events", response.content))
             response.raise_for_status()
             doc = json.loads(response.content)
-            for event in doc["events"]:
-                event_title = str(event.get("title") or "")
-                for market in event.get("markets") or []:
-                    volume = float(market.get("volume_24h_fp") or 0)
+            for event_doc in doc["events"]:
+                # Nested markets are full Market objects (get-events.md: items
+                # $ref Market), so the same models apply.
+                try:
+                    event = KalshiEvent.model_validate(event_doc)
+                except ValueError:
+                    continue
+                for market_doc in event_doc.get("markets") or []:
+                    try:
+                        market = KalshiMarket.model_validate(market_doc)
+                    except ValueError:
+                        continue
+                    volume = float(market.volume_24h_fp or 0)
                     if volume <= 0:
                         continue
-                    sub = str(market.get("yes_sub_title") or "")
-                    title = f"{event_title} — {sub}" if sub else event_title
-                    found[market["ticker"]] = DiscoveredMarket(
-                        ticker=market["ticker"], volume_24h=volume, title=title
+                    sub = market.yes_sub_title
+                    title = f"{event.title} — {sub}" if sub else event.title
+                    found[market.ticker] = DiscoveredMarket(
+                        ticker=market.ticker,
+                        volume_24h=volume,
+                        title=title,
+                        market=market,
+                        event=event,
                     )
             cursor = doc.get("cursor") or ""
             if not cursor or len(found) >= ENOUGH_CANDIDATES:

@@ -2,9 +2,15 @@
 
 ## Current milestone
 
-**M10 — select-to-copy in the terminal UI.**
+**M11 — DES market description page.**
 
 ## What works
+
+- Enter / `DES` / double-click opens a Bloomberg-style description page for the selected market: event title and candidate, ticker anatomy (series → event → market), full resolution rules, settlement sources, status/category/type/mutually-exclusive/early-close, venue quote with implied probability, live book summary (best levels, depth totals, age), lifetime + 24h volume, open interest, open/close/expected-expiration in UTC and ET. Arrows page between markets; Esc closes.
+- Backend: `GET /api/markets/{market_id}` served from discovery-seeded metadata with a 30 s TTL live refresh via the verified `GET /markets/{ticker}` and `GET /events/{event_ticker}` (both recorded before parsing); 404 for unknown markets. New parsers + `build_market_detail` tested against real captured fixtures.
+- Verified in real Chrome over CDP: open/page/close/command flows; live refresh observed (`LIVE · 1s AGO`). 125 tests; ruff, pyright, `node --check` clean.
+
+### From M10
 
 - Selecting anything in the terminal copies it to the clipboard and shows a bottom-right `COPIED · N CHARS · N ROWS` toast (red `COPY BLOCKED` if the browser refuses). Multi-row selections copy as TSV (tab-separated cells, one row per line) so ladder/tape/system selections paste into a spreadsheet with columns intact; a selection inside a single cell copies the exact highlighted substring. Live re-rendering pauses while the pointer is down so updates can't wipe a selection mid-drag, then flushes on release.
 - Verified in real Chrome over the DevTools protocol: multi-row ladder → `"1.90\t98.10\t8,838.22\n1.80\t98.20\t1,550"`, system rows → `"MSG TOTAL\t507\nRATE 1S\t0.0/s"`, partial cell → exact substring, plain click copies nothing, UI resumes after the drag, toast auto-hides.
