@@ -204,6 +204,19 @@ something it isn't. `ServerState.polymarket_status()` reports `"connecting"`
 before the first successful poll, `"polled"` while polls are succeeding
 within `VENUE_DOWN_AFTER_S` (30s), and `"down"` past that.
 
+## Clipped text must stay copy-exact
+
+Several columns are too narrow for a full identifier — a Polymarket slug
+runs to 43 characters, a run id to 25. The rule is that **clipping is
+CSS-only**: the element keeps its whole value in `textContent` (which is
+what select-to-copy reads, below) and `text-overflow: ellipsis` handles the
+visuals, with the full value mirrored into `title` so hovering reveals it.
+
+Truncating the text itself is a bug, not a layout choice: a half-copied slug
+or run id looks legitimate and resolves to nothing — the status bar's run id
+did exactly that (`slice(0, 12)`), producing ids `arb replay` could not
+find. See [`venues/polymarket-us.md`](venues/polymarket-us.md#website-links-vs-api-slugs).
+
 ## Select-to-copy
 
 Selecting anything in the terminal — a ladder region, tape rows, system

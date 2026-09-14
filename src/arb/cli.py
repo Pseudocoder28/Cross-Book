@@ -100,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=50,
         help="max rows to print, best score first (0 = all; default: 50)",
     )
+    backfill = pairs_sub.add_parser(
+        "backfill",
+        help="record event slugs on pairs proposed before they were captured",
+    )
+    backfill.add_argument("--no-record", action="store_true")
     show = pairs_sub.add_parser(
         "show", help="full detail for one pair (untruncated ids, title, url)"
     )
@@ -258,6 +263,10 @@ def _run_pairs(args: argparse.Namespace) -> int:
             # Hint on stderr so it never pollutes a pipe.
             print(f"(first {limit}; use --limit 0 for all)", file=sys.stderr)
         return 0
+    if args.pairs_command == "backfill":
+        updated = uvloop.run(pairs_run.backfill(config, record=not args.no_record))
+        print(f"backfilled event slugs on {updated} pairs")
+        return 0
     if args.pairs_command == "show":
         row = uvloop.run(with_engine(lambda e: get_pair(e, args.pair_id)))
         if row is None:
@@ -273,7 +282,7 @@ def _run_pairs(args: argparse.Namespace) -> int:
             return 1
         print(pairs_run.format_rows([row]))
         return 0
-    print("usage: arb pairs {propose|list|show|confirm|reject}", file=sys.stderr)
+    print("usage: arb pairs {propose|backfill|list|show|confirm|reject}", file=sys.stderr)
     return 2
 
 

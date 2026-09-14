@@ -195,3 +195,60 @@ def test_pair_detail_surfaces_searchable_title_and_url() -> None:
     assert "Elon Musk Net Worth on December 31?" in out
     assert "https://polymarket.us/event/elonmusk-2026-12-31" in out
     assert "pnwpc-elonmusk-2026-12-31-gt600b" in out
+
+
+async def test_backfill_event_slugs_fills_only_what_is_missing() -> None:
+    """Pairs proposed before event slugs existed get linkable, without
+    re-scoring and without disturbing a human decision."""
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            insert(PairRow),
+            [
+                {  # legacy row: no event_slug on either leg
+                    "kalshi_market_id": "kalshi:K1",
+                    "polymarket_market_id": "polymarket_us:p1",
+                    "status": "confirmed",
+                    "score": 0.9,
+                    "detail": {
+                        "kalshi": {"market_id": "kalshi:K1", "ticker": "K1"},
+                        "polymarket_us": {"market_id": "polymarket_us:p1", "ticker": "p1"},
+                    },
+                },
+                {  # already has one; must not be overwritten
+                    "kalshi_market_id": "kalshi:K2",
+                    "polymarket_market_id": "polymarket_us:p2",
+                    "status": "proposed",
+                    "score": 0.8,
+                    "detail": {
+                        "kalshi": {"market_id": "kalshi:K2", "ticker": "K2"},
+                        "polymarket_us": {
+                            "market_id": "polymarket_us:p2",
+                            "ticker": "p2",
+                            "event_slug": "keep-me",
+                        },
+                    },
+                },
+            ],
+        )
+    try:
+        updated = await store.backfill_event_slugs(
+            engine,
+            {
+                "kalshi:K1": "KEVENT1",
+                "polymarket_us:p1": "pevent1",
+                "polymarket_us:p2": "should-not-apply",
+            },
+        )
+        assert updated == 1  # only the legacy row changed
+        rows = {r["kalshi"]["ticker"]: r for r in await store.list_pairs(engine)}
+        assert rows["K1"]["kalshi"]["event_slug"] == "KEVENT1"
+        assert rows["K1"]["polymarket_us"]["event_slug"] == "pevent1"
+        assert rows["K1"]["status"] == "confirmed"  # decision untouched
+        assert rows["K1"]["score"] == 0.9  # score untouched
+        assert rows["K2"]["polymarket_us"]["event_slug"] == "keep-me"  # not overwritten
+        # A market id absent from the map is simply left alone.
+        assert await store.backfill_event_slugs(engine, {"kalshi:nope": "x"}) == 0
+    finally:
+        await engine.dispose()

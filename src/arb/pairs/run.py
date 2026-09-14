@@ -9,6 +9,7 @@ from functools import partial
 from typing import Any
 
 from arb.config import AppConfig
+from arb.pairs import store as pairs_store
 from arb.pairs.matcher import PairCandidate, propose_pairs
 from arb.pairs.store import upsert_proposals
 from arb.recorder import Recorder
@@ -16,8 +17,10 @@ from arb.run import RunContext
 from arb.storage.db import insert_raw_messages, make_engine
 from arb.supervise import supervise
 from arb.venues.kalshi import discovery as kalshi_discovery
+from arb.venues.kalshi.rest import market_id as kalshi_market_id
 from arb.venues.polymarket_us import discovery as pm_discovery
 from arb.venues.polymarket_us.rest import event_url as pm_event_url
+from arb.venues.polymarket_us.rest import market_id as pm_market_id
 
 log = logging.getLogger(__name__)
 
@@ -154,3 +157,39 @@ def format_pair_detail(row: dict[str, Any]) -> str:
         "\nor open the url."
     )
     return "\n".join(out)
+
+
+async def backfill(config: AppConfig, *, record: bool = False) -> int:
+    """Record event slugs onto pairs proposed before the matcher captured them.
+
+    Fetches both universes exactly as :func:`propose` does, but writes only
+    the missing ``event_slug`` on each leg — no re-scoring, no new rows, and
+    no human decision is touched.
+    """
+    run = RunContext(config.run_id or None)
+    engine = make_engine(config.database_url)
+    recorder: Recorder | None = None
+    writer: asyncio.Task[object] | None = None
+    if record:
+        recorder = Recorder(partial(insert_raw_messages, engine))
+        writer = asyncio.create_task(supervise(recorder.run, name="recorder-writer"))
+    sink = recorder.enqueue if recorder is not None else None
+    try:
+        by_market_id: dict[str, str] = {}
+        for event, markets in await kalshi_discovery.fetch_universe(config, run, sink=sink):
+            for m in markets:
+                by_market_id[kalshi_market_id(m.ticker)] = event.event_ticker
+        for dm in await pm_discovery.fetch_active_markets(config, run, sink=sink):
+            by_market_id[pm_market_id(dm.slug)] = dm.event.slug
+        log.info("backfill: resolved %d market -> event slugs", len(by_market_id))
+        updated = await pairs_store.backfill_event_slugs(engine, by_market_id)
+        log.info("backfill: updated %d pairs", updated)
+        return updated
+    finally:
+        if recorder is not None and writer is not None:
+            if not await recorder.drain(DRAIN_TIMEOUT_S):
+                log.warning("recorder drain timed out")
+            writer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await writer
+        await engine.dispose()

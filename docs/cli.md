@@ -168,8 +168,23 @@ site does match) and, for Polymarket US, the verified
 `https://polymarket.us/event/<event-slug>` link. See
 [`venues/polymarket-us.md`](venues/polymarket-us.md).
 
-Pairs proposed before the event slug was captured show a hint to re-run
-`arb pairs propose` instead of a URL; the event title is always available.
+Pairs proposed before the event slug was captured are fixed by
+`arb pairs backfill` (below); the event title is always available either way.
+
+### `arb pairs backfill`
+
+```sh
+uv run arb pairs backfill [--no-record]
+```
+
+Records the venue `event_slug` on pairs that were proposed before the
+matcher captured it, so `arb pairs show` can build a link for them. Fetches
+both universes exactly as `propose` does, but writes **only** the missing
+field — no re-scoring, no new rows, and no human decision is touched.
+
+Markets that have since closed or resolved are not in the active universe
+and keep an empty event slug; they are untradeable anyway, so no link is
+needed. Run it once after upgrading past the change that added event slugs.
 
 ### `arb pairs confirm ID` / `arb pairs reject ID`
 

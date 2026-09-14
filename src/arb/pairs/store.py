@@ -104,6 +104,41 @@ async def get_pair(engine: AsyncEngine, pair_id: int) -> dict[str, Any] | None:
     return row_payload(row) if row is not None else None  # pyright: ignore[reportArgumentType]
 
 
+async def backfill_event_slugs(engine: AsyncEngine, by_market_id: dict[str, str]) -> int:
+    """Fill in each leg's ``event_slug`` from a market_id -> event_slug map.
+
+    Pairs proposed before the matcher captured event slugs carry a leg detail
+    with no way to build a venue link. Re-proposing would refresh them, but it
+    also re-scores the whole universe; this touches nothing but the missing
+    field, leaving status, score and every other detail key alone.
+    """
+    if not by_market_id:
+        return 0
+    updated = 0
+    async with engine.begin() as conn:
+        rows = (await conn.execute(select(PairRow))).all()
+        for row in rows:
+            detail = dict(row.detail)  # pyright: ignore[reportAttributeAccessIssue]
+            changed = False
+            for key in ("kalshi", "polymarket_us"):
+                leg = dict(detail.get(key) or {})
+                if leg.get("event_slug"):
+                    continue
+                slug = by_market_id.get(leg.get("market_id", ""))
+                if slug:
+                    leg["event_slug"] = slug
+                    detail[key] = leg
+                    changed = True
+            if changed:
+                await conn.execute(
+                    update(PairRow)
+                    .where(PairRow.id == row.id)  # pyright: ignore[reportAttributeAccessIssue]
+                    .values(detail=detail)
+                )
+                updated += 1
+    return updated
+
+
 async def decide_many(engine: AsyncEngine, pair_ids: Sequence[int], status: str) -> int:
     """Apply one decision to many pairs (a whole event pairing at once)."""
     if status not in STATUSES:
