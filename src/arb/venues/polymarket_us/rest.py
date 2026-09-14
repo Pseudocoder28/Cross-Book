@@ -29,6 +29,20 @@ def market_id(slug: str) -> str:
     return f"{VENUE}:{slug}"
 
 
+WEB_BASE = "https://polymarket.us"
+
+
+def event_url(event_slug: str) -> str | None:
+    """Human-facing page for an event, or None without an event slug.
+
+    Verified live 2026-09-14: ``/event/<event-slug>`` serves the market page
+    (200, title matches), while the *market* slug does not route there and is
+    not what the site's search box matches — which is why pasting a market
+    slug into the site finds nothing. See docs/venue-notes.md.
+    """
+    return f"{WEB_BASE}/event/{event_slug}" if event_slug else None
+
+
 class Amount(BaseModel):
     """Gateway money object: a decimal dollar string plus currency."""
 

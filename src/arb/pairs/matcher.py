@@ -41,6 +41,9 @@ class MarketRef:
     close_time: datetime | None
     series_ticker: str = ""  # Kalshi: fee_type/fee_multiplier live on the series
     fee_coefficient: str | None = None  # Polymarket US: per-market taker Θ
+    # The venue's *event* identifier. Both sites address markets by event, not
+    # by market slug/ticker, so this is what a human-facing link needs.
+    event_slug: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -363,6 +363,32 @@ Auth0) is separate credentialing and out of scope for now._
   book staleness budget for this venue is set to three poll cycles. The
   WebSocket (needs credentials) is the only path to real-time books.
 
+### Website addressing vs. API identifiers (verified 2026-09-14, live)
+
+- The retail site addresses markets by **event slug**, not market slug:
+  `https://polymarket.us/event/<event-slug>` returns 200 with the matching
+  page title (verified for `elonmusk-2026-12-31`). The same path with a
+  *market* slug (`pnwpc-elonmusk-2026-12-31-gt600b`) returns 200 but renders
+  no matching content, and `/market/<slug>` / `/markets/<slug>` 307-redirect.
+- The site's search box does not match market slugs either — searching
+  `pnwpc-elonmusk-2026-12-31-gt600b` finds nothing while the market is live
+  and open on the API. Search the market's `question` / event `title`
+  instead ("Elon Musk Net Worth on December 31?").
+- Consequence: anything user-facing that shows a market must carry the event
+  slug (for a link) or the question text (for a search), because the market
+  slug alone is a dead end for a human. `MarketRef.event_slug` and
+  `polymarket_us.rest.event_url()` exist for this.
+- A slug that 404s on `GET /v1/markets/{slug}/book`
+  (`{"code":5,"message":"market with slug ... not found"}`) is genuinely
+  absent; the `slug=` filter on `GET /v1/markets` likewise returns an empty
+  `markets` array rather than an error.
+
+### Kalshi website URL format — UNVERIFIED
+
+- `kalshi.com` answered 429 to every probe on 2026-09-14, so the web URL
+  shape for a series/event/market is **not** confirmed and no Kalshi link is
+  emitted anywhere in the code. Verify before adding one.
+
 ### Observed listings (2026-09-14, live)
 
 - `GET /v1/markets` and `GET /v1/events` return **no volume/liquidity

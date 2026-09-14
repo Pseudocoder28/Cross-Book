@@ -228,6 +228,20 @@ mapping choices:
 - `volume`/`open_interest` come from the book poll's `stats`, not the
   market listing (which, as noted, carries no activity numbers at all).
 
+## Website links vs. API slugs
+
+A market slug is an **API identifier only**. The retail site routes by
+*event* slug (`https://polymarket.us/event/<event-slug>` — verified live,
+200 with matching title) and its search box does not match market slugs at
+all, so a perfectly valid, live market slug like
+`pnwpc-elonmusk-2026-12-31-gt600b` finds nothing on the site.
+
+`MarketRef.event_slug` captures the event slug during discovery and
+`rest.event_url()` builds the link; `arb pairs show` prints both the link
+and the market's question text (what the site's search actually matches).
+Full findings, including the URL shapes that do *not* work, are recorded in
+[`../venue-notes.md`](../venue-notes.md#polymarket-us).
+
 ## Open items
 
 - WS wire format has a documentation conflict (snake_case + numeric enums

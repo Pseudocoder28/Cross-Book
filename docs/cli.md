@@ -131,11 +131,45 @@ plain-text table of the top proposals.
 ### `arb pairs list`
 
 ```sh
-uv run arb pairs list [--status proposed|confirmed|rejected]
+uv run arb pairs list [--status proposed|confirmed|rejected] [--limit N]
 ```
 
 Lists stored pairs, sorted by score descending, optionally filtered by
 status.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--status` | all | show only `proposed` / `confirmed` / `rejected` |
+| `--limit` | 50 | max rows to print, best score first (`0` = all) |
+
+A full `propose` run over both live universes stores **thousands** of
+candidates, so the listing is capped by default; the cap is applied in SQL,
+not after fetching everything. When output is truncated, a note goes to
+stderr (never stdout, so it can't pollute a pipe). Piping into `head` or
+`less` is safe — a closed pipe exits quietly with status 141 rather than
+raising `BrokenPipeError`.
+
+### `arb pairs show ID`
+
+```sh
+uv run arb pairs show 28
+```
+
+Full detail for one pair with **identifiers printed in full** — both legs'
+market ids, tickers/slugs, event titles, outcomes, close times, rules text
+and the matcher's scoring features.
+
+This exists because a table row can't carry what you need to actually look a
+market up. Neither venue's website matches a market slug or ticker in its
+search box, and Polymarket US's site routes by *event* slug, not market slug
+— so pasting `pnwpc-elonmusk-2026-12-31-gt600b` into the site finds nothing
+even though that market is live. `show` prints the event title (which the
+site does match) and, for Polymarket US, the verified
+`https://polymarket.us/event/<event-slug>` link. See
+[`venues/polymarket-us.md`](venues/polymarket-us.md).
+
+Pairs proposed before the event slug was captured show a hint to re-run
+`arb pairs propose` instead of a URL; the event title is always available.
 
 ### `arb pairs confirm ID` / `arb pairs reject ID`
 

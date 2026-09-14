@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 import uvloop
@@ -93,6 +94,16 @@ def build_parser() -> argparse.ArgumentParser:
     propose.add_argument("--no-record", action="store_true")
     listing = pairs_sub.add_parser("list", help="list stored pairs")
     listing.add_argument("--status", choices=["proposed", "confirmed", "rejected"], default=None)
+    listing.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="max rows to print, best score first (0 = all; default: 50)",
+    )
+    show = pairs_sub.add_parser(
+        "show", help="full detail for one pair (untruncated ids, title, url)"
+    )
+    show.add_argument("pair_id", type=int)
     for name in ("confirm", "reject"):
         sub = pairs_sub.add_parser(name, help=f"{name} a proposed pair by id")
         sub.add_argument("pair_id", type=int)
@@ -220,7 +231,7 @@ def _run_replay(args: argparse.Namespace) -> int:
 def _run_pairs(args: argparse.Namespace) -> int:
     from arb.config import AppConfig
     from arb.pairs import run as pairs_run
-    from arb.pairs.store import decide, list_pairs
+    from arb.pairs.store import decide, get_pair, list_pairs
     from arb.storage.db import make_engine
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -240,8 +251,19 @@ def _run_pairs(args: argparse.Namespace) -> int:
             await engine.dispose()
 
     if args.pairs_command == "list":
-        rows = uvloop.run(with_engine(lambda e: list_pairs(e, status=args.status)))
+        limit = args.limit if args.limit > 0 else None
+        rows = uvloop.run(with_engine(lambda e: list_pairs(e, status=args.status, limit=limit)))
         print(pairs_run.format_rows(rows))
+        if limit is not None and len(rows) == limit:
+            # Hint on stderr so it never pollutes a pipe.
+            print(f"(first {limit}; use --limit 0 for all)", file=sys.stderr)
+        return 0
+    if args.pairs_command == "show":
+        row = uvloop.run(with_engine(lambda e: get_pair(e, args.pair_id)))
+        if row is None:
+            print(f"pair {args.pair_id} not found", file=sys.stderr)
+            return 1
+        print(pairs_run.format_pair_detail(row))
         return 0
     if args.pairs_command in ("confirm", "reject"):
         status = "confirmed" if args.pairs_command == "confirm" else "rejected"
@@ -251,11 +273,30 @@ def _run_pairs(args: argparse.Namespace) -> int:
             return 1
         print(pairs_run.format_rows([row]))
         return 0
-    print("usage: arb pairs {propose|list|confirm|reject}", file=sys.stderr)
+    print("usage: arb pairs {propose|list|show|confirm|reject}", file=sys.stderr)
     return 2
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point. Translates a closed stdout pipe into a quiet exit.
+
+    Piping a listing into ``head``/``less`` closes the pipe early; without
+    this, Python raises BrokenPipeError mid-print and again while flushing
+    stdout at exit, dumping a traceback over an otherwise fine result.
+    Handled here rather than by restoring the default SIGPIPE disposition,
+    because the same entry point launches the long-running servers (``arb
+    ui``, ``arb record``) where a broken client socket must never kill the
+    process.
+    """
+    try:
+        return _dispatch(argv)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 141  # 128 + SIGPIPE, what a shell reports for a pipe death
+
+
+def _dispatch(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:

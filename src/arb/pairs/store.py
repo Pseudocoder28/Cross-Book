@@ -26,6 +26,7 @@ def _leg(ref: Any) -> dict[str, Any]:
         "rules": ref.rules,
         "close_time": ref.close_time.isoformat() if ref.close_time else None,
         "series_ticker": ref.series_ticker,
+        "event_slug": ref.event_slug,
         "fee_coefficient": ref.fee_coefficient,
     }
 
@@ -81,13 +82,26 @@ def row_payload(row: PairRow) -> dict[str, Any]:
     }
 
 
-async def list_pairs(engine: AsyncEngine, *, status: str | None = None) -> list[dict[str, Any]]:
+async def list_pairs(
+    engine: AsyncEngine, *, status: str | None = None, limit: int | None = None
+) -> list[dict[str, Any]]:
+    """Stored pairs, best score first. ``limit`` caps rows in SQL — a full
+    universe proposal run stores thousands, and most callers want the top few."""
     stmt = select(PairRow).order_by(PairRow.score.desc(), PairRow.id)
     if status is not None:
         stmt = stmt.where(PairRow.status == status)
+    if limit is not None:
+        stmt = stmt.limit(limit)
     async with engine.connect() as conn:
         rows = (await conn.execute(stmt)).all()
     return [row_payload(r) for r in rows]  # pyright: ignore[reportArgumentType]
+
+
+async def get_pair(engine: AsyncEngine, pair_id: int) -> dict[str, Any] | None:
+    """One pair by id, or None."""
+    async with engine.connect() as conn:
+        row = (await conn.execute(select(PairRow).where(PairRow.id == pair_id))).first()
+    return row_payload(row) if row is not None else None  # pyright: ignore[reportArgumentType]
 
 
 async def decide_many(engine: AsyncEngine, pair_ids: Sequence[int], status: str) -> int:
