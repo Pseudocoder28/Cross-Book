@@ -4,6 +4,7 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: arb
       POSTGRES_PASSWORD: arb
@@ -20,6 +21,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.53.0
+    restart: unless-stopped
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
@@ -28,6 +30,7 @@ services:
 
   grafana:
     image: grafana/grafana:11.1.0
+    restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
@@ -36,6 +39,7 @@ services:
 
   app:
     build: .
+    restart: unless-stopped
     env_file:
       - path: .env
         required: false
@@ -55,8 +59,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # Replaced with the recorder entrypoint once `arb record` exists.
-    command: ["sleep", "infinity"]
+    # Runs the terminal UI, which also records raw market data into Postgres
+    # while it runs (recording is on unless --no-record is passed). --host is
+    # explicit here and matches UI_HOST above; the host port mapping keeps it
+    # 127.0.0.1-only. Metrics are served on GET /metrics of this same port.
+    command: ["uv", "run", "arb", "ui", "--top", "20", "--host", "0.0.0.0"]
 
 volumes:
   pgdata:
