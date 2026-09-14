@@ -30,6 +30,12 @@ class AppConfig(BaseSettings):
     polymarket_us_ws_url: str = "wss://api.polymarket.us/v1/ws/markets"
     polymarket_us_access_key: str | None = None
     polymarket_us_secret_key_path: Path = Path("secrets/polymarket_us_secret")
+    # REST polling budget until WS credentials exist. The docs say 20 req/s
+    # per IP; the book endpoint actually behaves like a 5-token bucket that
+    # refills one token per ~2 s (measured, venue-notes). 0.45/s leaves room
+    # for the once-a-minute reachability probe.
+    polymarket_us_poll_rate: float = 0.45
+    polymarket_us_poll_top: int = 8
 
     # --- Postgres (127.0.0.1 only; SSH tunnel on the VM) ---
     database_url: str = "postgresql+asyncpg://arb:arb@127.0.0.1:5432/arb"

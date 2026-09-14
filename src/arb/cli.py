@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="seconds to run; omit to run until interrupted",
     )
+    _add_poly_args(record)
     ui = subparsers.add_parser(
         "ui",
         help="serve the live market-data terminal UI (read-only)",
@@ -66,7 +67,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="don't write raw messages to Postgres while serving the UI",
     )
+    _add_poly_args(ui)
     return parser
+
+
+def _add_poly_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--poly-top",
+        type=int,
+        default=8,
+        help="Polymarket US markets to poll over public REST (0 disables; default: 8)",
+    )
+    sub.add_argument(
+        "--poly-slugs",
+        default=None,
+        help="comma-separated Polymarket US market slugs to poll instead of discovery",
+    )
+
+
+def _split(csv: str | None) -> list[str] | None:
+    return [t.strip() for t in csv.split(",") if t.strip()] if csv else None
 
 
 def _run_doctor() -> int:
@@ -90,6 +110,8 @@ def _run_record(args: argparse.Namespace) -> int:
                 tickers=tickers,
                 top_n=args.top,
                 duration_s=args.duration,
+                poly_top=args.poly_top,
+                poly_slugs=_split(args.poly_slugs),
             )
         )
     except KeyboardInterrupt:
@@ -113,6 +135,8 @@ def _run_ui(args: argparse.Namespace) -> int:
                 record=not args.no_record,
                 host=args.host if args.host is not None else config.ui_host,
                 port=args.port if args.port is not None else config.ui_port,
+                poly_top=args.poly_top,
+                poly_slugs=_split(args.poly_slugs),
             )
         )
     except KeyboardInterrupt:

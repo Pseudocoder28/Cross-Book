@@ -29,12 +29,23 @@ def market_id(slug: str) -> str:
     return f"{VENUE}:{slug}"
 
 
+class Amount(BaseModel):
+    """Gateway money object: a decimal dollar string plus currency."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    value: str = ""
+    currency: str = "USD"
+
+
 class PolymarketUSMarket(BaseModel):
     """The slice of a gateway market object the system uses; extras ignored.
 
     Field names per
     https://docs.polymarket.us/api-reference/markets/get-markets — one
     instrument per market (YES); ``slug`` is the identifier used everywhere.
+    Live listings carry no volume fields (docs list them; reality omits them —
+    venue-notes), so activity comes from the book's ``stats`` instead.
     """
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
@@ -56,6 +67,41 @@ class PolymarketUSMarket(BaseModel):
     minimum_trade_qty: int | None = Field(default=None, alias="minimumTradeQty")
     order_price_min_tick_size: Decimal | None = Field(default=None, alias="orderPriceMinTickSize")
     fee_coefficient: Decimal | None = Field(default=None, alias="feeCoefficient")
+    best_bid_quote: Amount | None = Field(default=None, alias="bestBidQuote")
+    best_ask_quote: Amount | None = Field(default=None, alias="bestAskQuote")
+
+
+class PolymarketUSEvent(BaseModel):
+    """Event metadata per
+    https://docs.polymarket.us/api-reference/events/get-events (extras ignored).
+    Nested ``markets`` are parsed separately."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    id: str = ""
+    slug: str
+    ticker: str = ""
+    title: str = ""
+    description: str = ""
+    category: str = ""
+    series_slug: str = Field(default="", alias="seriesSlug")
+    active: bool = True
+    closed: bool = False
+    start_date: datetime | None = Field(default=None, alias="startDate")
+    end_date: datetime | None = Field(default=None, alias="endDate")
+
+
+class PolymarketUSBookStats(BaseModel):
+    """Activity numbers that ride along with ``GET /v1/markets/{slug}/book``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    slug: str
+    state: str = ""
+    transact_time: datetime | None = None
+    shares_traded: int = 0  # Qty units (0.0001 contracts)
+    open_interest: int = 0  # Qty units
+    last_trade_ticks: int | None = None
 
 
 def _loads(payload: bytes) -> Any:
@@ -69,6 +115,70 @@ def parse_markets_response(raw: RawMessage) -> list[PolymarketUSMarket]:
         return [PolymarketUSMarket.model_validate(m) for m in doc["markets"]]
     except (KeyError, TypeError, ValueError) as exc:
         raise ParseError(f"polymarket_us markets response: {exc}") from exc
+
+
+def parse_events_response(
+    raw: RawMessage,
+) -> list[tuple[PolymarketUSEvent, list[PolymarketUSMarket]]]:
+    """``GET /v1/events`` → (event, nested markets) pairs. Markets that fail
+    validation are skipped, never fatal."""
+    try:
+        doc = _loads(raw.payload)
+        out: list[tuple[PolymarketUSEvent, list[PolymarketUSMarket]]] = []
+        for event_doc in doc["events"]:
+            event = PolymarketUSEvent.model_validate(event_doc)
+            markets: list[PolymarketUSMarket] = []
+            for market_doc in event_doc.get("markets") or []:
+                try:
+                    markets.append(PolymarketUSMarket.model_validate(market_doc))
+                except ValueError:
+                    continue
+            out.append((event, markets))
+        return out
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParseError(f"polymarket_us events response: {exc}") from exc
+
+
+def _amount_ticks(obj: Any) -> int | None:
+    if not isinstance(obj, dict):
+        return None
+    value = obj.get("value")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return ticks_from_dollars(value)
+    except ValueError:
+        return None
+
+
+def parse_book_stats(raw: RawMessage) -> PolymarketUSBookStats:
+    """Activity stats from ``GET /v1/markets/{slug}/book`` (same payload as
+    :func:`parse_book_response`; fields per venue-notes and the captured
+    fixture)."""
+    try:
+        market_data = _loads(raw.payload)["marketData"]
+        stats = market_data.get("stats") or {}
+        transact = market_data.get("transactTime")
+        return PolymarketUSBookStats(
+            slug=market_data["marketSlug"],
+            state=str(market_data.get("state") or ""),
+            transact_time=datetime.fromisoformat(_clip_ns(transact)) if transact else None,
+            shares_traded=qty_from_contracts(str(stats.get("sharesTraded") or "0")),
+            open_interest=qty_from_contracts(str(stats.get("openInterest") or "0")),
+            last_trade_ticks=_amount_ticks(stats.get("lastTradePx")),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParseError(f"polymarket_us book stats: {exc}") from exc
+
+
+def _clip_ns(ts: str) -> str:
+    """RFC3339 with nanoseconds → microseconds, which fromisoformat accepts."""
+    if "." in ts:
+        head, tail = ts.split(".", 1)
+        digits = "".join(ch for ch in tail if ch.isdigit())
+        suffix = tail[len(digits) :]
+        return f"{head}.{digits[:6]}{suffix}"
+    return ts
 
 
 def _level(entry: Any) -> Level:

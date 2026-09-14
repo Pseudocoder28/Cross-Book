@@ -47,6 +47,20 @@ SUPERVISOR_RESTARTS = Counter(
     labelnames=["task"],
 )
 
+# REST polling sources (Polymarket US until its WS credentials exist).
+# status is the HTTP status code, or "error" for transport failures.
+REST_POLLS = Counter(
+    "arb_rest_polls_total",
+    "REST market-data poll attempts by venue and outcome",
+    labelnames=["venue", "status"],
+)
+
+REST_RATE_LIMITED = Counter(
+    "arb_rest_rate_limited_total",
+    "REST polls answered 429 (each one pauses the poller)",
+    labelnames=["venue"],
+)
+
 RECORDER_ENQUEUED = Counter(
     "arb_recorder_enqueued_total",
     "Raw messages accepted onto the recorder queue",

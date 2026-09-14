@@ -320,13 +320,29 @@ Auth0) is separate credentialing and out of scope for now._
 
 ### Observed rate limiting (2026-09-14, live, contradicts docs)
 
-- Docs say "20 requests per second per IP" for the public gateway. In
-  practice `GET /v1/markets/{slug}/book` 429'd on a burst of ~17 sequential
-  requests (~20/s effective) and kept 429ing for ~10 s afterwards — a
-  cooldown/penalty window the docs don't mention ("no penalty" is claimed
-  only for the authenticated API). Even at 1 req/s one further 429 appeared
-  right after recovery. Poller design: token bucket well under the cap
-  (≤ ~5 req/s), immediate stop on 429 with ≥ 10 s backoff.
+- Docs say "20 requests per second per IP" for the public gateway. Measured
+  on `GET /v1/markets/{slug}/book` while polling 8 markets: **exactly five
+  requests succeed, then a 429, at every spacing tried (0.25 s and 0.5 s)**;
+  after a 10 s pause, five more succeed. That is a 5-token bucket refilling
+  ~1 token / 2 s — roughly 0.5 req/s sustained, 40× below the documented
+  figure. Poller default is 0.45 req/s (leaving one token per minute for
+  the reachability probe), discovery pages are spaced 2.2 s apart, and a
+  429 pauses polling for a full 10 s refill.
+- Consequence: with N polled markets each book refreshes every ~2N s; the
+  book staleness budget for this venue is set to three poll cycles. The
+  WebSocket (needs credentials) is the only path to real-time books.
+
+### Observed listings (2026-09-14, live)
+
+- `GET /v1/markets` and `GET /v1/events` return **no volume/liquidity
+  fields** despite the docs listing `volume`, `volume24hr`, `liquidity`;
+  per-market activity exists only in the book's `stats` (`sharesTraded`,
+  `openInterest`, `lastTradePx`) and the BBO endpoint. Discovery therefore
+  ranks by category (non-sports first) rather than volume. Events carry
+  `slug`, `ticker`, `title`, `category`, `seriesSlug`, `startDate`,
+  `endDate`, nested `markets` (full Market objects incl. `description`).
+- Live census: 200 open markets — 196 sports, 4 politics (House/Senate
+  midterm winners); gubernatorial markets appear on later pages.
 
 ### Observed latency (2026-09-14, from a residential connection; VM will differ)
 

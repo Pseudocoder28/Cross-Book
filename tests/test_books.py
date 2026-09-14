@@ -135,3 +135,45 @@ def test_delta_for_unseen_market_creates_book_that_needs_resync() -> None:
     assert book is not None
     assert book.needs_resync
     assert book.bids() == () and book.asks() == ()
+
+
+def test_level_deltas_diff_snapshots() -> None:
+    from arb.book import Book, BookSnapshot, Level
+    from arb.books import level_deltas
+    from arb.types import BookSide
+
+    book = Book("polymarket_us:x", staleness_limit_ns=10**9)
+    book.apply_snapshot(
+        BookSnapshot("polymarket_us:x", (Level(400, 10), Level(300, 5)), (Level(500, 7),), None),
+        mono_ns=0,
+    )
+    incoming = BookSnapshot(
+        "polymarket_us:x",
+        (Level(400, 12), Level(200, 1)),  # 400: +2, 300: removed, 200: new
+        (Level(500, 7), Level(600, 3)),  # 500: unchanged, 600: new
+        None,
+    )
+    deltas = level_deltas(book, incoming)
+    assert [(d.side, d.price, d.qty) for d in deltas] == [
+        (BookSide.BID, 400, 2),
+        (BookSide.BID, 300, -5),
+        (BookSide.BID, 200, 1),
+        (BookSide.ASK, 600, 3),
+    ]
+    assert level_deltas(None, incoming)[0].qty == 12  # from nothing: every level is new
+
+
+def test_per_venue_staleness_override() -> None:
+    from arb.book import BookSnapshot
+    from arb.books import BookManager
+
+    manager = BookManager(staleness_limit_ns=5_000_000_000)
+    manager.set_venue_staleness("polymarket_us", 20_000_000_000)
+    manager.apply([BookSnapshot("kalshi:A", (), (), None)], mono_ns=0)
+    manager.apply([BookSnapshot("polymarket_us:B", (), (), None)], mono_ns=0)
+    ten_s = 10_000_000_000
+    kalshi = manager.status("kalshi:A", now_mono_ns=ten_s)
+    poly = manager.status("polymarket_us:B", now_mono_ns=ten_s)
+    assert kalshi is not None and not kalshi.valid  # streaming default: stale after 5s
+    assert poly is not None and poly.valid  # polled venue: 20s budget
+    assert manager.staleness_limit_ns("polymarket_us:B") == 20_000_000_000

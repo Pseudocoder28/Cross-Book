@@ -34,6 +34,9 @@ class StubState:
     def kalshi_status(self) -> tuple[str, str]:
         return "connecting", "awaiting first WebSocket frame"
 
+    def polymarket_status(self) -> tuple[str, str]:
+        return "down", "awaiting API credentials"
+
     async def database_status(self) -> DatabaseStatus:
         return DatabaseStatus(
             connected=True,

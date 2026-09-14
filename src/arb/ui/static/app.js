@@ -217,7 +217,7 @@
       c.append(el("div", "mon-row quiet-line", "AWAITING MARKETS"));
     }
     state.markets.forEach((m, i) => {
-      const row = el("div", "mon-row");
+      const row = el("div", "mon-row" + (m.venue === "polymarket_us" ? " v-pm" : ""));
       row.id = "mon-" + i;
       row.setAttribute("role", "option");
       row.setAttribute("aria-selected", "false");
@@ -721,9 +721,22 @@
       return;
     }
     $("poly-stat").textContent = String(v.state || "down").toUpperCase();
+    const polled = v.state === "polled" || v.state === "connecting";
+    $("poly-main").textContent = polled ? "REST POLLING" : "DATA UNAVAILABLE";
     if (v.detail) {
       $("poly-sub").textContent = v.detail.toUpperCase();
       $("poly-sub").title = v.detail;
+    }
+    const ps = state.stats && state.stats.polymarket_us;
+    if (polled && ps) {
+      const age = ps.last_poll_age_ms;
+      const fresh = age != null && age < 30000;
+      dot.className = "mini-dot " + (fresh ? "dot-up" : "dot-down");
+      line.textContent =
+        "polls " + nf.format(ps.polls) + " · 429s " + nf.format(ps.rate_limited)
+        + " · errors " + nf.format(ps.errors)
+        + " · last book " + (age == null ? "—" : fmtAge(age) + " ago");
+      return;
     }
     const ok = !!v.rest_reachable;
     dot.className = "mini-dot " + (ok ? "dot-up" : "dot-down");
@@ -736,7 +749,7 @@
     const st = vv ? String(vv.state || "down") : null;
     elm.textContent = st ? st.toUpperCase() : "—";
     elm.title = vv && vv.detail ? vv.detail : "";
-    elm.className = "val vstate " + (st === "live" ? "st-live" : st === "connecting" ? "st-warn" : st ? "st-down" : "st-dim");
+    elm.className = "val vstate " + (st === "live" ? "st-live" : st === "polled" ? "st-polled" : st === "connecting" ? "st-warn" : st ? "st-down" : "st-dim");
   }
 
   function renderStatusBar() {
@@ -963,6 +976,16 @@
     setText("des-type", d ? (d.market_type || "—").toUpperCase() : "—");
     setText("des-mx", d ? (d.mutually_exclusive == null ? "—" : d.mutually_exclusive ? "YES" : "NO") : "—");
     setText("des-early", d ? (d.can_close_early == null ? "—" : d.can_close_early ? "ALLOWED" : "NO") : "—");
+    // Venue-specific extras (Polymarket US): shown only when present.
+    const extras = [
+      ["des-tick-row", "des-tick", d && d.tick_size_ticks != null ? fmtCents(d.tick_size_ticks) + "¢" : null],
+      ["des-fee-row", "des-fee", d && d.fee_coefficient != null ? String(d.fee_coefficient) : null],
+      ["des-minqty-row", "des-minqty", d && d.min_trade_qty != null ? nf.format(d.min_trade_qty) : null],
+    ];
+    for (const [rowId, valId, text] of extras) {
+      $(rowId).hidden = text == null;
+      if (text != null) setText(valId, text);
+    }
 
     if (d) {
       const vb = d.yes_bid_ticks, va = d.yes_ask_ticks;
@@ -1156,7 +1179,7 @@
     state.statsBuf.push(m);
     if (state.statsBuf.length > STATS_KEEP) state.statsBuf.shift();
     pushLatencyPoint(m);
-    schedule("latnums", "system", "status", "spark");
+    schedule("latnums", "system", "status", "spark", "poly");
   }
 
   function handleMsg(m) {

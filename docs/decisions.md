@@ -34,6 +34,28 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M12 — Polymarket US REST poller (both venues live)
+
+- **Poll the public gateway now; swap in the WebSocket later behind the
+  same interface.** `PolymarketUSRestSource` is an `EventSource` like the
+  Kalshi WS source, so `arb record`, `arb ui`, the book manager and the
+  recorder are venue-blind. When credentials arrive only the source changes.
+- **Rate budget from measurement, not the docs.** The book endpoint is a
+  5-token bucket refilling ~1/2 s (venue-notes), so the default is
+  0.45 req/s with a 10 s stop on any 429. A 429 must never cascade: the
+  poller pauses, Kalshi is untouched (separate supervised task).
+- **A polled venue gets a poll-cycle staleness budget.** `BookManager`
+  supports per-venue staleness; Polymarket books are allowed three cycles
+  before STALE, otherwise every book would flag stale between polls.
+- **Snapshot diffs feed the tape.** `level_deltas` turns consecutive polled
+  snapshots into the same DELTA events a streaming venue emits, so the tape
+  and any downstream consumer see one event shape.
+- **Targets are chosen by category, not volume.** Live listings carry no
+  volume fields; non-sports markets (where Kalshi overlap lives) are
+  selected first, then sports. Explicit `--poly-slugs` overrides.
+- **The UI says POLLED, not LIVE.** Amber state, poll stats and "last book
+  Ns ago" in the panel — a polled book must never masquerade as streaming.
+
 ## M11 — DES (market description) page
 
 - **Bloomberg's `DES` is the drill-down.** Enter on a selected market (or

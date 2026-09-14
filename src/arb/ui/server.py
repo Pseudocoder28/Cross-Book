@@ -42,8 +42,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from arb.book import BookLevelUpdate
-from arb.books import BookManager
+from arb.book import BookLevelUpdate, BookSnapshot
+from arb.books import BookManager, level_deltas
 from arb.config import AppConfig
 from arb.interfaces import ParseError, ResyncRequired
 from arb.metrics import PARSE_ERRORS, UI_WS_CLIENTS, UI_WS_CLIENTS_DROPPED
@@ -59,6 +59,12 @@ from arb.venues.kalshi.discovery import fetch_event, fetch_liquid_markets, fetch
 from arb.venues.kalshi.rest import KalshiEvent, KalshiMarket
 from arb.venues.kalshi.rest import market_id as kalshi_market_id
 from arb.venues.kalshi.source import KalshiWSSource
+from arb.venues.polymarket_us.adapter import PolymarketUSMarketDataAdapter
+from arb.venues.polymarket_us.detail import build_market_detail as build_pm_detail
+from arb.venues.polymarket_us.discovery import fetch_active_markets, select_poll_targets
+from arb.venues.polymarket_us.rest import PolymarketUSEvent, PolymarketUSMarket
+from arb.venues.polymarket_us.rest import market_id as pm_market_id
+from arb.venues.polymarket_us.source import PolymarketUSRestSource
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +110,10 @@ class UIState(Protocol):
         """(state, detail) where state is "live" | "connecting" | "down"."""
         ...
 
+    def polymarket_status(self) -> tuple[str, str]:
+        """(state, detail); state adds "polled" for REST polling without WS."""
+        ...
+
     async def database_status(self) -> DatabaseStatus: ...
 
     def hello_markets(self) -> list[dict[str, Any]]: ...
@@ -138,6 +148,7 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
     @app.get("/api/status")
     async def api_status() -> dict[str, Any]:
         kalshi_state, kalshi_detail = state.kalshi_status()
+        pm_state, pm_detail = state.polymarket_status()
         db = await state.database_status()
         return {
             "run_id": state.run_id,
@@ -145,8 +156,8 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
             "venues": {
                 "kalshi": {"state": kalshi_state, "detail": kalshi_detail},
                 "polymarket_us": {
-                    "state": "down",
-                    "detail": "awaiting API credentials",
+                    "state": pm_state,
+                    "detail": pm_detail,
                     "rest_reachable": state.polymarket_rest_reachable,
                 },
             },
@@ -234,6 +245,11 @@ class ServerState:
         self._detail_meta: dict[str, tuple[KalshiMarket, KalshiEvent | None]] = {}
         self._detail_cache: dict[str, dict[str, Any]] = {}
         self._detail_refresh_fn: DetailRefreshFn | None = None
+        # Polymarket US REST polling (until WS credentials exist).
+        self.pm_source: PolymarketUSRestSource | None = None
+        self.pm_adapter: PolymarketUSMarketDataAdapter | None = None
+        self._pm_last_frame_mono_ns: int | None = None
+        self._pm_detail_meta: dict[str, tuple[PolymarketUSMarket, PolymarketUSEvent | None]] = {}
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
         self._dirty: set[str] = set()
@@ -261,6 +277,40 @@ class ServerState:
         if age_s > VENUE_DOWN_AFTER_S:
             return "down", f"no WebSocket frame for {age_s:.0f}s"
         return "live", f"last frame {age_s * 1000:.0f}ms ago"
+
+    def polymarket_status(self) -> tuple[str, str]:
+        src = self.pm_source
+        if src is None:
+            return "down", "awaiting API credentials"
+        n = len(src.targets)
+        budget = f"{n} markets @ {src.rate_per_s:g} req/s"
+        last = self._pm_last_frame_mono_ns
+        if last is None:
+            return "connecting", f"REST polling {budget} — awaiting first book"
+        age_s = (time.monotonic_ns() - last) / 1e9
+        if age_s > VENUE_DOWN_AFTER_S:
+            return "down", f"no successful poll for {age_s:.0f}s ({src.rate_limited} rate-limited)"
+        return "polled", f"REST polling {budget} · WS awaiting credentials"
+
+    def attach_polymarket(
+        self, source: PolymarketUSRestSource, adapter: PolymarketUSMarketDataAdapter
+    ) -> None:
+        self.pm_source = source
+        self.pm_adapter = adapter
+
+    def on_polymarket_frame(self) -> None:
+        self.msg_total += 1
+        self._pm_last_frame_mono_ns = time.monotonic_ns()
+
+    def add_markets(self, markets: list[dict[str, Any]]) -> None:
+        self._markets = [*self._markets, *markets]
+
+    def seed_detail_pm(self, market: PolymarketUSMarket, event: PolymarketUSEvent | None) -> None:
+        mid = pm_market_id(market.slug)
+        self._pm_detail_meta[mid] = (market, event)
+        self._detail_cache[mid] = build_pm_detail(
+            market, event, None, source="discovery", fetched_at_ms=time.time_ns() // 1_000_000
+        )
 
     async def database_status(self) -> DatabaseStatus:
         if self._database_status_fn is None:
@@ -316,6 +366,18 @@ class ServerState:
             return None
         cached = self._detail_cache.get(market_id)
         now_ms = time.time_ns() // 1_000_000
+        pm_meta = self._pm_detail_meta.get(market_id)
+        if pm_meta is not None:
+            # Polled venue: activity numbers ride along with every book poll,
+            # so the freshest detail needs no extra request.
+            stats = self.pm_adapter.stats.get(market_id) if self.pm_adapter else None
+            return build_pm_detail(
+                pm_meta[0],
+                pm_meta[1],
+                stats,
+                source="live" if stats is not None else "discovery",
+                fetched_at_ms=now_ms,
+            )
         if cached is not None and now_ms - cached["fetched_at_ms"] < DETAIL_TTL_MS:
             return cached
         if self._detail_refresh_fn is not None:
@@ -377,7 +439,21 @@ class ServerState:
             if self.recording
             else None
         )
+        polymarket: dict[str, Any] | None = None
+        if self.pm_source is not None:
+            last = self._pm_last_frame_mono_ns
+            polymarket = {
+                "polls": self.pm_source.polls,
+                "rate_limited": self.pm_source.rate_limited,
+                "errors": self.pm_source.errors,
+                "targets": len(self.pm_source.targets),
+                "rate_per_s": self.pm_source.rate_per_s,
+                "last_poll_age_ms": (
+                    (time.monotonic_ns() - last) / 1e6 if last is not None else None
+                ),
+            }
         return {
+            "polymarket_us": polymarket,
             "t": "stats",
             "msg_total": self.msg_total,
             "msg_rate_1s": msg_rate_1s,
@@ -459,6 +535,8 @@ async def run_ui(
     record: bool,
     host: str,
     port: int,
+    poly_top: int = 8,
+    poly_slugs: list[str] | None = None,
 ) -> None:
     run = RunContext(config.run_id or None)
     log.info("run_id=%s", run.run_id)
@@ -505,6 +583,7 @@ async def run_ui(
                         "ticker": m.ticker,
                         "title": m.title,
                         "volume_24h": m.volume_24h,
+                        "venue": "kalshi",
                     }
                     for m in discovered
                 ]
@@ -515,9 +594,68 @@ async def run_ui(
             # Explicit tickers: no discovery metadata available.
             state.set_markets(
                 [
-                    {"market_id": kalshi_market_id(t), "ticker": t, "title": "", "volume_24h": 0.0}
+                    {
+                        "market_id": kalshi_market_id(t),
+                        "ticker": t,
+                        "title": "",
+                        "volume_24h": 0.0,
+                        "venue": "kalshi",
+                    }
                     for t in tickers
                 ]
+            )
+
+        # Polymarket US over public REST until WS credentials exist. Failure
+        # here must never take Kalshi down: polling is simply disabled.
+        pm_adapter = PolymarketUSMarketDataAdapter()
+        pm_source: PolymarketUSRestSource | None = None
+        pm_targets = list(poly_slugs or [])
+        if not pm_targets and poly_top > 0:
+            try:
+                pm_markets = select_poll_targets(
+                    await fetch_active_markets(config, run, sink=record_raw if record else None),
+                    poly_top,
+                )
+            except Exception:
+                log.warning("polymarket_us discovery failed; REST polling disabled", exc_info=True)
+                pm_markets = []
+            for pm in pm_markets:
+                state.seed_detail_pm(pm.market, pm.event)
+            state.add_markets(
+                [
+                    {
+                        "market_id": pm_market_id(pm.slug),
+                        "ticker": pm.slug,
+                        "title": pm.title,
+                        "volume_24h": 0.0,
+                        "venue": "polymarket_us",
+                    }
+                    for pm in pm_markets
+                ]
+            )
+            pm_targets = [pm.slug for pm in pm_markets]
+            log.info("polymarket_us: polling %d markets over REST", len(pm_targets))
+        elif pm_targets:
+            state.add_markets(
+                [
+                    {
+                        "market_id": pm_market_id(s),
+                        "ticker": s,
+                        "title": "",
+                        "volume_24h": 0.0,
+                        "venue": "polymarket_us",
+                    }
+                    for s in pm_targets
+                ]
+            )
+        if pm_targets:
+            pm_source = PolymarketUSRestSource(config=config, run=run, slugs=pm_targets)
+            state.attach_polymarket(pm_source, pm_adapter)
+            # A polled book is only as fresh as its poll cycle; allow three
+            # cycles (one 429 cooldown) before calling it stale.
+            cycle_ns = int(len(pm_targets) / pm_source.rate_per_s * 1e9)
+            books.set_venue_staleness(
+                "polymarket_us", max(config.book_staleness_limit_ms * 1_000_000, 3 * cycle_ns)
             )
 
         async def refresh_detail(
@@ -586,6 +724,38 @@ async def run_ui(
                     # subscribe with a full snapshot per market.
                     await source.force_resync()
 
+        async def consume_poly() -> None:
+            assert pm_source is not None
+            async for raw in pm_source.stream():
+                state.on_polymarket_frame()
+                record_raw(raw)  # hard rule: enqueue before any parsing
+                try:
+                    events = pm_adapter.parse(raw)
+                except ParseError:
+                    PARSE_ERRORS.labels(venue=pm_source.venue, stream=raw.stream).inc()
+                    state.parse_errors += 1
+                    log.warning("polymarket_us book parse error", exc_info=True)
+                    continue
+                for event in events:
+                    if not isinstance(event, BookSnapshot):
+                        continue
+                    # A polled venue has no deltas; diff consecutive snapshots
+                    # so the tape shows its level changes too.
+                    ts_ms = pm_adapter.last_transact_ts_ms or raw.recv_ts_ns // 1_000_000
+                    for delta in level_deltas(books.get(event.market_id), event):
+                        state.broadcast(
+                            {
+                                "t": "delta",
+                                "market_id": delta.market_id,
+                                "side": delta.side.value,
+                                "price": delta.price,
+                                "qty_delta": delta.qty,
+                                "latency_ms": None,
+                                "ts_ms": ts_ms,
+                            }
+                        )
+                state.mark_dirty(books.apply(events, mono_ns=time.monotonic_ns()))
+
         async def flush_books() -> None:
             while True:
                 await asyncio.sleep(BOOK_FLUSH_INTERVAL_S)
@@ -636,6 +806,8 @@ async def run_ui(
             asyncio.create_task(supervise(stats_loop, name="ui-stats")),
             asyncio.create_task(supervise(poll_polymarket, name="polymarket-us-reachability")),
         ]
+        if pm_source is not None:
+            tasks.append(asyncio.create_task(supervise(consume_poly, name="polymarket-us-poll")))
 
         app = create_app(state)
         server = uvicorn.Server(

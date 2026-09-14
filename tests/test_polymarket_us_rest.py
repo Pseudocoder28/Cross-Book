@@ -83,3 +83,50 @@ class TestParseBook:
             parse_book_response(raw(b"not json"))
         with pytest.raises(ParseError):
             parse_book_response(raw(b"{}"))
+
+
+class TestEventsAndStats:
+    def test_parses_captured_events_page(self) -> None:
+        from arb.venues.polymarket_us.rest import parse_events_response
+
+        payload = (FIXTURES / "rest_events_active_subset.json").read_bytes()
+        pairs = parse_events_response(raw(payload))
+        assert len(pairs) == 2
+        event, markets = pairs[0]
+        assert event.slug == "usho-midterms-2026-11-03"
+        assert event.category == "politics"
+        assert event.series_slug == "us-midterms-2026"
+        assert [m.slug for m in markets] == [
+            "paccc-usho-midterms-2026-11-03-dem",
+            "paccc-usho-midterms-2026-11-03-rep",
+        ]
+        assert markets[0].question == "U.S House Midterm Winner"
+        assert markets[0].description  # rules text rides along in nested markets
+
+    def test_parses_book_stats(self) -> None:
+        from arb.venues.polymarket_us.rest import parse_book_stats
+
+        payload = (FIXTURES / f"rest_book_{SLUG}.json").read_bytes()
+        stats = parse_book_stats(raw(payload))
+        assert stats.slug == SLUG
+        assert stats.state == "MARKET_STATE_OPEN"
+        assert stats.shares_traded == 314_590_000  # "31459.0000" in 0.0001-contract units
+        assert stats.open_interest == 1_998_350_000
+        assert stats.last_trade_ticks == 20  # "0.0020"
+        assert stats.transact_time is not None and stats.transact_time.year == 2026
+
+
+class TestSelection:
+    def test_non_sports_first(self) -> None:
+        from arb.venues.polymarket_us.discovery import DiscoveredPMMarket, select_poll_targets
+        from arb.venues.polymarket_us.rest import parse_events_response
+
+        payload = (FIXTURES / "rest_events_active_subset.json").read_bytes()
+        found = [
+            DiscoveredPMMarket(slug=m.slug, title=m.question, market=m, event=e)
+            for e, ms in parse_events_response(raw(payload))
+            for m in ms
+        ]
+        # Fixture lists the politics event first anyway; reverse to prove ordering.
+        chosen = select_poll_targets(list(reversed(found)), 3)
+        assert [m.market.category for m in chosen] == ["politics", "politics", "sports"]

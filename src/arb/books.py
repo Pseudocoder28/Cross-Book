@@ -14,9 +14,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from arb.book import Book, BookSnapshot, BookStatus, InvalidReason
+from arb.book import Book, BookLevelUpdate, BookSnapshot, BookStatus, InvalidReason, UpdateMode
 from arb.interfaces import BookEvent, ResyncRequired
 from arb.metrics import BOOK_INVALIDATIONS
+from arb.types import BookSide
 
 
 def venue_of(market_id: str) -> str:
@@ -24,11 +25,56 @@ def venue_of(market_id: str) -> str:
     return market_id.split(":", 1)[0]
 
 
+def level_deltas(before: Book | None, after: BookSnapshot) -> list[BookLevelUpdate]:
+    """Level changes between a book's current ladders and an incoming snapshot.
+
+    Poll-based venues only ever deliver full snapshots; diffing consecutive
+    ones yields the same DELTA events a streaming venue would, so the tape
+    and downstream consumers see one shape. Best levels come first.
+    """
+    out: list[BookLevelUpdate] = []
+    sides = (
+        (BookSide.BID, before.bids() if before is not None else (), after.bids, True),
+        (BookSide.ASK, before.asks() if before is not None else (), after.asks, False),
+    )
+    for side, old_levels, new_levels, best_high in sides:
+        old = {level.price: level.qty for level in old_levels}
+        new = {level.price: level.qty for level in new_levels}
+        for price in sorted(set(old) | set(new), reverse=best_high):
+            change = new.get(price, 0) - old.get(price, 0)
+            if change:
+                out.append(
+                    BookLevelUpdate(
+                        market_id=after.market_id,
+                        side=side,
+                        price=price,
+                        qty=change,
+                        mode=UpdateMode.DELTA,
+                        seq=None,
+                    )
+                )
+    return out
+
+
 class BookManager:
     def __init__(self, *, staleness_limit_ns: int) -> None:
         self._staleness_limit_ns = staleness_limit_ns
+        self._staleness_by_venue: dict[str, int] = {}
         self._books: dict[str, Book] = {}
         self._last_apply_mono_ns: dict[str, int] = {}
+
+    def set_venue_staleness(self, venue: str, limit_ns: int) -> None:
+        """Per-venue staleness for books created from now on.
+
+        A polled venue refreshes each book once per poll cycle, so the
+        streaming default would flag every book stale between polls.
+        """
+        if limit_ns <= 0:
+            raise ValueError("limit_ns must be positive")
+        self._staleness_by_venue[venue] = limit_ns
+
+    def staleness_limit_ns(self, market_id: str) -> int:
+        return self._staleness_by_venue.get(venue_of(market_id), self._staleness_limit_ns)
 
     @property
     def books(self) -> Mapping[str, Book]:
@@ -72,7 +118,7 @@ class BookManager:
             mid = event.market_id
             book = self._books.get(mid)
             if book is None:
-                book = Book(mid, staleness_limit_ns=self._staleness_limit_ns)
+                book = Book(mid, staleness_limit_ns=self.staleness_limit_ns(mid))
                 self._books[mid] = book
             if isinstance(event, BookSnapshot):
                 status = book.apply_snapshot(event, mono_ns=mono_ns)

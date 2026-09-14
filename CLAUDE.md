@@ -51,8 +51,9 @@ Detects and trades price gaps between equivalent binary markets on Kalshi and Po
 - `uv run alembic upgrade head` migrates the database (URL from `.env` via `AppConfig`)
 - `docker compose up -d` starts Postgres with pgvector, Prometheus, Grafana and the app
 - `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk
-- `uv run arb record [--tickers T1,T2 | --top N] [--duration S]` streams raw Kalshi market data into Postgres
-- `uv run arb ui [--tickers ... | --top N] [--port 8080] [--no-record]` serves the terminal UI at http://127.0.0.1:8080 (records while it runs unless --no-record)
+- `uv run arb record [--tickers T1,T2 | --top N] [--poly-top N | --poly-slugs ...] [--duration S]` streams raw Kalshi WS + Polymarket US REST-polled market data into Postgres
+- `uv run arb ui [--tickers ... | --top N] [--poly-top N | --poly-slugs ...] [--port 8080] [--no-record]` serves the terminal UI at http://127.0.0.1:8080 (records while it runs unless --no-record)
+- Grafana at http://127.0.0.1:3000 (admin/admin) has the provisioned "ARB — Data Plane" dashboard
 - Keep this list current as commands are added.
 
 ## Where decisions live

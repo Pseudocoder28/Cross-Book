@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M11 — DES market description page.**
+**M12 — Polymarket US REST poller: both venues live in the terminal and the recorder.**
 
 ## What works
+
+- `src/arb/venues/polymarket_us/{discovery,source,adapter,detail}.py`: category-ranked discovery over `/v1/events` (recorded), a rate-budgeted round-robin book poller (`PolymarketUSRestSource`, an `EventSource`), an adapter emitting unsequenced snapshots + book stats, and a DES payload (tick size, fee coefficient, min qty). `level_deltas` in `books.py` diffs consecutive snapshots into tape events. Per-venue staleness in `BookManager`.
+- `arb ui`/`arb record` take `--poly-top N` / `--poly-slugs`; both venues are recorded (`rest:events`, `rest:book`). Status reports `polled`; the terminal shows K/P badges, an amber `POLY US POLLED` pill, and live poll stats in the Polymarket panel; DES works for both venues.
+- **Measured the real Polymarket limiter**: a 5-token bucket refilling ~1 token/2 s on the book endpoint (docs claim 20 req/s). Default poll rate 0.45 req/s; verified zero 429s at that rate.
+- Infra (M16, committed separately): Grafana "ARB — Data Plane" dashboard (31 panels) provisioned and loaded; compose app container now runs the recording terminal with `restart: unless-stopped`.
+- 134 tests; ruff, pyright, `node --check` clean.
+
+### From M11
 
 - Enter / `DES` / double-click opens a Bloomberg-style description page for the selected market: event title and candidate, ticker anatomy (series → event → market), full resolution rules, settlement sources, status/category/type/mutually-exclusive/early-close, venue quote with implied probability, live book summary (best levels, depth totals, age), lifetime + 24h volume, open interest, open/close/expected-expiration in UTC and ET. Arrows page between markets; Esc closes.
 - Backend: `GET /api/markets/{market_id}` served from discovery-seeded metadata with a 30 s TTL live refresh via the verified `GET /markets/{ticker}` and `GET /events/{event_ticker}` (both recorded before parsing); 404 for unknown markets. New parsers + `build_market_detail` tested against real captured fixtures.

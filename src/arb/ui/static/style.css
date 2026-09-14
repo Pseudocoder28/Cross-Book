@@ -439,6 +439,16 @@ body.has-sel #depth { border-left-color: var(--amber); }
 .keys b { color: var(--ink); font-weight: 700; }
 .keys-note { margin-left: auto; }
 
+/* ---------- venue badges on monitor rows ---------- */
+
+.mon-row .mon-ticker::before {
+  content: "K";
+  display: inline-block; width: 12px;
+  color: var(--ink2); font-size: 9px; font-weight: 700;
+}
+.mon-row.v-pm .mon-ticker::before { content: "P"; color: var(--blue); }
+.st-polled { color: var(--amber); }
+
 /* ---------- DES: market description page ----------
    A Bloomberg function page: replaces the workspace between the command
    line and the keys strip, leaving the terminal frame in place. */

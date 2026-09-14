@@ -21,6 +21,8 @@ from arb.storage.db import insert_raw_messages, make_engine
 from arb.supervise import supervise
 from arb.venues.kalshi.discovery import fetch_liquid_tickers
 from arb.venues.kalshi.source import KalshiWSSource
+from arb.venues.polymarket_us.discovery import fetch_active_markets, select_poll_targets
+from arb.venues.polymarket_us.source import PolymarketUSRestSource
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +35,8 @@ async def run_record(
     tickers: list[str] | None,
     top_n: int,
     duration_s: float | None,
+    poly_top: int = 8,
+    poly_slugs: list[str] | None = None,
 ) -> None:
     run = RunContext(config.run_id or None)
     log.info("run_id=%s", run.run_id)
@@ -55,16 +59,40 @@ async def run_record(
             async for message in source.stream():
                 recorder.enqueue(message)
 
-        consumer = asyncio.create_task(supervise(consume, name="kalshi-ws-consume"))
+        consumers = [asyncio.create_task(supervise(consume, name="kalshi-ws-consume"))]
+
+        # Polymarket US over public REST until WS credentials exist; a failure
+        # here never takes Kalshi recording down.
+        pm_targets = list(poly_slugs or [])
+        if not pm_targets and poly_top > 0:
+            try:
+                pm_markets = await fetch_active_markets(config, run, sink=recorder.enqueue)
+                pm_targets = [m.slug for m in select_poll_targets(pm_markets, poly_top)]
+            except Exception:
+                log.warning("polymarket_us discovery failed; REST polling disabled", exc_info=True)
+        if pm_targets:
+            pm_source = PolymarketUSRestSource(config=config, run=run, slugs=pm_targets)
+            log.info("polymarket_us: polling %d markets over REST", len(pm_targets))
+
+            async def consume_poly() -> None:
+                async for message in pm_source.stream():
+                    recorder.enqueue(message)
+
+            consumers.append(
+                asyncio.create_task(supervise(consume_poly, name="polymarket-us-poll"))
+            )
+
         try:
             if duration_s is not None:
                 await asyncio.sleep(duration_s)
             else:
-                await consumer  # runs until cancelled (Ctrl-C)
+                await asyncio.gather(*consumers)  # runs until cancelled (Ctrl-C)
         finally:
-            consumer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await consumer
+            for consumer in consumers:
+                consumer.cancel()
+            for consumer in consumers:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consumer
     finally:
         # Flush what's queued before tearing the writer down.
         if not await recorder.drain(DRAIN_TIMEOUT_S):
