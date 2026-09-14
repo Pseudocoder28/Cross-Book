@@ -152,6 +152,11 @@ class Book:
             return self._invalidate(InvalidReason.CROSSED)
         return BookStatus(valid=True)
 
+    def mark_invalid(self, reason: InvalidReason) -> BookStatus:
+        """Externally invalidate the book (e.g. a subscription-level seq gap
+        detected by the adapter — the book itself never saw a bad event)."""
+        return self._invalidate(reason)
+
     def _invalidate(self, reason: InvalidReason) -> BookStatus:
         self._invalid = reason
         return BookStatus(valid=False, reason=reason)

@@ -45,3 +45,8 @@ class AppConfig(BaseSettings):
     # network so Prometheus can scrape; host ports stay 127.0.0.1-only) ---
     metrics_host: str = "127.0.0.1"
     metrics_port: int = 9_000
+
+    # --- Terminal UI (compose overrides host to 0.0.0.0 inside the network;
+    # the host port mapping stays 127.0.0.1-only) ---
+    ui_host: str = "127.0.0.1"
+    ui_port: int = 8_080

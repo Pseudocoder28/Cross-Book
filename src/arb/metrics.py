@@ -73,3 +73,25 @@ RECORDER_QUEUE_DEPTH = Gauge(
     "arb_recorder_queue_depth",
     "Current recorder queue depth",
 )
+
+# Incremented by a venue adapter when the envelope sequence number skips —
+# a subscription-level gap. The venue's books get invalidated (reason
+# "seq_gap") and resynced from fresh snapshots.
+SEQ_GAPS = Counter(
+    "arb_seq_gaps_total",
+    "Subscription-level sequence gaps detected by venue adapters",
+    labelnames=["venue"],
+)
+
+# Number of currently connected terminal-UI WebSocket clients.
+UI_WS_CLIENTS = Gauge(
+    "arb_ui_ws_clients",
+    "Connected terminal-UI WebSocket clients",
+)
+
+# Incremented when a UI WebSocket client is dropped because its send queue
+# overflowed. A slow UI consumer must never stall market-data ingest.
+UI_WS_CLIENTS_DROPPED = Counter(
+    "arb_ui_ws_clients_dropped_total",
+    "UI WebSocket clients dropped for not keeping up with the send queue",
+)

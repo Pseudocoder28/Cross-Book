@@ -2,6 +2,38 @@
 
 Design choices and why. Newest first.
 
+## M9 — terminal UI (`arb ui`)
+
+- **One process: visualize + record.** `arb ui` runs the same
+  recorder-first ingest as `arb record` (every raw frame enqueued before
+  parsing) and additionally parses through the Kalshi adapter into
+  `BookManager`, broadcasting to browser clients. `--no-record` exists for
+  DB-less viewing.
+- **Frontend is three static files, zero build step, zero external
+  requests.** Vanilla JS/CSS served by FastAPI; system mono font stack; no
+  CDN. A Python repo should not grow a node toolchain for one page.
+- **Wire format keeps integers.** Prices cross the WebSocket as ticks and
+  quantities as 0.0001-contract units; the browser formats (ticks/100 =
+  cents). No float drift server-side.
+- **A slow browser must never stall ingest.** Broadcast is non-blocking:
+  per-client bounded queues (1024) drained by per-connection sender tasks;
+  an overflowing client is dropped (metric
+  `arb_ui_ws_clients_dropped_total`).
+- **Fresh snapshot after any gap, via forced reconnect.**
+  `ReconnectingWebSocket.force_reconnect()` closes the live connection; the
+  loop reconnects and resubscribes, and Kalshi answers every subscribe with
+  full snapshots. The cheaper `update_subscription`/`get_snapshot` path
+  stays an open item.
+- **UI presents staleness as QUIET, not INVALID.** The Book's 5 s staleness
+  rule is a trading-validity gate; a prediction market that simply hasn't
+  ticked is normal. The depth banner shows a dim "QUIET · LAST UPDATE Ns
+  AGO"; red INVALID is reserved for structural reasons (seq gap, crossed,
+  bad level).
+- **Design chosen by a judged panel** (Bloomberg purist vs modern desk vs
+  density maximalist): black/amber terminal chrome, tabular-nums data,
+  flash-on-change, depth bars, function-key strip, and an intentional
+  Polymarket US down-screen driven by live REST reachability.
+
 ## M6 — Kalshi signing, WS parser, live capture
 
 - **Kalshi WS books get unsequenced events.** The live capture proved `seq`

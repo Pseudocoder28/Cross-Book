@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>ARB TERMINAL</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<noscript><div class="noscript">JAVASCRIPT REQUIRED</div></noscript>
+
+<div id="terminal" class="terminal">
+
+  <header id="status-bar" class="statusbar" aria-label="Status bar">
+    <div class="sb-left">
+      <span id="conn" class="conn conn-connecting" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span><span id="conn-text">CONNECTING</span>
+      </span>
+      <span class="sb-item"><span class="lbl">RUN</span><span id="run-id" class="val">&#8212;</span></span>
+      <span class="sb-item"><span class="lbl">KALSHI</span><span id="v-kalshi" class="val vstate st-dim">&#8212;</span></span>
+      <span class="sb-item"><span class="lbl">POLY US</span><span id="v-poly" class="val vstate st-dim">&#8212;</span></span>
+      <span class="sb-item"><span class="lbl">REC</span><span id="rec-state" class="val st-dim">&#8212;</span></span>
+    </div>
+    <div class="sb-right">
+      <span id="clock-utc" class="clock">&#8212;</span>
+      <span class="sb-sep" aria-hidden="true">&#183;</span>
+      <span id="clock-et" class="clock clock-et">&#8212;</span>
+    </div>
+  </header>
+
+  <div id="cmd" class="cmdline" role="textbox" aria-label="Command line: type a ticker, press Enter to select" aria-multiline="false" tabindex="0">
+    <span class="prompt" aria-hidden="true">ARB&gt;</span>
+    <span id="cmd-text"></span><span id="cmd-cursor" class="cursor" aria-hidden="true"></span>
+    <span id="cmd-msg" class="cmd-msg"></span>
+  </div>
+
+  <section id="monitor" class="panel" aria-label="Market monitor">
+    <div class="panel-head">
+      <span class="title">MONITOR &#8212; KALSHI</span>
+      <span id="monitor-stat" class="head-stat">0 MKTS</span>
+    </div>
+    <div class="mon-cols" aria-hidden="true">
+      <span>#</span><span>TICKER</span><span class="num">BID</span><span class="num">ASK</span><span class="num">MID</span><span class="num">SPR</span>
+    </div>
+    <div id="mon-rows" class="mon-rows" role="listbox" aria-label="Markets" tabindex="0"></div>
+  </section>
+
+  <section id="depth" class="panel" aria-label="Depth ladder">
+    <div class="panel-head">
+      <span class="title" id="depth-title">DEPTH &#8212; &#8212;</span>
+      <span id="depth-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div id="depth-banner" class="depth-banner quiet" aria-live="polite">NO SELECTION</div>
+    <div class="depth-cols" aria-hidden="true">
+      <span class="h-bq">BID QTY</span><span class="h-yes">YES</span><span class="h-no">NO</span><span class="h-aq">ASK QTY</span>
+    </div>
+    <div id="ladder" class="ladder">
+      <div id="ask-rows"></div>
+      <div class="mid-row">
+        <span>MID</span><span id="mid-val" class="mid-v num">&#8212;</span>
+        <span class="mid-sep" aria-hidden="true">&#183;</span>
+        <span>SPR</span><span id="spr-val" class="mid-v num">&#8212;</span>
+      </div>
+      <div id="bid-rows"></div>
+    </div>
+  </section>
+
+  <div id="tape-col" class="tape-col">
+    <section class="panel tape-panel" aria-label="Tape">
+      <div class="panel-head">
+        <span class="title">TAPE</span>
+        <span id="tape-stat" class="head-stat">0 MSGS</span>
+      </div>
+      <div id="tape-rows" class="tape-rows" role="log" aria-live="off" aria-label="Order book deltas, newest first"></div>
+    </section>
+    <section class="panel lat-panel" aria-label="Latency">
+      <div class="panel-head">
+        <span class="title">LATENCY</span>
+        <span id="lat-stat" class="head-stat">&#8212;</span>
+      </div>
+      <div class="lat-body">
+        <canvas id="spark" width="340" height="48" aria-label="Latency sparkline, 120 second rolling window"></canvas>
+        <div id="spark-tip" class="spark-tip" hidden></div>
+        <div class="lat-nums">
+          <span class="lbl">LAST</span><span id="lat-last" class="lat-big">&#8212;</span>
+          <span class="lbl">MED</span><span id="lat-med" class="lat-v">&#8212;</span>
+          <span class="lbl">P95</span><span id="lat-p95" class="lat-v">&#8212;</span>
+          <span class="lbl">N</span><span id="lat-n" class="lat-v">&#8212;</span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section id="system" class="panel" aria-label="System">
+    <div class="panel-head">
+      <span class="title">SYSTEM</span>
+      <span id="sys-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="sys-grid">
+      <div class="sys-block" aria-label="Engine">
+        <div class="sys-title">ENGINE</div>
+        <div class="kv"><span class="k">MSG TOTAL</span><span id="sys-msg-total" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">RATE 1S</span><span id="sys-rate" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">PARSE ERR</span><span id="sys-parse" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">SEQ GAPS</span><span id="sys-gaps" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">WS CLIENTS</span><span id="sys-clients" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">UPTIME</span><span id="sys-uptime" class="v num">&#8212;</span></div>
+      </div>
+      <div class="sys-block" aria-label="Recorder">
+        <div class="sys-title">RECORDER</div>
+        <div class="kv"><span class="k">STATE</span><span id="sys-rec-state" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">ENQUEUED</span><span id="sys-rec-enq" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">DROPPED</span><span id="sys-rec-drop" class="v num">&#8212;</span></div>
+      </div>
+      <div class="sys-block" aria-label="Database">
+        <div class="sys-title">DATABASE</div>
+        <div class="kv"><span class="k">CONN</span><span id="sys-db-conn" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">RAW ROWS</span><span id="sys-db-rows" class="v num">&#8212;</span></div>
+        <div id="sys-runs" class="runs"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="poly" class="panel" aria-label="Polymarket US">
+    <div class="panel-head">
+      <span class="title">POLYMARKET US</span>
+      <span id="poly-stat" class="head-stat">DOWN</span>
+    </div>
+    <div class="poly-body">
+      <div id="poly-main" class="poly-main">DATA UNAVAILABLE</div>
+      <div id="poly-sub" class="poly-sub">AWAITING API CREDENTIALS</div>
+      <div class="poly-live">
+        <span id="poly-dot" class="mini-dot" aria-hidden="true"></span>
+        <span id="poly-line">REST /markets &#183; &#8212; &#183; checked &#8212;</span>
+      </div>
+    </div>
+  </section>
+
+  <footer id="keys" class="keys" aria-label="Keyboard shortcuts">
+    <span><b>&#8593;&#8595;</b> SELECT</span>
+    <span><b>&#9166;</b> &lt;GO&gt;</span>
+    <span><b>1-9</b> QUICK</span>
+    <span><b>&#9003;</b> EDIT</span>
+    <span><b>ESC</b> CLEAR</span>
+    <span class="keys-note">TYPE ANYWHERE TO COMMAND</span>
+  </footer>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

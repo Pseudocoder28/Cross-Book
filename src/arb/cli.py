@@ -44,6 +44,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="seconds to run; omit to run until interrupted",
     )
+    ui = subparsers.add_parser(
+        "ui",
+        help="serve the live market-data terminal UI (read-only)",
+    )
+    ui.add_argument(
+        "--tickers",
+        default=None,
+        help="comma-separated market tickers; omit to auto-discover the most liquid",
+    )
+    ui.add_argument(
+        "--top",
+        type=int,
+        default=8,
+        help="number of liquid markets to auto-discover (default: 8)",
+    )
+    ui.add_argument("--host", default=None, help="bind host (default: UI_HOST or 127.0.0.1)")
+    ui.add_argument("--port", type=int, default=None, help="bind port (default: UI_PORT or 8080)")
+    ui.add_argument(
+        "--no-record",
+        action="store_true",
+        help="don't write raw messages to Postgres while serving the UI",
+    )
     return parser
 
 
@@ -75,6 +97,29 @@ def _run_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ui(args: argparse.Namespace) -> int:
+    from arb.config import AppConfig
+    from arb.ui.server import run_ui
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    config = AppConfig()
+    tickers = [t.strip() for t in args.tickers.split(",") if t.strip()] if args.tickers else None
+    try:
+        uvloop.run(
+            run_ui(
+                config,
+                tickers=tickers,
+                top_n=args.top,
+                record=not args.no_record,
+                host=args.host if args.host is not None else config.ui_host,
+                port=args.port if args.port is not None else config.ui_port,
+            )
+        )
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -85,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_doctor()
     if args.command == "record":
         return _run_record(args)
+    if args.command == "ui":
+        return _run_ui(args)
     print(f"arb: command {args.command!r} is not implemented yet", file=sys.stderr)
     return 1
 

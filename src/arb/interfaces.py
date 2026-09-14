@@ -7,12 +7,28 @@ else depends on these protocols and the normalized ``Book`` model.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from arb.book import BookLevelUpdate, BookSnapshot
 from arb.types import RawMessage
 
-type BookEvent = BookSnapshot | BookLevelUpdate
+
+@dataclass(frozen=True, slots=True)
+class ResyncRequired:
+    """Adapter-detected loss of stream continuity (e.g. a subscription-level
+    sequence gap).
+
+    ``market_ids`` is ``None`` when every book on the venue is affected —
+    Kalshi's ``seq`` is per-subscription, so a gap taints all markets in it.
+    Consumers invalidate the affected books and arrange fresh snapshots.
+    """
+
+    venue: str
+    market_ids: tuple[str, ...] | None
+
+
+type BookEvent = BookSnapshot | BookLevelUpdate | ResyncRequired
 
 
 class ParseError(ValueError):

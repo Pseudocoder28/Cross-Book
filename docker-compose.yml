@@ -45,6 +45,11 @@ services:
       # Prometheus scrapes app:9000 from inside the network; the port is not
       # mapped to the host.
       METRICS_HOST: 0.0.0.0
+      # The UI binds all interfaces inside the network; the host mapping
+      # below keeps it 127.0.0.1-only.
+      UI_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./secrets:/app/secrets:ro
     depends_on:

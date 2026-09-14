@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from typing import Any
 
 from arb.book import BookLevelUpdate, BookSnapshot, Level, UpdateMode
-from arb.interfaces import BookEvent, ParseError
+from arb.interfaces import ParseError
 from arb.types import (
     BookSide,
     RawMessage,
@@ -43,7 +44,7 @@ def subscribe_orderbook_cmd(cmd_id: int, market_tickers: Sequence[str]) -> bytes
     ).encode()
 
 
-def parse_ws_message(raw: RawMessage) -> list[BookEvent]:
+def parse_ws_message(raw: RawMessage) -> list[BookSnapshot | BookLevelUpdate]:
     """One WS frame → zero or more normalized book events.
 
     Non-book frames (``subscribed``, errors, other channels) yield ``[]`` —
@@ -52,6 +53,18 @@ def parse_ws_message(raw: RawMessage) -> list[BookEvent]:
     """
     try:
         doc = json.loads(raw.payload)
+    except ValueError as exc:
+        raise ParseError(f"kalshi ws message: {exc}") from exc
+    return book_events_from_doc(doc)
+
+
+def book_events_from_doc(doc: Any) -> list[BookSnapshot | BookLevelUpdate]:
+    """Normalized book events from one already-decoded WS envelope.
+
+    Shared by :func:`parse_ws_message` and the adapter (which json-loads once
+    and also tracks the envelope ``seq`` per ``sid``).
+    """
+    try:
         msg_type = doc.get("type")
         if msg_type == "orderbook_snapshot":
             msg = doc["msg"]
@@ -94,5 +107,5 @@ def parse_ws_message(raw: RawMessage) -> list[BookEvent]:
                 )
             ]
         return []
-    except (KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ParseError(f"kalshi ws message: {exc}") from exc

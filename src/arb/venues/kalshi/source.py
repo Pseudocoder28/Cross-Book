@@ -66,5 +66,14 @@ class KalshiWSSource:
         self._cmd_id += 1
         await conn.send(subscribe_orderbook_cmd(self._cmd_id, self._tickers))
 
+    async def force_resync(self) -> None:
+        """Arrange fresh snapshots after a detected seq gap.
+
+        Kalshi answers every (re)subscribe with a full ``orderbook_snapshot``
+        per market (observed live, docs/venue-notes.md), so forcing a
+        reconnect — which resubscribes — recovers all books.
+        """
+        await self._ws.force_reconnect()
+
     def stream(self) -> AsyncGenerator[RawMessage, None]:
         return self._ws.stream()

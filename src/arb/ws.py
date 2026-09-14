@@ -103,10 +103,23 @@ class ReconnectingWebSocket:
         self._connector = connector
         self._config = config if config is not None else WSConfig()
         self._on_connected = on_connected
+        self._conn: WSConnection | None = None
 
     @property
     def venue(self) -> str:
         return self._venue
+
+    async def force_reconnect(self) -> None:
+        """Close the live connection so the stream loop reconnects.
+
+        Reconnecting re-runs ``on_connected`` (the resubscribe), which is how
+        a consumer arranges a fresh snapshot after a detected gap. No-op when
+        no connection is live (a reconnect is already underway).
+        """
+        conn = self._conn
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                await conn.close()
 
     async def stream(self) -> AsyncGenerator[RawMessage, None]:
         cfg = self._config
@@ -126,6 +139,7 @@ class ReconnectingWebSocket:
                 continue
             WS_CONNECTS.labels(**labels).inc()
             connected_mono = time.monotonic()
+            self._conn = conn
             try:
                 if self._on_connected is not None:
                     await self._on_connected(conn)
@@ -154,6 +168,7 @@ class ReconnectingWebSocket:
                     type(exc).__name__,
                 )
             finally:
+                self._conn = None
                 with contextlib.suppress(Exception):
                     await conn.close()
             if time.monotonic() - connected_mono >= cfg.healthy_after_s:

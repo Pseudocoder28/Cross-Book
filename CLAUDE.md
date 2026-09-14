@@ -52,6 +52,7 @@ Detects and trades price gaps between equivalent binary markets on Kalshi and Po
 - `docker compose up -d` starts Postgres with pgvector, Prometheus, Grafana and the app
 - `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk
 - `uv run arb record [--tickers T1,T2 | --top N] [--duration S]` streams raw Kalshi market data into Postgres
+- `uv run arb ui [--tickers ... | --top N] [--port 8080] [--no-record]` serves the terminal UI at http://127.0.0.1:8080 (records while it runs unless --no-record)
 - Keep this list current as commands are added.
 
 ## Where decisions live

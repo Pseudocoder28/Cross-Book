@@ -6,7 +6,12 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # The app exposes /metrics on :9000 once `arb record` lands.
+  # `arb record` serves /metrics on :9000.
   - job_name: arb
     static_configs:
       - targets: ["app:9000"]
+
+  # `arb ui` serves /metrics on its own HTTP port.
+  - job_name: arb-ui
+    static_configs:
+      - targets: ["app:8080"]

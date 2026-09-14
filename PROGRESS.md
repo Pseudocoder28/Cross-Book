@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M8 — `arb record`: live Kalshi data into Postgres.**
+**M9 — Bloomberg-style terminal UI (`arb ui`).**
 
 ## What works
+
+- `uv run arb ui` at http://127.0.0.1:8080 — black/amber terminal: live market monitor (real volumes + event titles from discovery), depth ladder with complement NO prices, mid/spread seam and flash-on-change, tape, latency sparkline (last/median/p95), system panel (recorder, parse errors, seq gaps, DB rows by run), Polymarket US down-screen driven by live REST reachability, keyboard navigation, dual UTC/ET clocks.
+- Backend: `BookManager` (`src/arb/books.py`) + `KalshiMarketDataAdapter` (per-`sid` seq tracking; gap → metric + `ResyncRequired` + forced WS reconnect for fresh snapshots per the reliability rules); FastAPI server (`src/arb/ui/server.py`) with `/api/status`, `/metrics`, and a WS push protocol (integer ticks / 0.0001-contract units on the wire); recorder-first ingest identical to `arb record`; per-client bounded send queues so a slow browser can never stall the feed.
+- Frontend: three static files, vanilla JS/CSS, no build step, no external requests; design synthesized from a judged three-way panel; staleness shown as calm "QUIET", red INVALID reserved for structural book failures.
+- Verified live end-to-end (2026-09-14): REST + WS contract probed, headless-Chrome renders confirmed live books, tape deltas, latency ~18 ms median, recorder rows growing in Postgres during viewing.
+- 119 tests; ruff, pyright, `node --check` clean.
+
+### From M8
 
 - `src/arb/venues/kalshi/discovery.py`: liquidity-ranked discovery via `/events?with_nested_markets=true` (documented params only); every REST response goes to the recorder before parsing.
 - `src/arb/venues/kalshi/source.py`: `KalshiWSSource` — shared `ReconnectingWebSocket` + signed handshake (headers recomputed per attempt) + resubscribe with fresh cmd id on every (re)connect.

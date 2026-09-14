@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import httpx
 
@@ -21,19 +22,26 @@ MAX_PAGES = 10
 ENOUGH_CANDIDATES = 200
 
 
-async def fetch_liquid_tickers(
+@dataclass(frozen=True, slots=True)
+class DiscoveredMarket:
+    ticker: str
+    volume_24h: float  # analytics/display only — float is fine here
+    title: str  # "<event title> — <yes_sub_title>", best effort
+
+
+async def fetch_liquid_markets(
     config: AppConfig,
     run: RunContext,
     *,
     top_n: int,
     sink: Callable[[RawMessage], object] | None = None,
-) -> list[str]:
-    """Return the ``top_n`` open market tickers by 24h volume.
+) -> list[DiscoveredMarket]:
+    """Return the ``top_n`` open markets by 24h volume (desc).
 
     Every REST response is offered to ``sink`` (the recorder) as a
     RawMessage before it's parsed, per the recording rule.
     """
-    volumes: dict[str, float] = {}
+    found: dict[str, DiscoveredMarket] = {}
     cursor = ""
     async with httpx.AsyncClient(timeout=15) as client:
         for _ in range(MAX_PAGES):
@@ -60,12 +68,29 @@ async def fetch_liquid_tickers(
             response.raise_for_status()
             doc = json.loads(response.content)
             for event in doc["events"]:
+                event_title = str(event.get("title") or "")
                 for market in event.get("markets") or []:
                     volume = float(market.get("volume_24h_fp") or 0)
-                    if volume > 0:
-                        volumes[market["ticker"]] = volume
+                    if volume <= 0:
+                        continue
+                    sub = str(market.get("yes_sub_title") or "")
+                    title = f"{event_title} — {sub}" if sub else event_title
+                    found[market["ticker"]] = DiscoveredMarket(
+                        ticker=market["ticker"], volume_24h=volume, title=title
+                    )
             cursor = doc.get("cursor") or ""
-            if not cursor or len(volumes) >= ENOUGH_CANDIDATES:
+            if not cursor or len(found) >= ENOUGH_CANDIDATES:
                 break
-    ranked = sorted(volumes.items(), key=lambda item: item[1], reverse=True)
-    return [ticker for ticker, _ in ranked[:top_n]]
+    ranked = sorted(found.values(), key=lambda m: m.volume_24h, reverse=True)
+    return ranked[:top_n]
+
+
+async def fetch_liquid_tickers(
+    config: AppConfig,
+    run: RunContext,
+    *,
+    top_n: int,
+    sink: Callable[[RawMessage], object] | None = None,
+) -> list[str]:
+    """Ticker-only convenience over :func:`fetch_liquid_markets`."""
+    return [m.ticker for m in await fetch_liquid_markets(config, run, top_n=top_n, sink=sink)]
