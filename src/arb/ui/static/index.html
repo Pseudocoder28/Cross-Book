@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>ARB TERMINAL</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<noscript><div class="noscript">JAVASCRIPT REQUIRED</div></noscript>
+
+<div id="terminal" class="terminal">
+
+  <header id="status-bar" class="statusbar" aria-label="Status bar">
+    <div class="sb-left">
+      <span id="conn" class="conn conn-connecting" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span><span id="conn-text">CONNECTING</span>
+      </span>
+      <span class="sb-item"><span class="lbl">RUN</span><span id="run-id" class="val">&#8212;</span></span>
+      <span class="sb-item"><span class="lbl">KALSHI</span><span id="v-kalshi" class="val vstate st-dim">&#8212;</span></span>
+      <span class="sb-item"><span class="lbl">POLY US</span><span id="v-poly" class="val vstate st-dim">&#8212;</span></span>
+      <span class="sb-item"><span class="lbl">REC</span><span id="rec-state" class="val st-dim">&#8212;</span></span>
+    </div>
+    <div class="sb-right">
+      <span id="clock-utc" class="clock">&#8212;</span>
+      <span class="sb-sep" aria-hidden="true">&#183;</span>
+      <span id="clock-et" class="clock clock-et">&#8212;</span>
+    </div>
+  </header>
+
+  <div id="cmd" class="cmdline" role="textbox" aria-label="Command line: type a ticker, press Enter to select" aria-multiline="false" tabindex="0">
+    <span class="prompt" aria-hidden="true">ARB&gt;</span>
+    <span id="cmd-text"></span><span id="cmd-cursor" class="cursor" aria-hidden="true"></span>
+    <span id="cmd-msg" class="cmd-msg"></span>
+  </div>
+
+  <section id="monitor" class="panel" aria-label="Market monitor">
+    <div class="panel-head">
+      <span class="title">MONITOR &#8212; KALSHI</span>
+      <span id="monitor-stat" class="head-stat">0 MKTS</span>
+    </div>
+    <div class="mon-cols" aria-hidden="true">
+      <span>#</span><span>TICKER</span><span class="num">BID</span><span class="num">ASK</span><span class="num">MID</span><span class="num">SPR</span>
+    </div>
+    <div id="mon-rows" class="mon-rows" role="listbox" aria-label="Markets" tabindex="0"></div>
+  </section>
+
+  <section id="depth" class="panel" aria-label="Depth ladder">
+    <div class="panel-head">
+      <span class="title" id="depth-title">DEPTH &#8212; &#8212;</span>
+      <span id="depth-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div id="depth-banner" class="depth-banner quiet" aria-live="polite">NO SELECTION</div>
+    <div class="depth-cols" aria-hidden="true">
+      <span class="h-bq">BID QTY</span><span class="h-yes">YES</span><span class="h-no">NO</span><span class="h-aq">ASK QTY</span>
+    </div>
+    <div id="ladder" class="ladder">
+      <div id="ask-rows"></div>
+      <div class="mid-row">
+        <span>MID</span><span id="mid-val" class="mid-v num">&#8212;</span>
+        <span class="mid-sep" aria-hidden="true">&#183;</span>
+        <span>SPR</span><span id="spr-val" class="mid-v num">&#8212;</span>
+      </div>
+      <div id="bid-rows"></div>
+    </div>
+  </section>
+
+  <div id="tape-col" class="tape-col">
+    <section class="panel tape-panel" aria-label="Tape">
+      <div class="panel-head">
+        <span class="title">TAPE</span>
+        <span id="tape-stat" class="head-stat">0 MSGS</span>
+      </div>
+      <div id="tape-rows" class="tape-rows" role="log" aria-live="off" aria-label="Order book deltas, newest first"></div>
+    </section>
+    <section class="panel lat-panel" aria-label="Latency">
+      <div class="panel-head">
+        <span class="title">LATENCY</span>
+        <span id="lat-stat" class="head-stat">&#8212;</span>
+      </div>
+      <div class="lat-body">
+        <canvas id="spark" width="340" height="48" aria-label="Latency sparkline, 120 second rolling window"></canvas>
+        <div id="spark-tip" class="spark-tip" hidden></div>
+        <div class="lat-nums">
+          <span class="lbl">LAST</span><span id="lat-last" class="lat-big">&#8212;</span>
+          <span class="lbl">MED</span><span id="lat-med" class="lat-v">&#8212;</span>
+          <span class="lbl">P95</span><span id="lat-p95" class="lat-v">&#8212;</span>
+          <span class="lbl">N</span><span id="lat-n" class="lat-v">&#8212;</span>
+          <span class="lbl">RTT</span><span id="lat-rtt" class="lat-v">&#8212;</span>
+          <span class="lbl">SKEW</span><span id="lat-skew" class="lat-v">&#8212;</span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section id="system" class="panel" aria-label="System">
+    <div class="panel-head">
+      <span class="title">SYSTEM</span>
+      <span id="sys-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="sys-grid">
+      <div class="sys-block" aria-label="Engine">
+        <div class="sys-title">ENGINE</div>
+        <div class="kv"><span class="k">MSG TOTAL</span><span id="sys-msg-total" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">RATE 1S</span><span id="sys-rate" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">PARSE ERR</span><span id="sys-parse" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">SEQ GAPS</span><span id="sys-gaps" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">WS CLIENTS</span><span id="sys-clients" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">UPTIME</span><span id="sys-uptime" class="v num">&#8212;</span></div>
+      </div>
+      <div class="sys-block" aria-label="Recorder">
+        <div class="sys-title">RECORDER</div>
+        <div class="kv"><span class="k">STATE</span><span id="sys-rec-state" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">ENQUEUED</span><span id="sys-rec-enq" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">DROPPED</span><span id="sys-rec-drop" class="v num">&#8212;</span></div>
+      </div>
+      <div class="sys-block" aria-label="Database">
+        <div class="sys-title">DATABASE</div>
+        <div class="kv"><span class="k">CONN</span><span id="sys-db-conn" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">RAW ROWS</span><span id="sys-db-rows" class="v num">&#8212;</span></div>
+        <div id="sys-runs" class="runs"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="poly" class="panel" aria-label="Polymarket US">
+    <div class="panel-head">
+      <span class="title">POLYMARKET US</span>
+      <span id="poly-stat" class="head-stat">DOWN</span>
+    </div>
+    <div class="poly-body">
+      <div id="poly-main" class="poly-main">DATA UNAVAILABLE</div>
+      <div id="poly-sub" class="poly-sub">AWAITING API CREDENTIALS</div>
+      <div class="poly-live">
+        <span id="poly-dot" class="mini-dot" aria-hidden="true"></span>
+        <span id="poly-line">REST /markets &#183; &#8212; &#183; checked &#8212;</span>
+      </div>
+    </div>
+  </section>
+
+  <footer id="keys" class="keys" aria-label="Keyboard shortcuts">
+    <span><b>&#8593;&#8595;</b> SELECT</span>
+    <span><b>&#9166;</b> DES</span>
+    <span><b>1-9</b> QUICK</span>
+    <span><b>&#9003;</b> EDIT</span>
+    <span><b>ESC</b> CLOSE</span>
+    <span class="keys-note">TYPE ANYWHERE TO COMMAND</span>
+  </footer>
+
+  <section id="des" class="des" role="dialog" aria-modal="true" aria-label="Market description" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">DES</span><span id="des-ticker">&#8212;</span></span>
+      <span id="des-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body">
+      <div class="des-left">
+        <div id="des-event" class="des-event">&#8212;</div>
+        <div id="des-sub" class="des-sub">&#8212;</div>
+        <div class="des-anatomy" aria-label="Ticker anatomy">
+          <span class="kv"><span class="k">SERIES</span><span id="des-series" class="v">&#8212;</span></span>
+          <span class="kv"><span class="k">EVENT</span><span id="des-eventtk" class="v">&#8212;</span></span>
+          <span class="kv"><span class="k">MARKET</span><span id="des-mkt" class="v">&#8212;</span></span>
+        </div>
+        <div class="des-section">RESOLUTION RULES</div>
+        <div id="des-rules" class="des-rules">&#8212;</div>
+        <div id="des-rules2-wrap" hidden>
+          <div class="des-section">SECONDARY RULES</div>
+          <div id="des-rules2" class="des-rules"></div>
+        </div>
+        <div class="des-section">SETTLEMENT SOURCES</div>
+        <div id="des-sources" class="des-sources">&#8212;</div>
+        <div id="des-error" class="des-error" hidden></div>
+      </div>
+      <div class="des-right">
+        <div class="sys-title">MARKET</div>
+        <div class="kv"><span class="k">STATUS</span><span id="des-status" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">CATEGORY</span><span id="des-cat" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">TYPE</span><span id="des-type" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">MUTUALLY EXCL</span><span id="des-mx" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">EARLY CLOSE</span><span id="des-early" class="v">&#8212;</span></div>
+        <div class="kv" id="des-tick-row" hidden><span class="k">TICK SIZE</span><span id="des-tick" class="v num">&#8212;</span></div>
+        <div class="kv" id="des-fee-row" hidden><span class="k">FEE COEFF</span><span id="des-fee" class="v num">&#8212;</span></div>
+        <div class="kv" id="des-minqty-row" hidden><span class="k">MIN QTY</span><span id="des-minqty" class="v num">&#8212;</span></div>
+        <div class="sys-title">VENUE QUOTE</div>
+        <div class="kv"><span class="k">IMPLIED YES</span><span id="des-implied" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BID / ASK</span><span id="des-vq" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">LAST</span><span id="des-last" class="v num">&#8212;</span></div>
+        <div class="sys-title">LIVE BOOK</div>
+        <div class="kv"><span class="k">BEST BID</span><span id="des-bb" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BEST ASK</span><span id="des-ba" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">MID / SPREAD</span><span id="des-ms" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BID DEPTH</span><span id="des-bd" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">ASK DEPTH</span><span id="des-ad" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">LEVELS</span><span id="des-lv" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">BOOK AGE</span><span id="des-age" class="v num">&#8212;</span></div>
+        <div class="sys-title">ACTIVITY</div>
+        <div class="kv"><span class="k">VOLUME</span><span id="des-vol" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">VOL 24H</span><span id="des-vol24" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">OPEN INT</span><span id="des-oi" class="v num">&#8212;</span></div>
+        <div class="sys-title">TIMELINE</div>
+        <div class="kv"><span class="k">OPENED</span><span id="des-open" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">CLOSES</span><span id="des-close" class="v">&#8212;</span></div>
+        <div class="kv"><span class="k">EXPECTED EXP</span><span id="des-exp" class="v">&#8212;</span></div>
+        <div id="des-foot" class="des-foot">&#8593;&#8595; NEXT MARKET &#183; ESC CLOSE</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="pairs" class="des pairs" role="dialog" aria-modal="true" aria-label="Pair review" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">PAIRS</span><span id="pairs-filter">PROPOSED</span></span>
+      <span id="pairs-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body pairs-body">
+      <div class="des-left pairs-left">
+        <div class="pair-cols" aria-hidden="true">
+          <span class="num">SCORE</span><span>KALSHI</span><span>POLYMARKET US</span><span>STATUS</span>
+        </div>
+        <div id="pair-rows" class="pair-rows" role="listbox" aria-label="Pair candidates" tabindex="0"></div>
+      </div>
+      <div class="des-right pairs-right">
+        <div id="pair-empty" class="quiet-line">NO PAIR SELECTED</div>
+        <div id="pair-detail" hidden>
+          <div class="sys-title">KALSHI</div>
+          <div id="pd-k-event" class="des-event pair-event">&#8212;</div>
+          <div id="pd-k-outcome" class="des-sub">&#8212;</div>
+          <div class="kv"><span class="k">TICKER</span><span id="pd-k-ticker" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">CLOSES</span><span id="pd-k-close" class="v">&#8212;</span></div>
+          <div class="des-section">RULES</div>
+          <div id="pd-k-rules" class="des-rules pair-rules">&#8212;</div>
+          <div class="sys-title">POLYMARKET US</div>
+          <div id="pd-p-event" class="des-event pair-event">&#8212;</div>
+          <div id="pd-p-outcome" class="des-sub">&#8212;</div>
+          <div class="kv"><span class="k">SLUG</span><span id="pd-p-ticker" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">CLOSES</span><span id="pd-p-close" class="v">&#8212;</span></div>
+          <div class="des-section">RULES</div>
+          <div id="pd-p-rules" class="des-rules pair-rules">&#8212;</div>
+          <div class="sys-title">MATCH FEATURES</div>
+          <div class="kv"><span class="k">SCORE</span><span id="pd-score" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">TITLE SIM</span><span id="pd-title" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">OUTCOME SIM</span><span id="pd-outcome" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">OUTCOME OVERLAP</span><span id="pd-overlap" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">DAYS APART</span><span id="pd-days" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">STATUS</span><span id="pd-status" class="v">&#8212;</span></div>
+        </div>
+        <div class="des-foot">&#8593;&#8595; SELECT &#183; Y / N DECIDE &#183; SHIFT+Y / SHIFT+N WHOLE EVENT &#183; U UNDECIDE &#183; TAB FILTER &#183; ESC CLOSE</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="arbpage" class="des arbpage" role="dialog" aria-modal="true" aria-label="Arbitrage monitor" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">ARB</span><span>CROSS-VENUE EDGE &#183; TAKER FEES INCLUDED</span></span>
+      <span id="arb-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body arb-body">
+      <div class="des-left arb-left">
+        <div class="arb-cols" aria-hidden="true">
+          <span class="num">NET/CT</span><span class="num">SIZE</span><span class="num">GROSS</span><span class="num">FEES</span><span>PAIR</span><span>DIRECTION</span><span class="num">K BID/ASK</span><span class="num">P BID/ASK</span><span>BOOKS</span>
+        </div>
+        <div id="arb-rows" class="arb-rows" role="listbox" aria-label="Pair edges" tabindex="0"></div>
+      </div>
+      <div class="des-right arb-right">
+        <div id="arb-empty" class="quiet-line">NO CONFIRMED PAIRS TRACKED &#8212; CONFIRM PAIRS, THEN RESTART arb ui</div>
+        <div id="arb-detail" hidden>
+          <div id="ad-label" class="des-event pair-event">&#8212;</div>
+          <div id="ad-dir" class="des-sub">&#8212;</div>
+          <div class="sys-title">BEST DIRECTION</div>
+          <div class="kv"><span class="k">NET / CONTRACT</span><span id="ad-net" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">GROSS / CONTRACT</span><span id="ad-gross" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">FEES / CONTRACT</span><span id="ad-fees" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">SIZE</span><span id="ad-size" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">NET TOTAL</span><span id="ad-total" class="v num">&#8212;</span></div>
+          <div class="sys-title">LEGS</div>
+          <div id="ad-legs"></div>
+          <div class="sys-title">FEE MODEL</div>
+          <div class="kv"><span class="k">KALSHI</span><span id="ad-kfee" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">POLYMARKET US</span><span id="ad-pfee" class="v">&#8212;</span></div>
+          <div class="sys-title">BOOKS</div>
+          <div class="kv"><span class="k">KALSHI</span><span id="ad-kbook" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">POLYMARKET US</span><span id="ad-pbook" class="v">&#8212;</span></div>
+          <div class="sys-title">REVERSE DIRECTION</div>
+          <div class="kv"><span class="k">NET / CONTRACT</span><span id="ad-onet" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">SIZE</span><span id="ad-osize" class="v num">&#8212;</span></div>
+        </div>
+        <div class="des-foot">&#8593;&#8595; SELECT &#183; &#9166; DES (KALSHI LEG) &#183; ESC CLOSE &#183; MEASUREMENT ONLY &#8212; NO ORDERS</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="paperpage" class="des paperpage" role="dialog" aria-modal="true" aria-label="Paper trading ledger" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">PAPER</span><span>SIMULATED LEDGER &#183; TAKER FEES INCLUDED</span></span>
+      <span id="paper-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body paper-body">
+      <div class="des-left paper-left">
+        <div id="paper-banner" class="paper-banner" hidden>PAPER TRADING DISABLED &#8212; START WITH: arb ui --paper</div>
+        <div class="paper-totals" aria-label="Totals">
+          <div class="kv"><span class="k">STATE</span><span id="pt-state" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">TRADES</span><span id="pt-trades" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">CONTRACTS</span><span id="pt-qty" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">COST</span><span id="pt-cost" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">FEES</span><span id="pt-fees" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">EXPECTED NET</span><span id="pt-net" class="v num">&#8212;</span></div>
+        </div>
+        <div class="paper-section">POSITIONS</div>
+        <div class="pos-cols" aria-hidden="true">
+          <span>PAIR</span><span class="num">QTY</span><span class="num">EXPECTED NET</span><span class="num">TRADES</span>
+        </div>
+        <div id="pos-rows" class="pos-rows" aria-label="Open paper positions"></div>
+        <div class="paper-section">TRADES</div>
+        <div class="ptr-cols" aria-hidden="true">
+          <span>TIME</span><span>PAIR</span><span>DIRECTION</span><span class="num">CONTRACTS</span><span class="num">COST</span><span class="num">FEES</span><span class="num">NET</span>
+        </div>
+        <div id="ptr-rows" class="ptr-rows" role="listbox" aria-label="Paper trades, newest first" tabindex="0"></div>
+      </div>
+      <div class="des-right paper-right">
+        <div id="paper-empty" class="quiet-line">NO TRADE SELECTED</div>
+        <div id="paper-detail" hidden>
+          <div id="pp-label" class="des-event pair-event">&#8212;</div>
+          <div id="pp-dir" class="des-sub">&#8212;</div>
+          <div class="sys-title">TRADE</div>
+          <div class="kv"><span class="k">ID</span><span id="pp-id" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">TIME</span><span id="pp-time" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">CONTRACTS</span><span id="pp-qty" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">COST</span><span id="pp-cost" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">FEES</span><span id="pp-fees" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">NET</span><span id="pp-net" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">NET / CONTRACT</span><span id="pp-netct" class="v num">&#8212;</span></div>
+          <div class="sys-title">LEGS</div>
+          <div id="pp-legs"></div>
+        </div>
+        <div class="sys-title">RISK LIMITS</div>
+        <div class="kv"><span class="k">MIN NET / CT</span><span id="pl-minnet" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">MAX CTS / PAIR</span><span id="pl-maxqty" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">MAX NOTIONAL</span><span id="pl-maxnot" class="v num">&#8212;</span></div>
+        <div class="des-foot">&#8593;&#8595; SELECT &#183; ESC CLOSE &#183; R REFRESH &#183; SIMULATED FILLS AT DISPLAYED LIQUIDITY &#8212; NO ORDERS</div>
+      </div>
+    </div>
+  </section>
+
+  <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden>
+    <div class="ct-head"><span id="ct-label" class="ct-label">COPIED</span><span id="ct-count" class="ct-count"></span></div>
+    <div id="ct-preview" class="ct-preview"></div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

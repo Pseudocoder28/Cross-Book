@@ -1,0 +1,71 @@
+# All host ports bind to 127.0.0.1 only. On the VM these are reached over an
+# SSH tunnel — never exposed publicly.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: arb
+      POSTGRES_PASSWORD: arb
+      POSTGRES_DB: arb
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arb -d arb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Inside the compose network the DB host is the service name.
+      DATABASE_URL: postgresql+asyncpg://arb:arb@postgres:5432/arb
+      # Prometheus scrapes app:9000 from inside the network; the port is not
+      # mapped to the host.
+      METRICS_HOST: 0.0.0.0
+      # The UI binds all interfaces inside the network; the host mapping
+      # below keeps it 127.0.0.1-only.
+      UI_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Runs the terminal UI, which also records raw market data into Postgres
+    # while it runs (recording is on unless --no-record is passed). --host is
+    # explicit here and matches UI_HOST above; the host port mapping keeps it
+    # 127.0.0.1-only. Metrics are served on GET /metrics of this same port.
+    command: ["uv", "run", "arb", "ui", "--top", "20", "--host", "0.0.0.0"]
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:
