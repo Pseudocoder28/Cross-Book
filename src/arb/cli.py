@@ -74,6 +74,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="confirmed pairs (by score) to track on the ARB screen (default: 10)",
     )
+    _add_paper_args(ui)
+
+    replay = subparsers.add_parser("replay", help="replay a recorded run through the pipeline")
+    replay.add_argument("run_id", nargs="?", default=None, help="run id (default: latest)")
+    replay.add_argument(
+        "--pairs-top", type=int, default=10, help="confirmed pairs to quote (0 = none)"
+    )
+    _add_paper_args(replay)
+    replay.add_argument(
+        "--persist", action="store_true", help="store paper trades as replay:<run_id>"
+    )
 
     pairs = subparsers.add_parser("pairs", help="cross-venue pair matching (propose / review)")
     pairs_sub = pairs.add_subparsers(dest="pairs_command")
@@ -99,6 +110,29 @@ def _add_poly_args(sub: argparse.ArgumentParser) -> None:
         "--poly-slugs",
         default=None,
         help="comma-separated Polymarket US market slugs to poll instead of discovery",
+    )
+
+
+def _add_paper_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--paper", action="store_true", help="simulate fills on measured edges")
+    sub.add_argument(
+        "--min-net-ticks", type=int, default=50, help="paper: min net edge per contract (ticks)"
+    )
+    sub.add_argument(
+        "--max-cts-per-pair", type=int, default=100, help="paper: max contracts per pair"
+    )
+    sub.add_argument(
+        "--max-notional", type=float, default=1000.0, help="paper: max total cost in dollars"
+    )
+
+
+def _paper_limits(args: argparse.Namespace):  # type: ignore[no-untyped-def]
+    from arb.paper import PaperLimits
+
+    return PaperLimits(
+        min_net_ticks=args.min_net_ticks,
+        max_qty_per_pair=args.max_cts_per_pair * 10_000,
+        max_notional_ticks=int(args.max_notional * 10_000),
     )
 
 
@@ -155,10 +189,31 @@ def _run_ui(args: argparse.Namespace) -> int:
                 poly_top=args.poly_top,
                 poly_slugs=_split(args.poly_slugs),
                 pairs_top=args.pairs_top,
+                paper=args.paper,
+                paper_limits=_paper_limits(args),
             )
         )
     except KeyboardInterrupt:
         return 130
+    return 0
+
+
+def _run_replay(args: argparse.Namespace) -> int:
+    from arb.config import AppConfig
+    from arb.replay import run_replay
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    report = uvloop.run(
+        run_replay(
+            AppConfig(),
+            args.run_id,
+            pairs_top=args.pairs_top,
+            paper=args.paper,
+            limits=_paper_limits(args),
+            persist=args.persist,
+        )
+    )
+    print(report.summary())
     return 0
 
 
@@ -214,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ui(args)
     if args.command == "pairs":
         return _run_pairs(args)
+    if args.command == "replay":
+        return _run_replay(args)
     print(f"arb: command {args.command!r} is not implemented yet", file=sys.stderr)
     return 1
 

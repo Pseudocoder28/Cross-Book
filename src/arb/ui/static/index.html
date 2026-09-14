@@ -287,6 +287,58 @@
     </div>
   </section>
 
+  <section id="paperpage" class="des paperpage" role="dialog" aria-modal="true" aria-label="Paper trading ledger" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">PAPER</span><span>SIMULATED LEDGER &#183; TAKER FEES INCLUDED</span></span>
+      <span id="paper-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body paper-body">
+      <div class="des-left paper-left">
+        <div id="paper-banner" class="paper-banner" hidden>PAPER TRADING DISABLED &#8212; START WITH: arb ui --paper</div>
+        <div class="paper-totals" aria-label="Totals">
+          <div class="kv"><span class="k">STATE</span><span id="pt-state" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">TRADES</span><span id="pt-trades" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">CONTRACTS</span><span id="pt-qty" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">COST</span><span id="pt-cost" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">FEES</span><span id="pt-fees" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">EXPECTED NET</span><span id="pt-net" class="v num">&#8212;</span></div>
+        </div>
+        <div class="paper-section">POSITIONS</div>
+        <div class="pos-cols" aria-hidden="true">
+          <span>PAIR</span><span class="num">QTY</span><span class="num">EXPECTED NET</span><span class="num">TRADES</span>
+        </div>
+        <div id="pos-rows" class="pos-rows" aria-label="Open paper positions"></div>
+        <div class="paper-section">TRADES</div>
+        <div class="ptr-cols" aria-hidden="true">
+          <span>TIME</span><span>PAIR</span><span>DIRECTION</span><span class="num">CONTRACTS</span><span class="num">COST</span><span class="num">FEES</span><span class="num">NET</span>
+        </div>
+        <div id="ptr-rows" class="ptr-rows" role="listbox" aria-label="Paper trades, newest first" tabindex="0"></div>
+      </div>
+      <div class="des-right paper-right">
+        <div id="paper-empty" class="quiet-line">NO TRADE SELECTED</div>
+        <div id="paper-detail" hidden>
+          <div id="pp-label" class="des-event pair-event">&#8212;</div>
+          <div id="pp-dir" class="des-sub">&#8212;</div>
+          <div class="sys-title">TRADE</div>
+          <div class="kv"><span class="k">ID</span><span id="pp-id" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">TIME</span><span id="pp-time" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">CONTRACTS</span><span id="pp-qty" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">COST</span><span id="pp-cost" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">FEES</span><span id="pp-fees" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">NET</span><span id="pp-net" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">NET / CONTRACT</span><span id="pp-netct" class="v num">&#8212;</span></div>
+          <div class="sys-title">LEGS</div>
+          <div id="pp-legs"></div>
+        </div>
+        <div class="sys-title">RISK LIMITS</div>
+        <div class="kv"><span class="k">MIN NET / CT</span><span id="pl-minnet" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">MAX CTS / PAIR</span><span id="pl-maxqty" class="v num">&#8212;</span></div>
+        <div class="kv"><span class="k">MAX NOTIONAL</span><span id="pl-maxnot" class="v num">&#8212;</span></div>
+        <div class="des-foot">&#8593;&#8595; SELECT &#183; ESC CLOSE &#183; R REFRESH &#183; SIMULATED FILLS AT DISPLAYED LIQUIDITY &#8212; NO ORDERS</div>
+      </div>
+    </div>
+  </section>
+
   <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden>
     <div class="ct-head"><span id="ct-label" class="ct-label">COPIED</span><span id="ct-count" class="ct-count"></span></div>
     <div id="ct-preview" class="ct-preview"></div>

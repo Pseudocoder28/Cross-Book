@@ -570,6 +570,59 @@ body.des-open #system, body.des-open #poly { visibility: hidden; }
 .ad-leg { margin: 2px 0 6px; padding-left: 8px; border-left: 2px solid var(--hair); }
 .ad-leg .kv .k { min-width: 96px; }
 
+/* ---------- PAPER: simulated-fill ledger ---------- */
+
+.paper-body { grid-template-columns: minmax(0, 1fr) 420px; }
+.paper-left { padding: 0; display: flex; flex-direction: column; }
+.paper-banner {
+  flex: none; height: 24px; line-height: 24px; padding: 0 12px;
+  color: var(--dim); font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--hair);
+}
+.paper-banner[hidden] { display: none; }
+.paper-totals {
+  flex: none;
+  display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px; padding: 6px 12px;
+  border-bottom: 1px solid var(--hair);
+}
+.paper-totals .kv { flex-direction: column; justify-content: flex-start; gap: 0; height: 32px; }
+.paper-totals .kv .v { font-size: 13px; line-height: 16px; font-weight: 700; }
+.paper-totals .kv .v.pos { color: var(--bid); }
+.paper-totals .kv .v.off { color: var(--dim); }
+.paper-section {
+  flex: none; height: 16px; line-height: 16px; padding: 0 12px;
+  color: var(--ink2); font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+  background: var(--raised);
+}
+.pos-cols, .pos-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px 110px 64px;
+  gap: 10px; padding: 0 12px; align-items: center;
+}
+.ptr-cols, .ptr-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 150px 84px 84px 72px 84px;
+  gap: 10px; padding: 0 12px; align-items: center;
+}
+.pos-cols, .ptr-cols {
+  flex: none; height: 16px; line-height: 16px;
+  color: var(--ink2); font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--hair);
+}
+.pos-rows { flex: none; max-height: 136px; overflow-y: auto; }
+.ptr-rows { flex: 1; min-height: 0; overflow-y: auto; }
+.pos-row, .ptr-row { height: 24px; line-height: 24px; border-bottom: 1px solid var(--hair); }
+.ptr-row { cursor: pointer; }
+.pos-row .ps-label, .ptr-row .pt-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pos-row .ps-net, .ptr-row .pt-net { font-weight: 700; text-align: right; }
+.pos-row.pos .ps-net, .ptr-row.pos .pt-net { color: var(--bid); }
+.ptr-row .pt-time { color: var(--ink2); }
+.ptr-row .pt-dir { color: var(--ink2); font-size: 10px; letter-spacing: 0.04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ptr-row.sel { background: var(--raised); box-shadow: inset 2px 0 0 var(--amber); }
+.ptr-row.sel .pt-label { color: var(--amber); }
+.paper-right .kv .v.pos { color: var(--bid); }
+
 /* ---------- select-to-copy toast ---------- */
 
 .copy-toast {

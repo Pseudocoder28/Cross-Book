@@ -29,8 +29,6 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from decimal import Decimal
-from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
@@ -44,14 +42,16 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from arb import paper_store
 from arb.arbmon import ArbMonitor, TrackedPair
 from arb.book import BookLevelUpdate, BookSnapshot
 from arb.books import BookManager, level_deltas
 from arb.config import AppConfig
-from arb.fees import kalshi_fee_ticks, polymarket_fee_ticks
 from arb.interfaces import ParseError, ResyncRequired
 from arb.metrics import PARSE_ERRORS, UI_WS_CLIENTS, UI_WS_CLIENTS_DROPPED
 from arb.pairs import store as pairs_store
+from arb.pairs.tracked import load_tracked_pairs
+from arb.paper import PaperLimits, PaperTrader
 from arb.recorder import Recorder
 from arb.run import RunContext
 from arb.storage.db import insert_raw_messages, make_engine
@@ -60,22 +60,13 @@ from arb.supervise import supervise
 from arb.types import RawMessage
 from arb.venues.kalshi.adapter import KalshiMarketDataAdapter
 from arb.venues.kalshi.detail import build_market_detail
-from arb.venues.kalshi.discovery import (
-    fetch_event,
-    fetch_liquid_markets,
-    fetch_market,
-    fetch_series,
-)
-from arb.venues.kalshi.rest import KalshiEvent, KalshiMarket, KalshiSeries
+from arb.venues.kalshi.discovery import fetch_event, fetch_liquid_markets, fetch_market
+from arb.venues.kalshi.rest import KalshiEvent, KalshiMarket
 from arb.venues.kalshi.rest import market_id as kalshi_market_id
 from arb.venues.kalshi.source import KalshiWSSource
 from arb.venues.polymarket_us.adapter import PolymarketUSMarketDataAdapter
 from arb.venues.polymarket_us.detail import build_market_detail as build_pm_detail
-from arb.venues.polymarket_us.discovery import (
-    fetch_active_markets,
-    fetch_markets_by_slug,
-    select_poll_targets,
-)
+from arb.venues.polymarket_us.discovery import fetch_active_markets, select_poll_targets
 from arb.venues.polymarket_us.rest import PolymarketUSEvent, PolymarketUSMarket
 from arb.venues.polymarket_us.rest import market_id as pm_market_id
 from arb.venues.polymarket_us.source import PolymarketUSRestSource
@@ -149,6 +140,10 @@ class UIState(Protocol):
 
     def arb_snapshot(self) -> list[dict[str, Any]]:
         """Current quotes for every tracked confirmed pair (best net first)."""
+        ...
+
+    async def paper_payload(self) -> dict[str, Any]:
+        """Paper-trading ledger (live trader if enabled, else history)."""
         ...
 
     def add_client(self, ws: WebSocket) -> asyncio.Queue[str]:
@@ -238,6 +233,10 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
     async def api_arb() -> Response:
         return JSONResponse({"quotes": state.arb_snapshot()})
 
+    @app.get("/api/paper")
+    async def api_paper() -> Response:
+        return JSONResponse(await state.paper_payload())
+
     @app.get("/metrics")
     async def metrics() -> Response:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
@@ -312,6 +311,7 @@ class ServerState:
         self._pm_detail_meta: dict[str, tuple[PolymarketUSMarket, PolymarketUSEvent | None]] = {}
         self._pairs_engine: AsyncEngine | None = None
         self.arbmon: ArbMonitor | None = None
+        self.trader: PaperTrader | None = None
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
         self._dirty: set[str] = set()
@@ -422,6 +422,29 @@ class ServerState:
 
     def arb_snapshot(self) -> list[dict[str, Any]]:
         return self.arbmon.snapshot() if self.arbmon is not None else []
+
+    async def paper_payload(self) -> dict[str, Any]:
+        if self.trader is not None:
+            return self.trader.payload(enabled=True)
+        history: list[dict[str, Any]] = []
+        if self._pairs_engine is not None:
+            try:
+                history = await paper_store.list_trades(self._pairs_engine, limit=200)
+            except Exception:
+                log.warning("paper history query failed", exc_info=True)
+        return {
+            "enabled": False,
+            "limits": PaperLimits().payload(),
+            "totals": {
+                "trades": len(history),
+                "qty": sum(int(t.get("qty", 0)) for t in history),
+                "cost_ticks": sum(int(t.get("cost_ticks", 0)) for t in history),
+                "fee_ticks": sum(int(t.get("fee_ticks", 0)) for t in history),
+                "net_ticks": sum(int(t.get("net_ticks", 0)) for t in history),
+            },
+            "positions": [],
+            "trades": history,
+        }
 
     def add_client(self, ws: WebSocket) -> asyncio.Queue[str]:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=SEND_QUEUE_MAX)
@@ -629,6 +652,8 @@ async def run_ui(
     poly_top: int = 8,
     poly_slugs: list[str] | None = None,
     pairs_top: int = 10,
+    paper: bool = False,
+    paper_limits: PaperLimits | None = None,
 ) -> None:
     run = RunContext(config.run_id or None)
     log.info("run_id=%s", run.run_id)
@@ -699,93 +724,38 @@ async def run_ui(
             )
 
         assert tickers is not None
-        # Confirmed pairs: resolve both venues' fee parameters (documented
-        # endpoints, recorded before parsing) and make sure both legs are in
-        # the live sets. Any failure disables the ARB screen, nothing else.
+        # Confirmed pairs: fee parameters resolved from the documented
+        # endpoints (recorded before parsing); both legs join the live sets.
+        # Any failure disables the ARB screen, nothing else.
         tracked: list[TrackedPair] = []
         pair_pm_slugs: list[str] = []
         pair_pm_markets: dict[str, PolymarketUSMarket] = {}
         if pairs_top > 0:
             try:
-                sink = record_raw if record else None
-                rows = (await pairs_store.list_pairs(engine, status="confirmed"))[:pairs_top]
-                pm_by_slug = {
-                    m.slug: m
-                    for m in await fetch_markets_by_slug(
-                        config, run, [r["polymarket_us"]["ticker"] for r in rows], sink=sink
-                    )
-                }
-                series_cache: dict[str, KalshiSeries] = {}
-                for r in rows:
-                    k_ticker = r["kalshi"]["ticker"]
-                    p_slug = r["polymarket_us"]["ticker"]
-                    k_market = await fetch_market(config, run, k_ticker, sink=sink)
-                    k_event = await fetch_event(config, run, k_market.event_ticker, sink=sink)
-                    series = series_cache.get(k_event.series_ticker)
-                    if series is None and k_event.series_ticker:
-                        series = await fetch_series(config, run, k_event.series_ticker, sink=sink)
-                        series_cache[k_event.series_ticker] = series
-                    fee_type = k_event.fee_type_override or (
-                        series.fee_type if series else "quadratic"
-                    )
-                    mult = (
-                        k_event.fee_multiplier_override
-                        if k_event.fee_multiplier_override is not None
-                        else (series.fee_multiplier if series else Decimal(1))
-                    )
-                    pm_market = pm_by_slug.get(p_slug)
-                    coef = (
-                        pm_market.fee_coefficient
-                        if pm_market is not None and pm_market.fee_coefficient is not None
-                        else Decimal("0.06")
-                    )
+                load = await load_tracked_pairs(
+                    config, run, engine, top_n=pairs_top, sink=record_raw if record else None
+                )
+                tracked = load.tracked
+                pair_pm_slugs = load.polymarket_slugs
+                pair_pm_markets = load.polymarket_markets
+                for k_market, k_event in load.kalshi_details:
                     state.seed_detail(k_market, k_event)
-                    if pm_market is not None:
-                        state.seed_detail_pm(pm_market, None)
-                        pair_pm_markets[p_slug] = pm_market
-                    label = (
-                        f"{r['kalshi'].get('event_title', '')} — {r['kalshi'].get('outcome', '')}"
-                    )
-                    tracked.append(
-                        TrackedPair(
-                            pair_id=int(r["id"]),
-                            score=float(r["score"]),
-                            kalshi_market_id=r["kalshi"]["market_id"],
-                            polymarket_market_id=r["polymarket_us"]["market_id"],
-                            kalshi_fee=partial(
-                                kalshi_fee_ticks,
-                                taker=True,
-                                fee_type=fee_type,
-                                fee_multiplier=Fraction(mult),
-                            ),
-                            polymarket_fee=partial(
-                                polymarket_fee_ticks, taker=True, fee_coefficient=coef
-                            ),
-                            label=label,
-                            kalshi_ticker=k_ticker,
-                            polymarket_ticker=p_slug,
-                            fee_info={
-                                "kalshi_fee_type": fee_type,
-                                "kalshi_fee_multiplier": str(mult),
-                                "polymarket_fee_coefficient": str(coef),
-                            },
-                        )
-                    )
-                    if k_ticker not in tickers:
-                        tickers.append(k_ticker)
+                for pmm in pair_pm_markets.values():
+                    state.seed_detail_pm(pmm, None)
+                for pair in tracked:
+                    if pair.kalshi_ticker not in tickers:
+                        tickers.append(pair.kalshi_ticker)
                         state.add_markets(
                             [
                                 {
-                                    "market_id": kalshi_market_id(k_ticker),
-                                    "ticker": k_ticker,
-                                    "title": label,
+                                    "market_id": kalshi_market_id(pair.kalshi_ticker),
+                                    "ticker": pair.kalshi_ticker,
+                                    "title": pair.label,
                                     "volume_24h": 0.0,
                                     "venue": "kalshi",
                                 }
                             ]
                         )
-                    if p_slug not in pair_pm_slugs:
-                        pair_pm_slugs.append(p_slug)
                 log.info("arb monitor: tracking %d confirmed pairs", len(tracked))
             except Exception:
                 log.warning(
@@ -875,6 +845,9 @@ async def run_ui(
 
         if tracked:
             state.arbmon = ArbMonitor(books, tracked)
+            if paper:
+                state.trader = PaperTrader(paper_limits or PaperLimits())
+                log.info("paper trading enabled: %s", state.trader.limits.payload())
 
         source = KalshiWSSource(config=config, run=run, market_tickers=tickers)
         adapter = KalshiMarketDataAdapter()
@@ -972,6 +945,25 @@ async def run_ui(
                         state.broadcast(payload)
                 if state.arbmon is not None and dirty_ids & state.arbmon.market_ids:
                     state.broadcast({"t": "arb", "quotes": state.arbmon.snapshot()})
+                    if state.trader is not None:
+                        ts_ms = time.time_ns() // 1_000_000
+                        new_trades = []
+                        for pair in state.arbmon.affected(dirty_ids):
+                            d1, d2 = state.arbmon.best_quotes(pair)
+                            best = (
+                                d1 if d1.net_per_contract_ticks >= d2.net_per_contract_ticks else d2
+                            )
+                            trade = state.trader.consider(pair, best, ts_ms=ts_ms)
+                            if trade is not None:
+                                new_trades.append(trade)
+                        if new_trades:
+                            try:
+                                await paper_store.insert_trades(engine, run.run_id, new_trades)
+                            except Exception:
+                                log.warning("paper trade persist failed", exc_info=True)
+                            state.broadcast(
+                                {"t": "paper", "trades": [t.payload() for t in new_trades]}
+                            )
 
         async def stats_loop() -> None:
             prev_total = state.msg_total

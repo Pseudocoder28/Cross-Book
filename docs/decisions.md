@@ -34,6 +34,26 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M15 — replay and paper trading
+
+- **Replay is the live pipeline fed from Postgres.** `arb replay` streams
+  a run's `raw_messages` in `ingest_seq` order through the *same* adapters
+  and `BookManager`, using the recorded `recv_mono_ns` as the clock, so
+  books, invalidations and edges are reconstructed deterministically. There
+  is no second code path to drift from the live one.
+- **Paper fills are honest about their one optimism.** A fill is assumed
+  at the displayed liquidity the edge walk consumed, instantly, on both
+  legs — everything else (fees, sizes, limits) is the real model. "P&L" is
+  the net edge locked in at settlement (both legs pay exactly $1.00
+  together), i.e. expected value under pair equivalence, not a mark.
+- **Risk limits are the only thing standing between an edge and a fill:**
+  minimum net per contract, maximum contracts per pair, maximum total cost.
+  Deliberately simple and explicit; the live trader on Day 3 inherits them.
+- **Same trader, live or replayed.** `arb ui --paper` runs it on the live
+  monitor (trades persisted per run); `arb replay --paper` runs it over
+  history (persisted only with `--persist`, tagged `replay:<run_id>`).
+- **Still no orders.** Paper trading talks to no venue.
+
 ## M14 — fees, edge math, ARB screen
 
 - **Fees in exact integer arithmetic, rounded the venue's way.** Kalshi:

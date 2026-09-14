@@ -2,9 +2,16 @@
 
 ## Current milestone
 
-**M14 — fees, edge math, ARB screen (Day-2 core, measurement only).**
+**M15 — replay and paper trading.**
 
 ## What works
+
+- `src/arb/replay.py` + `arb replay [RUN_ID|latest]`: recorded raw messages replayed in order through the identical adapters/`BookManager` with the recorded monotonic clock; per-stream counts, parse errors, final book validity, per-pair edge stats; `--paper` runs the trader over history, `--persist` stores trades as `replay:<run_id>`.
+- `src/arb/paper.py` + `paper_store.py` + alembic `0003`: `PaperTrader` with `PaperLimits` (min net/contract, max contracts per pair, max total cost), proportional partial fills, positions and totals; `arb ui --paper` fills on live quotes and persists per run; `GET /api/paper`; terminal `PAPER` page (ledger, positions, trades tape, limits) built by a review-scoped agent.
+- `src/arb/pairs/tracked.py`: one loader for confirmed pairs + fee parameters shared by `arb ui` and `arb replay`.
+- 159 tests (paper limits/scaling, fixture-driven replay); ruff, pyright, `node --check` clean.
+
+### From M14
 
 - `src/arb/fees.py`: exact integer fee models — Kalshi (0.07·mult·C·P·(1−P), 6-dp round-up then tick alignment, maker 0/0.25/0.5 by `fee_type`) and Polymarket US (Θ·C·p·(1−p), banker's cents, maker rebate) — verified against both venues' documented examples. `src/arb/edge.py`: depth-aware two-direction edge walk in tick·Qty integers.
 - `src/arb/arbmon.py`: quotes every tracked confirmed pair off the live books; `arb ui --pairs-top N` resolves fee parameters at startup (Kalshi `GET /series/{ticker}` with event overrides; Polymarket `GET /v1/markets?slug=…`), subscribes both legs, broadcasts an `arb` snapshot on every relevant book change, `GET /api/arb`.

@@ -61,11 +61,11 @@ class ArbMonitor:
                 seen[pair.pair_id] = pair
         return list(seen.values())
 
-    def quote(self, pair: TrackedPair, *, now_mono_ns: int | None = None) -> dict[str, Any]:
-        now = now_mono_ns if now_mono_ns is not None else time.monotonic_ns()
+    def best_quotes(self, pair: TrackedPair) -> tuple[EdgeQuote, EdgeQuote]:
+        """Both directions for one pair off the current books."""
         kb = self._books.get(pair.kalshi_market_id)
         pb = self._books.get(pair.polymarket_market_id)
-        d1, d2 = best_edge(
+        return best_edge(
             venue_a="kalshi",
             market_a=pair.kalshi_market_id,
             bids_a=kb.bids() if kb else (),
@@ -77,6 +77,12 @@ class ArbMonitor:
             asks_b=pb.asks() if pb else (),
             fee_b=pair.polymarket_fee,
         )
+
+    def quote(self, pair: TrackedPair, *, now_mono_ns: int | None = None) -> dict[str, Any]:
+        now = now_mono_ns if now_mono_ns is not None else time.monotonic_ns()
+        kb = self._books.get(pair.kalshi_market_id)
+        pb = self._books.get(pair.polymarket_market_id)
+        d1, d2 = self.best_quotes(pair)
         best = d1 if d1.net_per_contract_ticks >= d2.net_per_contract_ticks else d2
         return {
             "pair_id": pair.pair_id,

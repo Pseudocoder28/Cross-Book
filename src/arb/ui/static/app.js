@@ -52,10 +52,11 @@
     des: { open: false, marketId: null, detail: null, error: null, ctl: null },
     pairs: { open: false, rows: [], idx: 0, filter: "proposed", loading: false, msg: "" },
     arb: { open: false, quotes: [], idx: 0, selectedPair: null },
+    paper: { open: false, data: null, idx: 0, selectedId: null, error: null, timer: 0, ctl: null },
   };
 
   const dirtyBooks = new Set();
-  const dirty = { monitor: false, depth: false, latnums: false, system: false, poly: false, status: false, spark: false, des: false, arb: false };
+  const dirty = { monitor: false, depth: false, latnums: false, system: false, poly: false, status: false, spark: false, des: false, arb: false, paper: false };
   let rafPending = false;
 
   let latBucket = [];          // delta latencies inside the current 1s bucket
@@ -207,6 +208,7 @@
     if (dirty.spark) { dirty.spark = false; drawSpark(); }
     if (dirty.des) { dirty.des = false; renderDes(); }
     if (dirty.arb) { dirty.arb = false; renderArb(); }
+    if (dirty.paper) { dirty.paper = false; renderPaper(); }
   }
 
   // ---------- monitor ----------
@@ -822,6 +824,11 @@
       cmdMsg("ARB", "ok");
       return;
     }
+    if (q === "PAPER") {
+      openPaper();
+      cmdMsg("PAPER", "ok");
+      return;
+    }
     if (q === "DES") {
       if (!state.selectedId) { cmdMsg("NO MARKET SELECTED", "err"); return; }
       openDes(state.selectedId);
@@ -853,6 +860,10 @@
       return;
     }
     if (state.arb.open && onArbKey(e)) {
+      e.preventDefault();
+      return;
+    }
+    if (state.paper.open && onPaperKey(e)) {
       e.preventDefault();
       return;
     }
@@ -1052,6 +1063,8 @@
     const p = state.pairs;
     p.open = true;
     if (state.des.open) closeDes();
+    if (state.arb.open) closeArb();
+    if (state.paper.open) closePaper();
     $("pairs").hidden = false;
     document.body.classList.add("des-open");
     loadPairs();
@@ -1241,6 +1254,7 @@
     state.arb.open = true;
     if (state.des.open) closeDes();
     if (state.pairs.open) closePairs();
+    if (state.paper.open) closePaper();
     $("arbpage").hidden = false;
     document.body.classList.add("des-open");
     renderArb();
@@ -1332,7 +1346,7 @@
     }
     const fi = q.fee_info || {};
     setText("ad-kfee", (fi.kalshi_fee_type || "—") + " × " + (fi.kalshi_fee_multiplier || "—"));
-    setText("ad-pfee", "Θ " + (fi.polymarket_fee_coefficient || "—"));
+    setText("ad-pfee", "THETA " + (fi.polymarket_fee_coefficient || "—"));
     const bookLine = (leg) => (leg.has_book ? (leg.valid ? "VALID" : leg.reason === "stale" ? "QUIET (NO RECENT UPDATE)" : "INVALID · " + String(leg.reason || "").toUpperCase()) + " · " + bboText(leg) : "NO BOOK");
     setText("ad-kbook", bookLine(q.kalshi));
     setText("ad-pbook", bookLine(q.polymarket_us));
@@ -1351,6 +1365,214 @@
       if (q && state.byId.has(q.kalshi.market_id)) { closeArb(); select(q.kalshi.market_id); openDes(q.kalshi.market_id); }
       return true;
     }
+    return false;
+  }
+
+  // ---------- PAPER: simulated-fill ledger ----------
+  const PAPER_POLL_MS = 3000;
+
+  function fmtClockUtc(tsMs) {
+    if (tsMs == null || !isFinite(tsMs)) return "—";
+    const d = new Date(tsMs);
+    if (isNaN(d.getTime())) return "—";
+    return utcFmt.format(d);
+  }
+
+  // Ticks per contract from a ledger total: net_ticks is a dollar total in
+  // $0.0001 ticks, qty is in 0.0001-contract units, so the ratio needs the
+  // 10000 back to land on per-contract ticks. Guarded for qty 0.
+  function perContractTicks(netTicks, qty) {
+    if (netTicks == null || !qty || qty <= 0) return null;
+    return (netTicks * 10000) / qty;
+  }
+
+  function openPaper() {
+    const p = state.paper;
+    if (state.des.open) closeDes();
+    if (state.pairs.open) closePairs();
+    if (state.arb.open) closeArb();
+    p.open = true;
+    $("paperpage").hidden = false;
+    document.body.classList.add("des-open");
+    renderPaper();
+    loadPaper();
+    clearInterval(p.timer);
+    p.timer = setInterval(loadPaper, PAPER_POLL_MS);
+  }
+
+  function closePaper() {
+    const p = state.paper;
+    p.open = false;
+    clearInterval(p.timer);
+    p.timer = 0;
+    if (p.ctl) { p.ctl.abort(); p.ctl = null; }
+    $("paperpage").hidden = true;
+    document.body.classList.remove("des-open");
+  }
+
+  async function loadPaper() {
+    const p = state.paper;
+    if (!p.open) return;
+    if (p.ctl) p.ctl.abort();
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    p.ctl = ctl;
+    try {
+      const r = await fetch("/api/paper", { cache: "no-store", signal: ctl ? ctl.signal : undefined });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      if (!p.open || p.ctl !== ctl) return;
+      p.data = data && typeof data === "object" ? data : {};
+      p.error = null;
+    } catch (err) {
+      if (err && err.name === "AbortError") return;
+      if (!p.open) return;
+      p.error = "LOAD FAILED · " + String(err && err.message || err).toUpperCase();
+    }
+    if (p.ctl === ctl) p.ctl = null;
+    schedule("paper");
+  }
+
+  function movePaper(d) {
+    const p = state.paper;
+    const trades = (p.data && Array.isArray(p.data.trades)) ? p.data.trades : [];
+    if (!trades.length) return;
+    p.idx = Math.max(0, Math.min(trades.length - 1, p.idx + d));
+    p.selectedId = trades[p.idx].id != null ? trades[p.idx].id : null;
+    renderPaper();
+  }
+
+  function renderPaper() {
+    const p = state.paper;
+    if (!p.open) return;
+    const d = p.data || {};
+    const enabled = d.enabled === true;
+    const totals = d.totals || {};
+    const limits = d.limits || {};
+    const positions = Array.isArray(d.positions) ? d.positions : [];
+    const trades = Array.isArray(d.trades) ? d.trades : [];
+
+    // Keep the cursor on the same trade as the tape grows under it (newest first).
+    if (p.selectedId != null) {
+      const i = trades.findIndex((t) => t.id === p.selectedId);
+      if (i >= 0) p.idx = i;
+    }
+    p.idx = Math.min(p.idx, Math.max(0, trades.length - 1));
+
+    const stat = p.error
+      ? p.error
+      : !p.data
+        ? "LOADING"
+        : (enabled ? "ENABLED" : "DISABLED") + " · " + nf.format(trades.length) + " TRADES · NET " + fmtDollarsFromTicks(totals.net_ticks != null ? totals.net_ticks : 0);
+    setText("paper-stat", stat);
+    $("paper-stat").classList.toggle("warn", !!p.error);
+
+    $("paper-banner").hidden = !p.data || enabled;
+
+    const st = $("pt-state");
+    st.textContent = !p.data ? "—" : enabled ? "ENABLED" : "DISABLED";
+    st.className = "v " + (!p.data ? "" : enabled ? "pos" : "off");
+    setText("pt-trades", totals.trades != null ? nf.format(totals.trades) : "—");
+    setText("pt-qty", totals.qty != null ? fmtQty(totals.qty) : "—");
+    setText("pt-cost", fmtDollarsFromTicks(totals.cost_ticks));
+    setText("pt-fees", fmtDollarsFromTicks(totals.fee_ticks));
+    const netEl = $("pt-net");
+    netEl.textContent = fmtDollarsFromTicks(totals.net_ticks);
+    netEl.className = "v num" + (totals.net_ticks > 0 ? " pos" : "");
+
+    const pc = $("pos-rows");
+    pc.textContent = "";
+    if (!positions.length) {
+      pc.append(el("div", "pos-row quiet-line", p.data ? "NO POSITIONS" : "—"));
+    }
+    for (const pos of positions) {
+      const row = el("div", "pos-row" + (pos.net_ticks > 0 ? " pos" : ""));
+      const label = el("span", "ps-label", pos.label || (pos.pair_id != null ? "PAIR #" + pos.pair_id : "—"));
+      label.title = pos.label || "";
+      const perCt = perContractTicks(pos.net_ticks, pos.qty);
+      const net = el("span", "ps-net num", fmtDollarsFromTicks(pos.net_ticks));
+      if (perCt != null) net.title = fmtSignedCents(perCt) + "/CT";
+      row.append(
+        label,
+        el("span", "num", fmtQty(pos.qty)),
+        net,
+        el("span", "num", pos.trades != null ? nf.format(pos.trades) : "—"),
+      );
+      pc.append(row);
+    }
+
+    const tc = $("ptr-rows");
+    tc.textContent = "";
+    if (!trades.length) {
+      tc.append(el("div", "ptr-row quiet-line", p.data ? (enabled ? "NO TRADES YET — WAITING FOR AN EDGE ABOVE MIN NET" : "NO TRADES") : "—"));
+    }
+    trades.forEach((t, i) => {
+      const row = el("div", "ptr-row" + (i === p.idx ? " sel" : "") + (t.net_ticks > 0 ? " pos" : ""));
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", i === p.idx ? "true" : "false");
+      const label = el("span", "pt-label", t.label || (t.pair_id != null ? "PAIR #" + t.pair_id : "—"));
+      label.title = t.label || "";
+      row.append(
+        el("span", "pt-time", fmtClockUtc(t.ts_ms)),
+        label,
+        el("span", "pt-dir", t.direction ? dirLabel(t.direction) : "—"),
+        el("span", "num", fmtQty(t.qty)),
+        el("span", "num", fmtDollarsFromTicks(t.cost_ticks)),
+        el("span", "num", fmtDollarsFromTicks(t.fee_ticks)),
+        el("span", "pt-net num", fmtDollarsFromTicks(t.net_ticks)),
+      );
+      row.addEventListener("click", () => { p.idx = i; p.selectedId = t.id != null ? t.id : null; renderPaper(); });
+      tc.append(row);
+    });
+
+    const t = trades[p.idx];
+    $("paper-empty").hidden = !!t;
+    $("paper-detail").hidden = !t;
+    if (t) {
+      setText("pp-label", t.label || (t.pair_id != null ? "PAIR #" + t.pair_id : "—"));
+      setText("pp-dir", t.direction ? dirLabel(t.direction) : "—");
+      setText("pp-id", t.id != null ? "#" + t.id : "—");
+      setText("pp-time", t.ts_ms != null && isFinite(t.ts_ms) ? fmtWhen(new Date(t.ts_ms).toISOString()) : "—");
+      setText("pp-qty", t.qty != null ? fmtQty(t.qty) + " CTS" : "—");
+      setText("pp-cost", fmtDollarsFromTicks(t.cost_ticks));
+      setText("pp-fees", fmtDollarsFromTicks(t.fee_ticks));
+      const ppNet = $("pp-net");
+      ppNet.textContent = fmtDollarsFromTicks(t.net_ticks);
+      ppNet.className = "v num" + (t.net_ticks > 0 ? " pos" : "");
+      const perCt = perContractTicks(t.net_ticks, t.qty);
+      setText("pp-netct", perCt != null ? fmtSignedCents(perCt) : "—");
+      const legs = $("pp-legs");
+      legs.textContent = "";
+      const legList = Array.isArray(t.legs) ? t.legs : [];
+      if (!legList.length) legs.append(el("div", "quiet-line", "NO LEG DETAIL"));
+      for (const leg of legList) {
+        const box = el("div", "ad-leg");
+        const mk = (k, v) => { const kv = el("div", "kv"); kv.append(el("span", "k", k), el("span", "v num", v)); return kv; };
+        const venue = String(leg.venue || "—").toUpperCase().replace("_US", " US");
+        const side = String(leg.side || "—").replace("_", " ").toUpperCase();
+        box.append(
+          mk(venue, side),
+          mk("WORST PRICE", leg.worst_price != null ? fmtCents(leg.worst_price) + "¢" : "—"),
+          mk("QTY", leg.qty != null ? fmtQty(leg.qty) : "—"),
+          mk("FEE", fmtDollarsFromTicks(leg.fee_ticks)),
+        );
+        legs.append(box);
+      }
+    }
+
+    setText("pl-minnet", limits.min_net_ticks != null ? fmtSignedCents(limits.min_net_ticks) : "—");
+    setText("pl-maxqty", limits.max_qty_per_pair != null ? fmtQty(limits.max_qty_per_pair) + " CTS" : "—");
+    setText("pl-maxnot", fmtDollarsFromTicks(limits.max_notional_ticks));
+
+    const selRow = tc.children[p.idx];
+    if (t && selRow && selRow.scrollIntoView) selRow.scrollIntoView({ block: "nearest" });
+  }
+
+  function onPaperKey(e) {
+    const k = e.key;
+    if (k === "Escape") { closePaper(); return true; }
+    if (k === "ArrowUp" || k === "ArrowDown") { movePaper(k === "ArrowUp" ? -1 : 1); return true; }
+    const up = k.length === 1 ? k.toUpperCase() : k;
+    if (up === "R") { loadPaper(); return true; }
     return false;
   }
 

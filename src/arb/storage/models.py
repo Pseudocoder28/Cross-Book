@@ -77,3 +77,25 @@ class PairRow(Base):
         UniqueConstraint("kalshi_market_id", "polymarket_market_id", name="uq_pairs_legs"),
         Index("ix_pairs_status", "status"),
     )
+
+
+class PaperTradeRow(Base):
+    """One simulated fill from the paper trader (live or replay)."""
+
+    __tablename__ = "paper_trades"
+
+    id: Mapped[int] = mapped_column(_BigIntPK, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pair_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    qty: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_ticks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    fee_ticks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    net_ticks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_paper_trades_run", "run_id", "ts_ms"),)
