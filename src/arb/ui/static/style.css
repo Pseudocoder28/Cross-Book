@@ -133,6 +133,8 @@ body {
 .sb-right { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
 .sb-item { display: inline-flex; gap: 4px; align-items: baseline; white-space: nowrap; }
 .sb-sep { color: var(--ink2); }
+/* The run id stays whole in the DOM (copy must be exact); clip it here. */
+#run-id { display: inline-block; max-width: 13ch; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 
 .clock { font-size: 12px; font-weight: 700; }
 .clock-et { color: var(--ink2); }

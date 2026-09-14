@@ -135,6 +135,12 @@
     return e;
   }
 
+  // Mirrors an element's text into its tooltip, for values that CSS clips.
+  function titled(e) {
+    if (e.textContent) e.title = e.textContent;
+    return e;
+  }
+
   const rmTimers = new WeakMap();
 
   // Background-only flash: 120ms in (0.2,0,0,1), 240ms linear decay, 14% alpha.
@@ -771,7 +777,9 @@
   function renderStatusBar() {
     const runId = state.runId || (state.status && state.status.run_id) || null;
     const runEl = $("run-id");
-    runEl.textContent = runId ? (runId.length > 14 ? runId.slice(0, 12) + "…" : runId) : "—";
+    // Full value in the DOM: select-to-copy reads textContent, and a run id
+    // copied short is a run id that `arb replay` cannot find. CSS clips it.
+    runEl.textContent = runId || "—";
     runEl.title = runId || "";
     const v = state.status && state.status.venues;
     setVenue($("v-kalshi"), v && v.kalshi);
@@ -1188,8 +1196,11 @@
       r.setAttribute("role", "option");
       r.setAttribute("aria-selected", i === p.idx ? "true" : "false");
       const k = el("span", "pr-leg"), q = el("span", "pr-leg");
-      k.append(el("span", "pr-id", row.kalshi.ticker || ""), el("span", "pr-out", row.kalshi.outcome || ""));
-      q.append(el("span", "pr-id", row.polymarket_us.ticker || ""), el("span", "pr-out", row.polymarket_us.outcome || ""));
+      // Identifiers are clipped by CSS only (textContent stays whole so copy
+      // is exact); title exposes the rest on hover, because a half-read slug
+      // resolves to nothing on either venue.
+      k.append(titled(el("span", "pr-id", row.kalshi.ticker || "")), el("span", "pr-out", row.kalshi.outcome || ""));
+      q.append(titled(el("span", "pr-id", row.polymarket_us.ticker || "")), el("span", "pr-out", row.polymarket_us.outcome || ""));
       r.append(
         el("span", "pr-score num", Number(row.score).toFixed(2)),
         k, q,
@@ -1322,7 +1333,7 @@
         el("span", "ar-size num", has ? nf.format(Math.round(b.contracts)) : "—"),
         el("span", "num", has ? fmtSignedCents(b.gross_per_contract_ticks) : "—"),
         el("span", "num", has ? fmtSignedCents(-b.fee_per_contract_ticks) : "—"),
-        el("span", "ar-label", q.label || (q.kalshi.ticker + " / " + q.polymarket_us.ticker)),
+        titled(el("span", "ar-label", q.label || (q.kalshi.ticker + " / " + q.polymarket_us.ticker))),
         el("span", "ar-dir", has ? dirLabel(b.direction) : "NO EDGE"),
         el("span", "num", bboText(q.kalshi)),
         el("span", "num", bboText(q.polymarket_us)),

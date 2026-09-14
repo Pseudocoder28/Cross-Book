@@ -226,6 +226,7 @@ def event_refs(pairs: list[tuple[KalshiEvent, list[KalshiMarket]]]) -> list[Even
                 rules=m.rules_primary,
                 close_time=m.close_time,
                 series_ticker=event.series_ticker,
+                event_slug=event.event_ticker,
             )
             for m in markets
             if m.market_type == "binary" and m.status == "active"

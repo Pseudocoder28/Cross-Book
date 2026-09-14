@@ -156,6 +156,7 @@ def event_refs(markets: list[DiscoveredPMMarket]) -> list[EventRef]:
                         outcome=m.market.title or m.slug,
                         rules=m.market.description,
                         close_time=m.market.end_date,
+                        event_slug=event.slug,
                         fee_coefficient=(
                             str(m.market.fee_coefficient)
                             if m.market.fee_coefficient is not None

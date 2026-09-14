@@ -11,8 +11,8 @@ in [`venues/kalshi.md`](venues/kalshi.md) and
 Defined in [`src/arb/types.py`](../src/arb/types.py).
 
 ```python
-type Ticks = int   # 1 tick = $0.0001, so 1¢ = 100, $0.555 = 5550
-type Qty   = int    # 1 unit = 0.0001 contracts
+type Ticks = int  # 1 tick = $0.0001, so 1¢ = 100, $0.555 = 5550
+type Qty = int  # 1 unit = 0.0001 contracts
 ```
 
 Both are plain `int` type aliases, not wrapper classes — there is no runtime
@@ -58,12 +58,12 @@ paths that are explicitly not part of book state or money math (e.g.
 @dataclass(frozen=True, slots=True)
 class RawMessage:
     venue: str
-    stream: str              # e.g. "ws", "rest:orderbook", "rest:book"
-    payload: bytes            # exact bytes received, unparsed
-    recv_ts_ns: int            # time.time_ns() at receipt (UTC wall clock)
-    recv_mono_ns: int          # time.monotonic_ns() at receipt
+    stream: str  # e.g. "ws", "rest:orderbook", "rest:book"
+    payload: bytes  # exact bytes received, unparsed
+    recv_ts_ns: int  # time.time_ns() at receipt (UTC wall clock)
+    recv_mono_ns: int  # time.monotonic_ns() at receipt
     run_id: str
-    ingest_seq: int             # per-run, monotonic across all sources
+    ingest_seq: int  # per-run, monotonic across all sources
 ```
 
 Every inbound message — WebSocket frame or REST response — is wrapped in

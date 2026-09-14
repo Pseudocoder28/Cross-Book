@@ -2,8 +2,14 @@
 
 from pathlib import Path
 
-from arb.pairs.matcher import propose_pairs
+from sqlalchemy import insert
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from arb.pairs import run as pairs_run
+from arb.pairs import store
+from arb.pairs.matcher import MarketRef, PairCandidate, propose_pairs
 from arb.pairs.text import name_similarity, name_tokens, title_tokens
+from arb.storage.models import Base, PairRow
 from arb.types import RawMessage
 from arb.venues.kalshi import discovery as kd
 from arb.venues.kalshi.rest import KalshiEvent, KalshiMarket
@@ -82,3 +88,167 @@ class TestMatcher:
         assert all(c.score >= 0.5 for c in cands)
         # Detail carries both rules texts for the reviewer.
         assert dem.kalshi.rules and dem.polymarket.rules
+
+
+async def _pairs_engine(n: int) -> AsyncEngine:
+    """In-memory store holding ``n`` proposals, descending score."""
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            insert(PairRow),
+            [
+                {
+                    "kalshi_market_id": f"kalshi:K{i}",
+                    "polymarket_market_id": f"polymarket_us:p{i}",
+                    "status": "proposed",
+                    "score": 1.0 - i / 1000,
+                    "detail": {"kalshi": {"ticker": f"K{i}"}, "polymarket_us": {"ticker": f"p{i}"}},
+                }
+                for i in range(n)
+            ],
+        )
+    return engine
+
+
+async def test_list_pairs_limit_caps_rows_best_score_first() -> None:
+    """A full proposal run stores thousands; the CLI must be able to ask for
+    the top few without pulling (or printing) all of them."""
+    engine = await _pairs_engine(25)
+    try:
+        top = await store.list_pairs(engine, limit=5)
+        assert [r["kalshi"]["ticker"] for r in top] == ["K0", "K1", "K2", "K3", "K4"]
+        # Unlimited stays the default, so the UI's PAIRS screen is untouched.
+        assert len(await store.list_pairs(engine)) == 25
+        # A limit above the row count is not an error.
+        assert len(await store.list_pairs(engine, limit=100)) == 25
+    finally:
+        await engine.dispose()
+
+
+def test_format_rows_never_truncates_identifiers() -> None:
+    """A cut slug looks real and resolves to nothing.
+
+    Regression: fixed-width columns sliced tickers to 34/40 chars, so
+    ``cpc-btc-pricerange-yr-12-31-2026-above-150k`` (43) printed as a
+    prefix that 404s on the venue.
+    """
+    long_slug = "cpc-btc-pricerange-yr-12-31-2026-above-150k"
+    long_ticker = "KXBTCY-27JAN0100-T149999.99-EXTRA-LONG-SUFFIX"
+    out = pairs_run.format_rows(
+        [
+            {
+                "id": 28,
+                "status": "confirmed",
+                "score": 1.0,
+                "kalshi": {"ticker": long_ticker},
+                "polymarket_us": {"ticker": long_slug},
+                "features": {},
+            }
+        ]
+    )
+    assert long_slug in out
+    assert long_ticker in out
+
+
+def test_format_candidates_keeps_full_tickers_but_may_elide_prose() -> None:
+    ref = MarketRef(
+        venue="polymarket_us",
+        market_id="polymarket_us:cpc-btc-pricerange-yr-12-31-2026-above-150k",
+        ticker="cpc-btc-pricerange-yr-12-31-2026-above-150k",
+        outcome="an outcome name far longer than the twenty-four column budget",
+        rules="",
+        close_time=None,
+    )
+    k = MarketRef(
+        venue="kalshi",
+        market_id="kalshi:K",
+        ticker="KXBTCY-27JAN0100-T149999.99",
+        outcome="150,000 or above",
+        rules="",
+        close_time=None,
+    )
+    out = pairs_run.format_candidates([PairCandidate(kalshi=k, polymarket=ref, score=1.0)])
+    assert ref.ticker in out  # identifier: intact
+    assert "…" in out  # prose: elided, and marked as such
+
+
+def test_pair_detail_surfaces_searchable_title_and_url() -> None:
+    """Neither venue's site matches a slug, so detail must carry the title
+    (which does match) and the verified event URL."""
+    out = pairs_run.format_pair_detail(
+        {
+            "id": 1,
+            "status": "proposed",
+            "score": 0.99,
+            "kalshi": {"venue": "kalshi", "ticker": "KXMUSKNW-26DEC31-T600", "event_title": "x"},
+            "polymarket_us": {
+                "venue": "polymarket_us",
+                "ticker": "pnwpc-elonmusk-2026-12-31-gt600b",
+                "event_slug": "elonmusk-2026-12-31",
+                "event_title": "Elon Musk Net Worth on December 31?",
+                "outcome": "Above $600 Billion",
+            },
+            "features": {},
+        }
+    )
+    assert "Elon Musk Net Worth on December 31?" in out
+    assert "https://polymarket.us/event/elonmusk-2026-12-31" in out
+    assert "pnwpc-elonmusk-2026-12-31-gt600b" in out
+
+
+async def test_backfill_event_slugs_fills_only_what_is_missing() -> None:
+    """Pairs proposed before event slugs existed get linkable, without
+    re-scoring and without disturbing a human decision."""
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            insert(PairRow),
+            [
+                {  # legacy row: no event_slug on either leg
+                    "kalshi_market_id": "kalshi:K1",
+                    "polymarket_market_id": "polymarket_us:p1",
+                    "status": "confirmed",
+                    "score": 0.9,
+                    "detail": {
+                        "kalshi": {"market_id": "kalshi:K1", "ticker": "K1"},
+                        "polymarket_us": {"market_id": "polymarket_us:p1", "ticker": "p1"},
+                    },
+                },
+                {  # already has one; must not be overwritten
+                    "kalshi_market_id": "kalshi:K2",
+                    "polymarket_market_id": "polymarket_us:p2",
+                    "status": "proposed",
+                    "score": 0.8,
+                    "detail": {
+                        "kalshi": {"market_id": "kalshi:K2", "ticker": "K2"},
+                        "polymarket_us": {
+                            "market_id": "polymarket_us:p2",
+                            "ticker": "p2",
+                            "event_slug": "keep-me",
+                        },
+                    },
+                },
+            ],
+        )
+    try:
+        updated = await store.backfill_event_slugs(
+            engine,
+            {
+                "kalshi:K1": "KEVENT1",
+                "polymarket_us:p1": "pevent1",
+                "polymarket_us:p2": "should-not-apply",
+            },
+        )
+        assert updated == 1  # only the legacy row changed
+        rows = {r["kalshi"]["ticker"]: r for r in await store.list_pairs(engine)}
+        assert rows["K1"]["kalshi"]["event_slug"] == "KEVENT1"
+        assert rows["K1"]["polymarket_us"]["event_slug"] == "pevent1"
+        assert rows["K1"]["status"] == "confirmed"  # decision untouched
+        assert rows["K1"]["score"] == 0.9  # score untouched
+        assert rows["K2"]["polymarket_us"]["event_slug"] == "keep-me"  # not overwritten
+        # A market id absent from the map is simply left alone.
+        assert await store.backfill_event_slugs(engine, {"kalshi:nope": "x"}) == 0
+    finally:
+        await engine.dispose()
