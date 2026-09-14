@@ -66,6 +66,10 @@ class KalshiWSSource:
         self._cmd_id += 1
         await conn.send(subscribe_orderbook_cmd(self._cmd_id, self._tickers))
 
+    def rtt_ms(self) -> float | None:
+        rtt = self._ws.rtt_s()
+        return rtt * 1000.0 if rtt is not None else None
+
     async def force_resync(self) -> None:
         """Arrange fresh snapshots after a detected seq gap.
 

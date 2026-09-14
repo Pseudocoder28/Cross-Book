@@ -205,8 +205,10 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
   gap, `update_subscription` + `get_snapshot` (or resubscribe on terminal
   errors) and invalidate the affected books.
 - Reliable market categorization (event `category` is deprecated).
-- No "no"-side delta captured yet — parser handles both sides but the
-  fixture only exercises `side: "yes"`; extend on a future capture.
+- NO-side deltas captured 2026-09-14 (`ws_orderbook_capture_no_side.jsonl`):
+  `{"side":"no","price_dollars":"0.7500","delta_fp":"-35.32"}` on
+  KXNEXTPRESSEC-29JAN21-MBAR — a NO-bid change that normalizes to a YES-ask
+  change at 10000 − 7500 ticks. Both sides are now covered by real frames.
 
 ## Polymarket US
 

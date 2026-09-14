@@ -109,6 +109,17 @@ class ReconnectingWebSocket:
     def venue(self) -> str:
         return self._venue
 
+    def rtt_s(self) -> float | None:
+        """Round-trip time from the transport's last keepalive ping, seconds.
+
+        Immune to clock skew (only the local clock is involved), which makes
+        it the trustworthy latency figure when one-way estimates go strange.
+        """
+        latency = getattr(self._conn, "latency", None)
+        if isinstance(latency, int | float) and latency > 0:
+            return float(latency)
+        return None
+
     async def force_reconnect(self) -> None:
         """Close the live connection so the stream loop reconnects.
 

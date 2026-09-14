@@ -17,6 +17,7 @@
   const FLASH_MIN_GAP_MS = 84;    // coalesce >12 flashes/s per cell
   const STATUS_POLL_MS = 10000;
   const P95_HOT_MS = 250;
+  const SKEW_WARN_MS = 25;      // |median - rtt/2| beyond this: clocks disagree
   const CANVAS_FONT = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 
   const $ = (id) => document.getElementById(id);
@@ -675,7 +676,17 @@
     setVal($("lat-med"), fmtMs(lm.median));
     setVal($("lat-p95"), fmtMs(lm.p95), lm.p95 != null && lm.p95 > P95_HOT_MS);
     setVal($("lat-n"), lm.n != null ? nf.format(lm.n) : "—");
-    $("lat-stat").textContent = fmtMs(lm.last);
+    // One-way latency needs synced clocks; the keepalive RTT does not. A
+    // negative median or a large estimated skew means the one-way number is
+    // contaminated, and RTT/2 is the figure to trust.
+    const skew = s.clock_skew_ms;
+    const skewed = (lm.median != null && lm.median < 0) || (skew != null && Math.abs(skew) > SKEW_WARN_MS);
+    setVal($("lat-rtt"), fmtMs(s.rtt_ms));
+    setVal($("lat-skew"), skew == null ? "—" : (skew > 0 ? "+" : "") + Math.round(skew) + "ms", skewed);
+    $("lat-stat").textContent = skewed
+      ? "CLOCK SKEW · TRUST RTT/2 " + (s.rtt_ms != null ? fmtMs(s.rtt_ms / 2) : "—")
+      : fmtMs(lm.last);
+    $("lat-stat").classList.toggle("warn", skewed);
   }
 
   // ---------- system ----------

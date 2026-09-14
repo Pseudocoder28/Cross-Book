@@ -112,3 +112,35 @@ def test_garbage_payload_raises_parse_error() -> None:
         parse_ws_message(raw(b"not json"))
     with pytest.raises(ParseError):
         parse_ws_message(raw(b'{"type": "orderbook_delta"}'))
+
+
+NO_SIDE_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "kalshi" / "ws_orderbook_capture_no_side.jsonl"
+)
+
+
+def test_no_side_delta_folds_into_the_yes_ask_ladder() -> None:
+    """A NO-bid change at price p is a YES-ask change at 10000 - p (real frame,
+    captured 2026-09-14: KXNEXTPRESSEC-29JAN21-MBAR, side "no", 0.7500, -35.32)."""
+    frames = [f for f in NO_SIDE_FIXTURE.read_bytes().split(b"\n") if f.strip()]
+    no_frames = [f for f in frames if b'"side":"no"' in f]
+    assert len(no_frames) >= 1
+    (event,) = parse_ws_message(raw(no_frames[0]))
+    assert isinstance(event, BookLevelUpdate)
+    assert event.market_id == "kalshi:KXNEXTPRESSEC-29JAN21-MBAR"
+    assert event.side is BookSide.ASK
+    assert event.price == 10_000 - 7500
+    assert event.qty == -353_200  # "-35.32" contracts in 0.0001 units
+    # The whole capture replays cleanly into books, NO-side deltas included.
+    books: dict[str, Book] = {}
+    for frame in frames:
+        for ev in parse_ws_message(raw(frame)):
+            ev = dataclasses.replace(ev, seq=None)
+            book = books.setdefault(ev.market_id, Book(ev.market_id, staleness_limit_ns=10**9))
+            status = (
+                book.apply_snapshot(ev, mono_ns=0)
+                if isinstance(ev, BookSnapshot)
+                else book.apply_level(ev, mono_ns=0)
+            )
+            assert status.valid, (ev.market_id, status.reason)
+    assert len(books) == 12

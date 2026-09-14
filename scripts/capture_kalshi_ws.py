@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 
@@ -22,10 +23,13 @@ from arb.venues.kalshi.auth import load_private_key, ws_auth_headers
 from arb.venues.kalshi.discovery import fetch_liquid_tickers
 from arb.venues.kalshi.ws import subscribe_orderbook_cmd
 
-OUT = Path("tests/fixtures/kalshi/ws_orderbook_capture.jsonl")
-MAX_SECONDS = 90.0
-MIN_DELTAS = 15
-TOP_N = 5
+OUT = Path(os.environ.get("CAPTURE_OUT", "tests/fixtures/kalshi/ws_orderbook_capture.jsonl"))
+MAX_SECONDS = float(os.environ.get("CAPTURE_SECONDS", "90"))
+MIN_DELTAS = int(os.environ.get("CAPTURE_MIN_DELTAS", "15"))
+TOP_N = int(os.environ.get("CAPTURE_TOP_N", "5"))
+# Optionally keep going until a delta on this side has been seen ("no" is
+# rarer: it is a NO-bid change, i.e. a YES-ask change after complement).
+REQUIRE_SIDE = os.environ.get("CAPTURE_REQUIRE_SIDE")
 
 
 async def capture() -> tuple[list[bytes], dict[str, int], set[str]]:
@@ -44,6 +48,7 @@ async def capture() -> tuple[list[bytes], dict[str, int], set[str]]:
     snapshot_tickers: set[str] = set()
     captured: list[bytes] = []
     deltas = 0
+    seen_required = False
     deadline = time.monotonic() + MAX_SECONDS
 
     async with connect(config.kalshi_ws_url, additional_headers=headers) as ws:
@@ -63,7 +68,13 @@ async def capture() -> tuple[list[bytes], dict[str, int], set[str]]:
                 snapshot_tickers.add(doc["msg"]["market_ticker"])
             elif frame_type == "orderbook_delta":
                 deltas += 1
-            if len(snapshot_tickers) >= len(targets) and deltas >= MIN_DELTAS:
+                if doc["msg"].get("side") == REQUIRE_SIDE:
+                    seen_required = True
+            if (
+                len(snapshot_tickers) >= len(targets)
+                and deltas >= MIN_DELTAS
+                and (REQUIRE_SIDE is None or seen_required)
+            ):
                 break
 
     return captured, counts, snapshot_tickers

@@ -2,9 +2,15 @@
 
 ## Current milestone
 
-**M15 — replay and paper trading.**
+**M16 — polish: skew-aware latency, NO-side fixture.**
 
 ## What works
+
+- Latency panel: the Kalshi source exposes the keepalive RTT (`ReconnectingWebSocket.rtt_s`); stats carry `rtt_ms` and `clock_skew_ms = median − rtt/2`; the panel shows RTT and SKEW and flips to `CLOCK SKEW · TRUST RTT/2` when the one-way median is negative or |skew| > 25 ms. Observed live: median −24.5 ms, RTT 24 ms → skew ≈ −36 ms (local clock behind the venue; see the `sntp` fix in the conversation notes).
+- Real NO-side Kalshi delta captured (`ws_orderbook_capture_no_side.jsonl`, 12 markets, 2 `side: "no"` deltas) via the now-parameterized capture script; parser test pins the complement mapping (NO bid at 0.7500 → YES ask at 2500 ticks, −35.32 contracts).
+- 160 tests; ruff, pyright, `node --check` clean.
+
+### From M15
 
 - `src/arb/replay.py` + `arb replay [RUN_ID|latest]`: recorded raw messages replayed in order through the identical adapters/`BookManager` with the recorded monotonic clock; per-stream counts, parse errors, final book validity, per-pair edge stats; `--paper` runs the trader over history, `--persist` stores trades as `replay:<run_id>`.
 - `src/arb/paper.py` + `paper_store.py` + alembic `0003`: `PaperTrader` with `PaperLimits` (min net/contract, max contracts per pair, max total cost), proportional partial fills, positions and totals; `arb ui --paper` fills on live quotes and persists per run; `GET /api/paper`; terminal `PAPER` page (ledger, positions, trades tape, limits) built by a review-scoped agent.

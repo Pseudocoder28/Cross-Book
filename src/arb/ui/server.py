@@ -312,6 +312,7 @@ class ServerState:
         self._pairs_engine: AsyncEngine | None = None
         self.arbmon: ArbMonitor | None = None
         self.trader: PaperTrader | None = None
+        self.rtt_fn: Callable[[], float | None] | None = None
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
         self._dirty: set[str] = set()
@@ -548,6 +549,8 @@ class ServerState:
     def stats_payload(self, *, msg_rate_1s: float) -> dict[str, Any]:
         window = sorted(self._latencies)
         n = len(window)
+        median = statistics.median(window) if n else None
+        rtt_ms = self.rtt_fn() if self.rtt_fn is not None else None
         recorder = (
             {"enqueued": self.recorder_enqueued, "dropped": self.recorder_dropped}
             if self.recording
@@ -573,10 +576,14 @@ class ServerState:
             "msg_rate_1s": msg_rate_1s,
             "latency_ms": {
                 "last": self.last_latency_ms,
-                "median": statistics.median(window) if n else None,
+                "median": median,
                 "p95": window[min(n - 1, int(0.95 * n))] if n else None,
                 "n": n,
             },
+            # Keepalive RTT is skew-immune; one-way latency = true + skew, so
+            # median - rtt/2 estimates the local clock's offset from the venue.
+            "rtt_ms": rtt_ms,
+            "clock_skew_ms": (median - rtt_ms / 2) if (median is not None and rtt_ms) else None,
             "parse_errors": self.parse_errors,
             "seq_gaps": self.seq_gaps,
             "ws_clients": len(self._clients),
@@ -850,6 +857,7 @@ async def run_ui(
                 log.info("paper trading enabled: %s", state.trader.limits.payload())
 
         source = KalshiWSSource(config=config, run=run, market_tickers=tickers)
+        state.rtt_fn = source.rtt_ms
         adapter = KalshiMarketDataAdapter()
 
         async def consume() -> None:

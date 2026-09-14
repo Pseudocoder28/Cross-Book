@@ -34,6 +34,19 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M16 — skew-aware latency, NO-side fixture, infra
+
+- **The latency panel now trusts RTT over one-way when clocks disagree.**
+  One-way latency (exchange `ts_ms` → local receive) needs synchronized
+  clocks; the WebSocket keepalive RTT does not. The server publishes both
+  plus `median − rtt/2` as a clock-skew estimate; the UI flips to a
+  `CLOCK SKEW · TRUST RTT/2` banner when the median goes negative or the
+  estimate exceeds 25 ms — which is exactly how the −11 ms readings would
+  have announced themselves.
+- **The capture script is parameterized** (`CAPTURE_OUT`, `_SECONDS`,
+  `_TOP_N`, `_MIN_DELTAS`, `_REQUIRE_SIDE`) so rarer message shapes can be
+  captured into new fixture files without disturbing the pinned one.
+
 ## M15 — replay and paper trading
 
 - **Replay is the live pipeline fed from Postgres.** `arb replay` streams
