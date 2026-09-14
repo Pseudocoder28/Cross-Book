@@ -91,3 +91,24 @@ def test_garbage_raises_parse_error() -> None:
         parse_market_response(raw(b"{}", "rest:market"))
     with pytest.raises(ParseError):
         parse_event_response(raw(b"not json", "rest:event"))
+
+
+def test_parses_captured_series_fee_fields() -> None:
+    from decimal import Decimal
+
+    from arb.venues.kalshi.rest import parse_series_response
+
+    plain = parse_series_response(
+        raw((FIXTURES / "rest_series_kxpresperson.json").read_bytes(), "rest:series")
+    )
+    maker = parse_series_response(
+        raw((FIXTURES / "rest_series_kxnflgame.json").read_bytes(), "rest:series")
+    )
+    assert (plain.ticker, plain.fee_type, plain.fee_multiplier) == (
+        "KXPRESPERSON",
+        "quadratic",
+        Decimal(1),
+    )
+    assert (maker.ticker, maker.fee_type) == ("KXNFLGAME", "quadratic_with_maker_fees")
+    with pytest.raises(ParseError):
+        parse_series_response(raw(b"{}", "rest:series"))

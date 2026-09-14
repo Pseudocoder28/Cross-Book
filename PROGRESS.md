@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M13 — pair matcher with human review (the missing Day-1 deliverable).**
+**M14 — fees, edge math, ARB screen (Day-2 core, measurement only).**
 
 ## What works
+
+- `src/arb/fees.py`: exact integer fee models — Kalshi (0.07·mult·C·P·(1−P), 6-dp round-up then tick alignment, maker 0/0.25/0.5 by `fee_type`) and Polymarket US (Θ·C·p·(1−p), banker's cents, maker rebate) — verified against both venues' documented examples. `src/arb/edge.py`: depth-aware two-direction edge walk in tick·Qty integers.
+- `src/arb/arbmon.py`: quotes every tracked confirmed pair off the live books; `arb ui --pairs-top N` resolves fee parameters at startup (Kalshi `GET /series/{ticker}` with event overrides; Polymarket `GET /v1/markets?slug=…`), subscribes both legs, broadcasts an `arb` snapshot on every relevant book change, `GET /api/arb`.
+- Terminal `ARB` page: ranked table (net/ct, size, gross, fees, direction, both BBOs, book state with QUIET for quiet-but-live books), detail with legs, fee model, reverse direction; Enter jumps to the Kalshi leg's DES.
+- Live: 28 Bitcoin year-end ladder pairs confirmed as a verified test set (identical CF BRTI resolution); the monitor showed real +0.2 to +1.0¢/contract net edges on thin Polymarket books, and surfaced that the `KXBTCY` series carries `fee_multiplier 0`.
+- 155 tests; ruff, pyright, `node --check` clean.
+
+### From M13
 
 - `src/arb/pairs/`: `text.py` (venue-vocabulary normalization, name similarity with containment), `matcher.py` (blocked, IDF-weighted title similarity + outcome overlap → one-to-one outcome pairing; explainable features), `store.py` (chunked upserts that never overwrite a human decision; list/decide/decide-many), `run.py` (`arb pairs propose` fetches both universes — Kalshi `/events` cursor pages, Polymarket `/v1/events` at `limit=500` — records them, proposes, persists). Alembic `0002` adds the `pairs` table.
 - Universe fetchers: `kalshi.discovery.fetch_universe` / `event_refs`, `polymarket_us.discovery.fetch_active_markets` (429-retry) / `event_refs`.

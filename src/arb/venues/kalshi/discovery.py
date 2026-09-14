@@ -22,9 +22,11 @@ from arb.types import RawMessage
 from arb.venues.kalshi.rest import (
     KalshiEvent,
     KalshiMarket,
+    KalshiSeries,
     market_id,
     parse_event_response,
     parse_market_response,
+    parse_series_response,
 )
 
 MAX_PAGES = 10
@@ -84,6 +86,23 @@ async def fetch_event(
         sink(raw)
     response.raise_for_status()
     return parse_event_response(raw)
+
+
+async def fetch_series(
+    config: AppConfig,
+    run: RunContext,
+    series_ticker: str,
+    *,
+    sink: Callable[[RawMessage], object] | None = None,
+) -> KalshiSeries:
+    """``GET /series/{series_ticker}`` (documented), recorded before parsing."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{config.kalshi_api_base}/series/{series_ticker}")
+    raw = _stamp(run, "rest:series", response.content)
+    if sink is not None:
+        sink(raw)
+    response.raise_for_status()
+    return parse_series_response(raw)
 
 
 async def fetch_liquid_markets(
@@ -206,6 +225,7 @@ def event_refs(pairs: list[tuple[KalshiEvent, list[KalshiMarket]]]) -> list[Even
                 outcome=m.yes_sub_title or m.ticker,
                 rules=m.rules_primary,
                 close_time=m.close_time,
+                series_ticker=event.series_ticker,
             )
             for m in markets
             if m.market_type == "binary" and m.status == "active"

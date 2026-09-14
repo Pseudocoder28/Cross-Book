@@ -52,7 +52,7 @@ Detects and trades price gaps between equivalent binary markets on Kalshi and Po
 - `docker compose up -d` starts Postgres with pgvector, Prometheus, Grafana and the app
 - `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk
 - `uv run arb record [--tickers T1,T2 | --top N] [--poly-top N | --poly-slugs ...] [--duration S]` streams raw Kalshi WS + Polymarket US REST-polled market data into Postgres
-- `uv run arb ui [--tickers ... | --top N] [--poly-top N | --poly-slugs ...] [--port 8080] [--no-record]` serves the terminal UI at http://127.0.0.1:8080 (records while it runs unless --no-record)
+- `uv run arb ui [--tickers ... | --top N] [--poly-top N | --poly-slugs ...] [--pairs-top N] [--port 8080] [--no-record]` serves the terminal UI at http://127.0.0.1:8080 (records while it runs unless --no-record); terminal commands: `DES`, `PAIRS`, `ARB`
 - Grafana at http://127.0.0.1:3000 (admin/admin) has the provisioned "ARB — Data Plane" dashboard
 - `uv run arb pairs propose [--min-score 0.75]` fetches both venues' open universes and proposes pairs into Postgres; `arb pairs list [--status ...]`, `arb pairs confirm|reject ID`; review in the terminal with the `PAIRS` command
 - Keep this list current as commands are added.

@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="don't write raw messages to Postgres while serving the UI",
     )
     _add_poly_args(ui)
+    ui.add_argument(
+        "--pairs-top",
+        type=int,
+        default=10,
+        help="confirmed pairs (by score) to track on the ARB screen (default: 10)",
+    )
 
     pairs = subparsers.add_parser("pairs", help="cross-venue pair matching (propose / review)")
     pairs_sub = pairs.add_subparsers(dest="pairs_command")
@@ -148,6 +154,7 @@ def _run_ui(args: argparse.Namespace) -> int:
                 port=args.port if args.port is not None else config.ui_port,
                 poly_top=args.poly_top,
                 poly_slugs=_split(args.poly_slugs),
+                pairs_top=args.pairs_top,
             )
         )
     except KeyboardInterrupt:

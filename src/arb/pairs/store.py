@@ -25,6 +25,8 @@ def _leg(ref: Any) -> dict[str, Any]:
         "outcome": ref.outcome,
         "rules": ref.rules,
         "close_time": ref.close_time.isoformat() if ref.close_time else None,
+        "series_ticker": ref.series_ticker,
+        "fee_coefficient": ref.fee_coefficient,
     }
 
 

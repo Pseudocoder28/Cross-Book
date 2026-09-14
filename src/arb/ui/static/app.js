@@ -51,10 +51,11 @@
     conn: "connecting",
     des: { open: false, marketId: null, detail: null, error: null, ctl: null },
     pairs: { open: false, rows: [], idx: 0, filter: "proposed", loading: false, msg: "" },
+    arb: { open: false, quotes: [], idx: 0, selectedPair: null },
   };
 
   const dirtyBooks = new Set();
-  const dirty = { monitor: false, depth: false, latnums: false, system: false, poly: false, status: false, spark: false, des: false };
+  const dirty = { monitor: false, depth: false, latnums: false, system: false, poly: false, status: false, spark: false, des: false, arb: false };
   let rafPending = false;
 
   let latBucket = [];          // delta latencies inside the current 1s bucket
@@ -205,6 +206,7 @@
     if (dirty.status) { dirty.status = false; renderStatusBar(); }
     if (dirty.spark) { dirty.spark = false; drawSpark(); }
     if (dirty.des) { dirty.des = false; renderDes(); }
+    if (dirty.arb) { dirty.arb = false; renderArb(); }
   }
 
   // ---------- monitor ----------
@@ -815,6 +817,11 @@
       cmdMsg("PAIRS", "ok");
       return;
     }
+    if (q === "ARB") {
+      openArb();
+      cmdMsg("ARB", "ok");
+      return;
+    }
     if (q === "DES") {
       if (!state.selectedId) { cmdMsg("NO MARKET SELECTED", "err"); return; }
       openDes(state.selectedId);
@@ -842,6 +849,10 @@
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     const k = e.key;
     if (state.pairs.open && onPairsKey(e)) {
+      e.preventDefault();
+      return;
+    }
+    if (state.arb.open && onArbKey(e)) {
       e.preventDefault();
       return;
     }
@@ -1105,7 +1116,7 @@
     const p = state.pairs;
     const row = p.rows[p.idx];
     if (!row) return;
-    const key = (r) => (r.kalshi.event_title || "") + " " + (r.polymarket_us.event_title || "");
+    const key = (r) => (r.kalshi.event_title || "") + "" + (r.polymarket_us.event_title || "");
     const group = p.rows.filter((r) => key(r) === key(row));
     try {
       const r = await fetch("/api/pairs/decide", {
@@ -1200,6 +1211,146 @@
     if (up === "N") { (e.shiftKey ? decideEventGroup : decidePair)("rejected"); return true; }
     if (up === "U") { decidePair("proposed"); return true; }
     if (up === "R") { loadPairs(); return true; }
+    return false;
+  }
+
+  // ---------- ARB: cross-venue edge monitor ----------
+  function fmtSignedCents(ticks) {
+    if (ticks == null) return "—";
+    const c = ticks / 100;
+    return (c > 0 ? "+" : "") + c.toFixed(2) + "¢";
+  }
+
+  function fmtDollarsFromTicks(ticks) {
+    if (ticks == null) return "—";
+    return (ticks < 0 ? "-$" : "$") + (Math.abs(ticks) / 10000).toFixed(2);
+  }
+
+  function dirLabel(direction) {
+    return direction === "yes_a_no_b" ? "BUY YES K · BUY NO P" : "BUY YES P · BUY NO K";
+  }
+
+  function bboText(leg) {
+    if (!leg || !leg.has_book) return "—";
+    const b = leg.best_bid ? fmtCents(leg.best_bid[0]) : "—";
+    const a = leg.best_ask ? fmtCents(leg.best_ask[0]) : "—";
+    return b + "/" + a;
+  }
+
+  function openArb() {
+    state.arb.open = true;
+    if (state.des.open) closeDes();
+    if (state.pairs.open) closePairs();
+    $("arbpage").hidden = false;
+    document.body.classList.add("des-open");
+    renderArb();
+  }
+
+  function closeArb() {
+    state.arb.open = false;
+    $("arbpage").hidden = true;
+    document.body.classList.remove("des-open");
+  }
+
+  function onArb(m) {
+    state.arb.quotes = Array.isArray(m.quotes) ? m.quotes : [];
+    if (state.arb.open) schedule("arb");
+  }
+
+  function moveArb(d) {
+    const a = state.arb;
+    if (!a.quotes.length) return;
+    a.idx = Math.max(0, Math.min(a.quotes.length - 1, a.idx + d));
+    a.selectedPair = a.quotes[a.idx].pair_id;
+    renderArb();
+  }
+
+  function renderArb() {
+    const a = state.arb;
+    if (!a.open) return;
+    // Keep the cursor on the same pair as the ranking reshuffles under it.
+    if (a.selectedPair != null) {
+      const i = a.quotes.findIndex((q) => q.pair_id === a.selectedPair);
+      if (i >= 0) a.idx = i;
+    }
+    a.idx = Math.min(a.idx, Math.max(0, a.quotes.length - 1));
+    const best = a.quotes.length ? a.quotes[0].best.net_per_contract_ticks : null;
+    setText("arb-stat", a.quotes.length
+      ? nf.format(a.quotes.length) + " PAIRS · BEST " + fmtSignedCents(best) + "/CT"
+      : "0 PAIRS");
+    const c = $("arb-rows");
+    c.textContent = "";
+    a.quotes.forEach((q, i) => {
+      const b = q.best;
+      const has = b.qty > 0;
+      const row = el("div", "arb-row" + (i === a.idx ? " sel" : "") + (has ? " pos" : " flat"));
+      row.setAttribute("role", "option");
+      // A quiet (stale-only) book on a live feed is still a quotable book;
+      // only structural problems or a missing book are flagged.
+      const legState = (leg) => (!leg.has_book ? "NONE" : leg.valid ? "OK" : leg.reason === "stale" ? "QUIET" : (leg.reason || "?").toUpperCase().slice(0, 7));
+      const ks = legState(q.kalshi), ps = legState(q.polymarket_us);
+      const booksOk = (ks === "OK" || ks === "QUIET") && (ps === "OK" || ps === "QUIET");
+      const books = el("span", "ar-books " + (booksOk ? "ok" : "bad"),
+        ks === "OK" && ps === "OK" ? "OK" : "K:" + ks + " P:" + ps);
+      row.append(
+        el("span", "ar-net num", has ? fmtSignedCents(b.net_per_contract_ticks) : "—"),
+        el("span", "ar-size num", has ? nf.format(Math.round(b.contracts)) : "—"),
+        el("span", "num", has ? fmtSignedCents(b.gross_per_contract_ticks) : "—"),
+        el("span", "num", has ? fmtSignedCents(-b.fee_per_contract_ticks) : "—"),
+        el("span", "ar-label", q.label || (q.kalshi.ticker + " / " + q.polymarket_us.ticker)),
+        el("span", "ar-dir", has ? dirLabel(b.direction) : "NO EDGE"),
+        el("span", "num", bboText(q.kalshi)),
+        el("span", "num", bboText(q.polymarket_us)),
+        books,
+      );
+      row.addEventListener("click", () => { a.idx = i; a.selectedPair = q.pair_id; renderArb(); });
+      c.append(row);
+    });
+    const q = a.quotes[a.idx];
+    $("arb-empty").hidden = !!q;
+    $("arb-detail").hidden = !q;
+    if (!q) return;
+    const b = q.best, o = q.other;
+    setText("ad-label", q.label || "—");
+    setText("ad-dir", b.qty > 0 ? dirLabel(b.direction) : "NO EDGE AT CURRENT BOOKS");
+    setText("ad-net", b.qty > 0 ? fmtSignedCents(b.net_per_contract_ticks) : "—");
+    setText("ad-gross", b.qty > 0 ? fmtSignedCents(b.gross_per_contract_ticks) : "—");
+    setText("ad-fees", b.qty > 0 ? fmtSignedCents(-b.fee_per_contract_ticks) : "—");
+    setText("ad-size", b.qty > 0 ? fmtQty(b.qty) + " CTS" : "—");
+    setText("ad-total", b.qty > 0 ? fmtDollarsFromTicks(b.net_ticks) : "—");
+    const legs = $("ad-legs");
+    legs.textContent = "";
+    for (const leg of b.legs) {
+      const box = el("div", "ad-leg");
+      const mk = (k, v) => { const kv = el("div", "kv"); kv.append(el("span", "k", k), el("span", "v num", v)); return kv; };
+      box.append(
+        mk(leg.venue.toUpperCase().replace("_US", " US"), leg.side.replace("_", " ").toUpperCase()),
+        mk("WORST PRICE", b.qty > 0 ? fmtCents(leg.worst_price) + "¢" : "—"),
+        mk("FEE", b.qty > 0 ? fmtDollarsFromTicks(leg.fee_ticks) : "—"),
+      );
+      legs.append(box);
+    }
+    const fi = q.fee_info || {};
+    setText("ad-kfee", (fi.kalshi_fee_type || "—") + " × " + (fi.kalshi_fee_multiplier || "—"));
+    setText("ad-pfee", "Θ " + (fi.polymarket_fee_coefficient || "—"));
+    const bookLine = (leg) => (leg.has_book ? (leg.valid ? "VALID" : leg.reason === "stale" ? "QUIET (NO RECENT UPDATE)" : "INVALID · " + String(leg.reason || "").toUpperCase()) + " · " + bboText(leg) : "NO BOOK");
+    setText("ad-kbook", bookLine(q.kalshi));
+    setText("ad-pbook", bookLine(q.polymarket_us));
+    setText("ad-onet", o.qty > 0 ? fmtSignedCents(o.net_per_contract_ticks) : "NONE");
+    setText("ad-osize", o.qty > 0 ? fmtQty(o.qty) + " CTS" : "—");
+    const selRow = c.children[a.idx];
+    if (selRow && selRow.scrollIntoView) selRow.scrollIntoView({ block: "nearest" });
+  }
+
+  function onArbKey(e) {
+    const k = e.key;
+    if (k === "Escape") { closeArb(); return true; }
+    if (k === "ArrowUp" || k === "ArrowDown") { moveArb(k === "ArrowUp" ? -1 : 1); return true; }
+    if (k === "Enter") {
+      const q = state.arb.quotes[state.arb.idx];
+      if (q && state.byId.has(q.kalshi.market_id)) { closeArb(); select(q.kalshi.market_id); openDes(q.kalshi.market_id); }
+      return true;
+    }
     return false;
   }
 
@@ -1365,6 +1516,7 @@
     if (!m || typeof m !== "object") return;
     switch (m.t) {
       case "hello": onHello(m); break;
+        case "arb": onArb(m); break;
       case "book": onBook(m); break;
       case "delta": onDelta(m); break;
       case "stats": onStats(m); break;

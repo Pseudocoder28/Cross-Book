@@ -68,6 +68,9 @@ class StubState:
     async def decide_pairs(self, pair_ids: list[int], status: str) -> int:
         return len([i for i in pair_ids if i in (1, 2)])
 
+    def arb_snapshot(self) -> list[dict[str, Any]]:
+        return [{"pair_id": 1, "best": {"net_per_contract_ticks": 12}}]
+
     def add_client(self, ws: object) -> asyncio.Queue[str]:
         self.added += 1
         return asyncio.Queue()
@@ -138,6 +141,14 @@ async def test_pairs_routes(tmp_path: Path) -> None:
     assert decided.status_code == 200 and decided.json()["status"] == "rejected"
     assert missing.status_code == 404
     assert invalid.status_code == 400
+
+
+async def test_arb_route(tmp_path: Path) -> None:
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        response = await client.get("/api/arb")
+    assert response.status_code == 200
+    assert response.json()["quotes"][0]["best"]["net_per_contract_ticks"] == 12
 
 
 async def test_root_falls_back_when_assets_missing(tmp_path: Path) -> None:

@@ -247,6 +247,46 @@
     </div>
   </section>
 
+  <section id="arbpage" class="des arbpage" role="dialog" aria-modal="true" aria-label="Arbitrage monitor" hidden>
+    <div class="des-head">
+      <span class="des-title"><span class="des-tag">ARB</span><span>CROSS-VENUE EDGE &#183; TAKER FEES INCLUDED</span></span>
+      <span id="arb-stat" class="head-stat">&#8212;</span>
+    </div>
+    <div class="des-body arb-body">
+      <div class="des-left arb-left">
+        <div class="arb-cols" aria-hidden="true">
+          <span class="num">NET/CT</span><span class="num">SIZE</span><span class="num">GROSS</span><span class="num">FEES</span><span>PAIR</span><span>DIRECTION</span><span class="num">K BID/ASK</span><span class="num">P BID/ASK</span><span>BOOKS</span>
+        </div>
+        <div id="arb-rows" class="arb-rows" role="listbox" aria-label="Pair edges" tabindex="0"></div>
+      </div>
+      <div class="des-right arb-right">
+        <div id="arb-empty" class="quiet-line">NO CONFIRMED PAIRS TRACKED &#8212; CONFIRM PAIRS, THEN RESTART arb ui</div>
+        <div id="arb-detail" hidden>
+          <div id="ad-label" class="des-event pair-event">&#8212;</div>
+          <div id="ad-dir" class="des-sub">&#8212;</div>
+          <div class="sys-title">BEST DIRECTION</div>
+          <div class="kv"><span class="k">NET / CONTRACT</span><span id="ad-net" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">GROSS / CONTRACT</span><span id="ad-gross" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">FEES / CONTRACT</span><span id="ad-fees" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">SIZE</span><span id="ad-size" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">NET TOTAL</span><span id="ad-total" class="v num">&#8212;</span></div>
+          <div class="sys-title">LEGS</div>
+          <div id="ad-legs"></div>
+          <div class="sys-title">FEE MODEL</div>
+          <div class="kv"><span class="k">KALSHI</span><span id="ad-kfee" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">POLYMARKET US</span><span id="ad-pfee" class="v">&#8212;</span></div>
+          <div class="sys-title">BOOKS</div>
+          <div class="kv"><span class="k">KALSHI</span><span id="ad-kbook" class="v">&#8212;</span></div>
+          <div class="kv"><span class="k">POLYMARKET US</span><span id="ad-pbook" class="v">&#8212;</span></div>
+          <div class="sys-title">REVERSE DIRECTION</div>
+          <div class="kv"><span class="k">NET / CONTRACT</span><span id="ad-onet" class="v num">&#8212;</span></div>
+          <div class="kv"><span class="k">SIZE</span><span id="ad-osize" class="v num">&#8212;</span></div>
+        </div>
+        <div class="des-foot">&#8593;&#8595; SELECT &#183; &#9166; DES (KALSHI LEG) &#183; ESC CLOSE &#183; MEASUREMENT ONLY &#8212; NO ORDERS</div>
+      </div>
+    </div>
+  </section>
+
   <div id="copy-toast" class="copy-toast" role="status" aria-live="polite" hidden>
     <div class="ct-head"><span id="ct-label" class="ct-label">COPIED</span><span id="ct-count" class="ct-count"></span></div>
     <div id="ct-preview" class="ct-preview"></div>

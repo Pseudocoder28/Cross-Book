@@ -39,6 +39,8 @@ class MarketRef:
     outcome: str
     rules: str
     close_time: datetime | None
+    series_ticker: str = ""  # Kalshi: fee_type/fee_multiplier live on the series
+    fee_coefficient: str | None = None  # Polymarket US: per-market taker Θ
 
 
 @dataclass(frozen=True, slots=True)

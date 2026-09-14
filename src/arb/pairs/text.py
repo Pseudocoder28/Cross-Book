@@ -39,7 +39,7 @@ _SUFFIX = re.compile(r"\b(jr|sr|ii|iii|iv)\.?$")
 
 
 def fold(text: str) -> str:
-    """Lowercase, accent-fold, punctuation → space."""
+    """Lowercase, accent-fold, punctuation -> space."""
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = text.lower()
@@ -67,7 +67,7 @@ def jaccard(a: frozenset[str], b: frozenset[str]) -> float:
 
 
 def name_similarity(a: frozenset[str], b: frozenset[str]) -> float:
-    """Jaccard, but containment counts: "Dodgers" ⊂ "Los Angeles Dodgers"."""
+    """Jaccard, but containment counts: "Dodgers" in "Los Angeles Dodgers"."""
     if not a or not b:
         return 0.0
     inter = len(a & b)

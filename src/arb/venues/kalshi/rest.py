@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -65,7 +66,8 @@ class KalshiSettlementSource(BaseModel):
 class KalshiEvent(BaseModel):
     """Event metadata per
     https://docs.kalshi.com/api-reference/events/get-event.md (``category`` is
-    deprecated there but still populated in live payloads)."""
+    deprecated there but still populated in live payloads). Fee overrides,
+    when present, take precedence over the series fee (same doc)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -76,6 +78,21 @@ class KalshiEvent(BaseModel):
     category: str = ""
     mutually_exclusive: bool | None = None
     settlement_sources: list[KalshiSettlementSource] = []
+    fee_type_override: str | None = None
+    fee_multiplier_override: Decimal | None = None
+
+
+class KalshiSeries(BaseModel):
+    """Series per https://docs.kalshi.com/api-reference/market/get-series.md;
+    ``fee_type`` / ``fee_multiplier`` drive the fee model."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    ticker: str
+    title: str = ""
+    category: str = ""
+    fee_type: str = "quadratic"
+    fee_multiplier: Decimal = Decimal(1)
 
 
 def parse_markets_response(raw: RawMessage) -> tuple[list[KalshiMarket], str]:
@@ -96,6 +113,14 @@ def parse_market_response(raw: RawMessage) -> KalshiMarket:
         return KalshiMarket.model_validate(json.loads(raw.payload)["market"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ParseError(f"kalshi market response: {exc}") from exc
+
+
+def parse_series_response(raw: RawMessage) -> KalshiSeries:
+    """``GET /series/{series_ticker}`` → series (fee structure)."""
+    try:
+        return KalshiSeries.model_validate(json.loads(raw.payload, parse_float=Decimal)["series"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParseError(f"kalshi series response: {exc}") from exc
 
 
 def parse_event_response(raw: RawMessage) -> KalshiEvent:

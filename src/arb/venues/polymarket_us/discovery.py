@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import httpx
@@ -25,6 +25,7 @@ from arb.venues.polymarket_us.rest import (
     PolymarketUSMarket,
     market_id,
     parse_events_response,
+    parse_markets_response,
 )
 
 PAGE_SIZE = 500  # accepted by the gateway (verified live); fewer tokens spent
@@ -100,6 +101,37 @@ async def fetch_active_markets(
     return list(found.values())
 
 
+async def fetch_markets_by_slug(
+    config: AppConfig,
+    run: RunContext,
+    slugs: Sequence[str],
+    *,
+    sink: Callable[[RawMessage], object] | None = None,
+) -> list[PolymarketUSMarket]:
+    """``GET /v1/markets?slug=A&slug=B`` (documented ``slug[]`` filter): fee
+    coefficient, tick size and top-of-book for specific markets in one call."""
+    if not slugs:
+        return []
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"{config.polymarket_us_gateway_base}/v1/markets",
+            params={"slug": list(slugs), "limit": str(len(slugs))},
+        )
+    raw = RawMessage(
+        venue="polymarket_us",
+        stream="rest:markets",
+        payload=response.content,
+        recv_ts_ns=time.time_ns(),
+        recv_mono_ns=time.monotonic_ns(),
+        run_id=run.run_id,
+        ingest_seq=run.next_ingest_seq(),
+    )
+    if sink is not None:
+        sink(raw)
+    response.raise_for_status()
+    return parse_markets_response(raw)
+
+
 def event_refs(markets: list[DiscoveredPMMarket]) -> list[EventRef]:
     """Matcher view: one EventRef per Polymarket event with its outcomes."""
     by_event: dict[str, list[DiscoveredPMMarket]] = {}
@@ -124,6 +156,11 @@ def event_refs(markets: list[DiscoveredPMMarket]) -> list[EventRef]:
                         outcome=m.market.title or m.slug,
                         rules=m.market.description,
                         close_time=m.market.end_date,
+                        fee_coefficient=(
+                            str(m.market.fee_coefficient)
+                            if m.market.fee_coefficient is not None
+                            else None
+                        ),
                     )
                     for m in group
                 ),

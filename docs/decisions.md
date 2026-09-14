@@ -34,6 +34,28 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M14 — fees, edge math, ARB screen
+
+- **Fees in exact integer arithmetic, rounded the venue's way.** Kalshi:
+  0.07 × multiplier × C × P × (1 − P), trade fee rounded up to $0.000001,
+  then up to the direct-member tick; maker multipliers by `fee_type`
+  (0 / 0.25 / 0.5). Polymarket US: Θ × C × p × (1 − p) with the market's
+  `feeCoefficient` (maker −0.0125), banker's rounding to the cent. Both
+  reproduce the venues' documented examples in tests. Per-series Kalshi
+  parameters are fetched from the documented `GET /series` endpoint (event
+  overrides win), Polymarket's from the market object.
+- **Edge is measured depth-aware, in both directions.** Buy YES on A + NO
+  on B costs `yes_ask_A + (10000 − yes_bid_B)`; the walk merges both ladders
+  in cost order and stops at the first fill whose gross no longer covers
+  its own fees. Sizes are what the books actually offer, not a hope.
+- **The ARB screen quotes only confirmed pairs, and labels quiet books
+  honestly.** Tracked pairs' legs are subscribed on both venues at startup;
+  every book change re-quotes affected pairs and broadcasts a full ranked
+  snapshot. A Kalshi book that merely hasn't ticked is QUIET, not invalid —
+  the feed is live and every change arrives.
+- **Measurement only.** Nothing here places, amends or cancels an order;
+  Day 1's read-only rule still holds until a later prompt lifts it.
+
 ## M13 — pair matcher with human review
 
 - **The matcher proposes; a human confirms.** Equivalence lives in the

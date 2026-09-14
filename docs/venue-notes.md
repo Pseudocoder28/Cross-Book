@@ -164,6 +164,35 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
   pair matcher and DES page need. Ticker anatomy confirmed:
   `KXPRESPERSON` (series) → `KXPRESPERSON-28` (event) →
   `KXPRESPERSON-28-TGAB` (market).
+- `GET /series/{series_ticker}` → `{"series": {ticker, title, category,
+  fee_type, fee_multiplier, ...}}` (verified,
+  https://docs.kalshi.com/api-reference/market/get-series.md; fixtures
+  `rest_series_kxpresperson.json` = `quadratic`, `rest_series_kxnflgame.json`
+  = `quadratic_with_maker_fees`). `fee_type` enum: `quadratic`,
+  `quadratic_with_maker_fees` (maker = 0.25× taker), `quadratic_with_combo_maker_fees`
+  (0.5×), `flat` (table not exposed by the API). Events may carry
+  `fee_type_override` / `fee_multiplier_override` (get-event.md); markets
+  carry no fee fields.
+
+### Fees (research 2026-09-14; the fee-schedule PDF is behind a JS
+### checkpoint, so items marked * are corroborated, not read verbatim)
+
+- Taker: `fee = 0.07 × C × P × (1 − P)` dollars* — 0.07 corroborated by the
+  2022 CFTC-filed schedule and by the arithmetic of the current
+  https://docs.kalshi.com/getting_started/fee_rounding.md example
+  ($0.055 × 1 contract → model fee $0.00363825).
+- Rounding (current, authoritative): trade fee = model fee rounded **up to
+  $0.000001**; the member's balance is then aligned to its precision —
+  **$0.0001 for direct (API) members**, $0.01 for FCM-routed — with sub-
+  precision residue banked per order and rebated in whole increments.
+  Our engine rounds the 6-dp trade fee up to the next tick (conservative).
+- Maker: 0 on `quadratic`; 0.25 × taker on `quadratic_with_maker_fees`;
+  0.5 × on `quadratic_with_combo_maker_fees`. `fee_multiplier` scales the
+  coefficient (2022 INX schedule used 0.035 = 0.5 × 0.07)*.
+- No settlement fee for binary markets
+  (https://docs.kalshi.com/getting_started/market_settlement.md).
+- Fractional contracts: `FixedPointCount` allows 0.01-contract granularity —
+  another confirmation of our fixed-point `Qty`.
 - `GET /events` supports `with_nested_markets=true` (verified,
   https://docs.kalshi.com/api-reference/events/get-events.md) — used for
   liquidity-ranked discovery. `GET /markets` also supports `event_ticker`
@@ -346,6 +375,10 @@ Auth0) is separate credentialing and out of scope for now._
   active universe (paged at `limit=500`, which the gateway accepts) is
   ~3,560 events / ~89,000 markets, mostly per-game sports; only ~60 events
   have markets that are `active` and not `closed` at any moment.
+- `GET /v1/markets?slug=A&slug=B` (documented `slug[]` filter) returns just
+  those markets with `feeCoefficient`, `orderPriceMinTickSize` and
+  `bestBidQuote`/`bestAskQuote` — one request refreshes fee parameters and
+  top-of-book for every tracked slug (verified live 2026-09-14).
 - `minimumTradeQty` is **0.01 on some markets** (e.g. futures/awards) even
   though the docs say whole contracts only — parsed as Decimal; the sizing
   engine must read it per market rather than assume 1.
