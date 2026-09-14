@@ -81,6 +81,16 @@ def contracts_from_qty(qty: Qty) -> str:
     return _fixed_point_to_str(qty, scale=4)
 
 
+def qty_delta_from_contracts(text: str) -> Qty:
+    """Parse a *signed* decimal contract count (``"-54.00"``) to exact Qty units.
+
+    Only for delta fields; resting quantities are never negative.
+    """
+    if text.startswith("-"):
+        return -_fixed_point_from_str(text[1:], scale=4)
+    return _fixed_point_from_str(text, scale=4)
+
+
 class BookSide(enum.Enum):
     """Side of the normalized YES book. Venue NO-side data is mapped here by
     complement before it reaches shared code."""

@@ -56,10 +56,30 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
   `[price_in_dollars, contract_count_fp]`). Delta fields: `price_dollars`,
   `delta_fp`, `side` (`"yes"`/`"no"`), `seq`.
   — https://docs.kalshi.com/websockets/orderbook-updates.md
-- Sequencing: `seq` is a "Sequential number that should be checked if you want
-  to guarantee you received all the messages". The docs do **not** prescribe a
-  recovery procedure for gaps; our policy (resubscribe + fresh snapshot) is our
-  own choice, see decisions.md.
+- Subscribe command (verified,
+  https://docs.kalshi.com/getting_started/quick_start_websockets.md):
+  `{"id": N, "cmd": "subscribe", "params": {"channels": ["orderbook_delta"],
+  "market_tickers": [...]}}`. Ack: `{"type": "subscribed", "id": N,
+  "msg": {"channel": "orderbook_delta", "sid": S}}` (observed live).
+- Envelope (verified, https://docs.kalshi.com/asyncapi.yaml):
+  `{"type", "sid", "seq", "msg"}`. Snapshot msg: `market_ticker`,
+  `market_id`, `yes_dollars_fp`, `no_dollars_fp`. Delta msg: `market_ticker`,
+  `market_id`, `price_dollars`, `delta_fp` (**signed**, e.g. `"-54.00"`),
+  `side` (`"yes"`/`"no"`), `ts`, `ts_ms`.
+- `update_subscription` supports `add_markets` / `delete_markets` /
+  `get_snapshot`; `get_snapshot` returns an `orderbook_snapshot` on demand
+  without changing the subscription — useful for gap recovery without a full
+  resubscribe. Channel error code 10 is terminal → must resubscribe.
+  (asyncapi.yaml)
+- **Sequencing (observed live, 2026-09-14, production): `seq` is
+  per-subscription (`sid`), shared across all markets in it.** A five-market
+  subscription produced seq 1..5 for the five snapshots then 6.. for deltas
+  interleaved across markets — so per-market seq contiguity does NOT hold.
+  Gap detection must run at subscription level; books receive unsequenced
+  events from this venue. Capture:
+  `tests/fixtures/kalshi/ws_orderbook_capture.jsonl`.
+- Observed: WS text frames arrive with a trailing newline. WS auth with the
+  RSA-PSS handshake headers confirmed working end-to-end.
 
 ### Price and quantity encoding
 
@@ -130,14 +150,20 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
   objects with `ticker`, `event_ticker`, `rules_primary`, `yes_sub_title`,
   `volume_24h_fp`, status `active`, type `binary`).
 
+- `GET /events` supports `with_nested_markets=true` (verified,
+  https://docs.kalshi.com/api-reference/events/get-events.md) — used for
+  liquidity-ranked discovery. `GET /markets` also supports `event_ticker`
+  and `tickers` filters (verified,
+  https://docs.kalshi.com/api-reference/market/get-markets.md).
+
 ### Open items
 
-- WS gap recovery is unspecified in docs — our resubscribe+snapshot policy is
-  self-imposed.
-- Exact WS array field names to be confirmed against
-  https://docs.kalshi.com/asyncapi.yaml before coding the parser (WS needs
-  credentials, unlike REST in practice).
+- Gap recovery policy is ours (docs specify none): track seq per `sid`; on a
+  gap, `update_subscription` + `get_snapshot` (or resubscribe on terminal
+  errors) and invalidate the affected books.
 - Reliable market categorization (event `category` is deprecated).
+- No "no"-side delta captured yet — parser handles both sides but the
+  fixture only exercises `side: "yes"`; extend on a future capture.
 
 ## Polymarket US
 

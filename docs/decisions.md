@@ -2,6 +2,26 @@
 
 Design choices and why. Newest first.
 
+## M6 — Kalshi signing, WS parser, live capture
+
+- **Kalshi WS books get unsequenced events.** The live capture proved `seq`
+  is subscription-scoped, not market-scoped, so `Book`'s `seq == last + 1`
+  rule would false-positive on any multi-market subscription. The upcoming
+  Kalshi WS source tracks seq per `sid`; on a gap it requests fresh
+  snapshots (`update_subscription` / `get_snapshot`, documented) and
+  invalidates the affected books. Books rely on staleness + explicit resync
+  for this venue, same as Polymarket US.
+- **Delta mapping**: `side: "yes"` → YES-bid ladder at the quoted price;
+  `side: "no"` → YES-ask ladder at the complement. Signed `delta_fp` parses
+  through `qty_delta_from_contracts` (resting quantities stay unsigned).
+- **`scripts/capture_kalshi_ws.py` is committed** so WS fixtures can be
+  re-captured reproducibly (documented params only; discovery via
+  `/events?with_nested_markets=true` because `/markets` is flooded with
+  zero-volume multivariate shards). It never prints key material.
+- **Signing lives in `venues/kalshi/auth.py`** (RSA-PSS SHA-256, salt =
+  digest length, per docs) and is tested with throwaway generated keys —
+  real keys never enter tests or logs.
+
 ## M4 — REST adapters and real fixtures
 
 - **Quantities are integer units of 0.0001 contracts (`Qty`), not integer

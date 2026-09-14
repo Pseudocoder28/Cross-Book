@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M5 — `arb doctor`.**
+**M6 — Kalshi auth, WS parser, live WS capture.**
 
 ## What works
+
+- `src/arb/venues/kalshi/auth.py`: RSA-PSS request/handshake signing (doc-verified scheme), tested with throwaway keys; real key confirmed working against the production WS.
+- `src/arb/venues/kalshi/ws.py`: subscribe command + `orderbook_snapshot`/`orderbook_delta` parser (signed `delta_fp`, NO-side folded by complement); non-book frames yield no events.
+- Live WS capture committed (`tests/fixtures/kalshi/ws_orderbook_capture.jsonl`: 1 ack, 5 snapshots, 15 deltas from five liquid markets) via `scripts/capture_kalshi_ws.py`; replaying the whole capture through `Book`s stays valid and uncrossed.
+- **Key protocol finding (recorded in venue-notes): WS `seq` is per-subscription, not per-market** — Kalshi books will run unsequenced with subscription-level gap detection (`get_snapshot` for recovery).
+- 96 tests; ruff and pyright clean.
+
+### From M5
 
 - `uv run arb doctor` (`src/arb/doctor.py`): env/.env presence, key provisioning (paths only, never contents), venue reachability + clock skew via HTTP Date (verified live: both venues 200, skew ≈ +0.2 s), database + migration state, free disk. Exits non-zero only on failures. Verified end-to-end against production endpoints; database check correctly FAILs while the compose stack is down (Docker wasn't running on this machine).
 - CLI runs under uvloop; `arb` with no command prints help.
@@ -57,9 +65,9 @@
 
 Day 1 (data, read-only):
 
-- WS adapters for both venues — blocked on credentials (both venues authenticate the WS handshake even for market data). REST polling sources can proceed without.
-- `arb record` CLI wiring sources → recorder → Postgres (REST polling first). End-to-end DB verification needs Docker running (`docker compose up -d`, then `uv run alembic upgrade head`).
-- Pair matcher for equivalent markets (Kalshi discovery via `/events`).
+- Kalshi WS `EventSource` (connector with signed headers + resubscribe + per-`sid` seq tracking + `get_snapshot` gap recovery) wired into `arb record` → recorder → Postgres. End-to-end DB verification needs Docker running (`docker compose up -d`, then `uv run alembic upgrade head`).
+- Polymarket US WS adapter — blocked on their credentials (KYC + polymarket.us/developer); REST polling works meanwhile.
+- Pair matcher for equivalent markets (Kalshi discovery via `/events?with_nested_markets=true`).
 
 ## Open questions
 
