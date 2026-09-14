@@ -94,7 +94,7 @@ uv run arb replay [RUN_ID] [--pairs-top N] [--paper ...] [--persist]
 
 Replays a previously recorded run's raw messages, in order, through the
 identical pipeline live code uses — see
-[`engine.md`](engine.md#replay-the-live-pipeline-fed-from-postgres`).
+[`engine.md`](engine.md#replay-the-live-pipeline-fed-from-postgres).
 `RUN_ID` defaults to the most recent run in `raw_messages`. Prints a
 plain-text report: message/stream counts, parse errors, final book
 validity, and (if `--pairs-top > 0`) a per-pair table of quotes seen, how
