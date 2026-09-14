@@ -14,7 +14,7 @@ in place with backoff — batches are never reordered or silently discarded.
 from __future__ import annotations
 
 import logging
-from asyncio import Queue, QueueEmpty, QueueFull, sleep
+from asyncio import Queue, QueueEmpty, QueueFull, sleep, wait_for
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Never
 
@@ -71,6 +71,19 @@ class Recorder:
                     break
             RECORDER_QUEUE_DEPTH.set(self._queue.qsize())
             await self._write_with_retry(batch)
+            for _ in batch:
+                self._queue.task_done()
+
+    async def drain(self, timeout_s: float) -> bool:
+        """Wait until every enqueued message is durably written (for shutdown).
+
+        Returns False on timeout. The writer must still be running.
+        """
+        try:
+            await wait_for(self._queue.join(), timeout=timeout_s)
+        except TimeoutError:
+            return False
+        return True
 
     async def _write_with_retry(self, batch: list[RawMessage]) -> None:
         self._retry_backoff.reset()

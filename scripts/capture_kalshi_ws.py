@@ -14,50 +14,18 @@ import json
 import time
 from pathlib import Path
 
-import httpx
 from websockets.asyncio.client import connect
 
 from arb.config import AppConfig
+from arb.run import RunContext
 from arb.venues.kalshi.auth import load_private_key, ws_auth_headers
+from arb.venues.kalshi.discovery import fetch_liquid_tickers
 from arb.venues.kalshi.ws import subscribe_orderbook_cmd
 
 OUT = Path("tests/fixtures/kalshi/ws_orderbook_capture.jsonl")
 MAX_SECONDS = 90.0
 MIN_DELTAS = 15
 TOP_N = 5
-MAX_PAGES = 10
-
-
-async def liquid_tickers(config: AppConfig) -> list[str]:
-    """Rank markets by 24h volume via /events (documented params only).
-
-    /events excludes multivariate events by design, which keeps the
-    zero-volume combo-shard markets that flood /markets out of the way.
-    """
-    volumes: dict[str, float] = {}
-    cursor = ""
-    async with httpx.AsyncClient(timeout=15) as client:
-        for _ in range(MAX_PAGES):
-            params: dict[str, str | int] = {
-                "limit": 200,
-                "status": "open",
-                "with_nested_markets": "true",
-            }
-            if cursor:
-                params["cursor"] = cursor
-            response = await client.get(f"{config.kalshi_api_base}/events", params=params)
-            response.raise_for_status()
-            doc = response.json()
-            for event in doc["events"]:
-                for market in event.get("markets") or []:
-                    volume = float(market.get("volume_24h_fp") or 0)
-                    if volume > 0:
-                        volumes[market["ticker"]] = volume
-            cursor = doc.get("cursor") or ""
-            if not cursor or len(volumes) >= 200:
-                break
-    ranked = sorted(volumes.items(), key=lambda item: item[1], reverse=True)
-    return [ticker for ticker, _ in ranked[:TOP_N]]
 
 
 async def capture() -> tuple[list[bytes], dict[str, int], set[str]]:
@@ -66,7 +34,7 @@ async def capture() -> tuple[list[bytes], dict[str, int], set[str]]:
         raise SystemExit("KALSHI_API_KEY_ID not set")
     private_key = load_private_key(config.kalshi_private_key_path)
 
-    targets = await liquid_tickers(config)
+    targets = await fetch_liquid_tickers(config, RunContext(), top_n=TOP_N)
     if not targets:
         raise SystemExit("no liquid markets found to subscribe to")
     print(f"subscribing to {len(targets)} markets: {targets}")

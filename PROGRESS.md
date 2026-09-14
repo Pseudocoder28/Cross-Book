@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M7 — infra up and verified.**
+**M8 — `arb record`: live Kalshi data into Postgres.**
 
 ## What works
+
+- `src/arb/venues/kalshi/discovery.py`: liquidity-ranked discovery via `/events?with_nested_markets=true` (documented params only); every REST response goes to the recorder before parsing.
+- `src/arb/venues/kalshi/source.py`: `KalshiWSSource` — shared `ReconnectingWebSocket` + signed handshake (headers recomputed per attempt) + resubscribe with fresh cmd id on every (re)connect.
+- `src/arb/record.py` + `uv run arb record`: sources → recorder → Postgres, supervised tasks, Prometheus metrics server (`metrics_host:metrics_port`; compose sets `METRICS_HOST=0.0.0.0` for in-network scraping), graceful drain on shutdown (`Recorder.drain` via queue join).
+- **Verified live end-to-end (2026-09-14)**: 25 s run recorded 2 discovery pages + 10 WS frames into `raw_messages` with contiguous `ingest_seq` under one `run_id`; payload bytes byte-exact in Postgres.
+- 99 tests; ruff and pyright clean.
+
+### From M7
 
 - Compose stack running and verified (2026-09-14): Postgres+pgvector healthy, Prometheus ready, Grafana healthy with provisioned datasource, app container built — every port bound to 127.0.0.1 only.
 - Migration `0001` applied to real Postgres; verified a live write/read roundtrip through `insert_raw_messages` (rows cleaned up afterwards).
@@ -73,9 +81,10 @@
 
 Day 1 (data, read-only):
 
-- Kalshi WS `EventSource` (connector with signed headers + resubscribe + per-`sid` seq tracking + `get_snapshot` gap recovery) wired into `arb record` → recorder → Postgres. End-to-end DB verification needs Docker running (`docker compose up -d`, then `uv run alembic upgrade head`).
-- Polymarket US WS adapter — blocked on their credentials (KYC + polymarket.us/developer); REST polling works meanwhile.
-- Pair matcher for equivalent markets (Kalshi discovery via `/events?with_nested_markets=true`).
+- Book manager consuming recorded/live events: per-`sid` seq tracking with `get_snapshot` gap recovery, book invalidation metrics, staleness policy.
+- Polymarket US REST-polling source into `arb record` (public gateway, 20 req/s budget); WS adapter blocked on their credentials (KYC + polymarket.us/developer).
+- Pair matcher for equivalent markets.
+- Run the app container as the recorder (swap `sleep infinity` for `arb record`) once multi-venue recording lands.
 
 ## Open questions
 

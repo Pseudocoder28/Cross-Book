@@ -42,6 +42,9 @@ services:
     environment:
       # Inside the compose network the DB host is the service name.
       DATABASE_URL: postgresql+asyncpg://arb:arb@postgres:5432/arb
+      # Prometheus scrapes app:9000 from inside the network; the port is not
+      # mapped to the host.
+      METRICS_HOST: 0.0.0.0
     volumes:
       - ./secrets:/app/secrets:ro
     depends_on:

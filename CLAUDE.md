@@ -51,6 +51,7 @@ Detects and trades price gaps between equivalent binary markets on Kalshi and Po
 - `uv run alembic upgrade head` migrates the database (URL from `.env` via `AppConfig`)
 - `docker compose up -d` starts Postgres with pgvector, Prometheus, Grafana and the app
 - `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk
+- `uv run arb record [--tickers T1,T2 | --top N] [--duration S]` streams raw Kalshi market data into Postgres
 - Keep this list current as commands are added.
 
 ## Where decisions live

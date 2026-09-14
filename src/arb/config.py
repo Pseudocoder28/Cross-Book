@@ -40,3 +40,8 @@ class AppConfig(BaseSettings):
     # --- Recorder ---
     recorder_queue_max: int = 100_000
     recorder_batch_max: int = 500
+
+    # --- Metrics endpoint (compose overrides host to 0.0.0.0 inside the
+    # network so Prometheus can scrape; host ports stay 127.0.0.1-only) ---
+    metrics_host: str = "127.0.0.1"
+    metrics_port: int = 9_000
