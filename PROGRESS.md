@@ -2,9 +2,17 @@
 
 ## Current milestone
 
-**M6 — Kalshi auth, WS parser, live WS capture.**
+**M7 — infra up and verified.**
 
 ## What works
+
+- Compose stack running and verified (2026-09-14): Postgres+pgvector healthy, Prometheus ready, Grafana healthy with provisioned datasource, app container built — every port bound to 127.0.0.1 only.
+- Migration `0001` applied to real Postgres; verified a live write/read roundtrip through `insert_raw_messages` (rows cleaned up afterwards).
+- `uv run arb doctor` exits 0 locally (all ok except the expected Polymarket US keys warn) and **inside the container** via `docker compose exec app uv run arb doctor` (DB over the compose network, keys via mounted `secrets/`, env via `env_file`).
+- Dockerfile sets `UV_NO_SYNC=1` so in-container `uv run` uses the baked `--no-dev` environment instead of re-syncing at runtime.
+- Note: Prometheus's `arb` scrape target (`app:9000`) stays down until `arb record` serves `/metrics` — expected.
+
+### From M6
 
 - `src/arb/venues/kalshi/auth.py`: RSA-PSS request/handshake signing (doc-verified scheme), tested with throwaway keys; real key confirmed working against the production WS.
 - `src/arb/venues/kalshi/ws.py`: subscribe command + `orderbook_snapshot`/`orderbook_delta` parser (signed `delta_fp`, NO-side folded by complement); non-book frames yield no events.
