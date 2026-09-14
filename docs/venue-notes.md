@@ -304,6 +304,24 @@ Auth0) is separate credentialing and out of scope for now._
   Effective 2026-07-01. Markets carry per-market `feeCoefficient`.
   — https://docs.polymarket.us/fees
 
+### Observed rate limiting (2026-09-14, live, contradicts docs)
+
+- Docs say "20 requests per second per IP" for the public gateway. In
+  practice `GET /v1/markets/{slug}/book` 429'd on a burst of ~17 sequential
+  requests (~20/s effective) and kept 429ing for ~10 s afterwards — a
+  cooldown/penalty window the docs don't mention ("no penalty" is claimed
+  only for the authenticated API). Even at 1 req/s one further 429 appeared
+  right after recovery. Poller design: token bucket well under the cap
+  (≤ ~5 req/s), immediate stop on 429 with ≥ 10 s backoff.
+
+### Observed latency (2026-09-14, from a residential connection; VM will differ)
+
+- Gateway REST `GET book`: ~21–22 ms median warm round trip.
+- Kalshi REST `GET orderbook`: ~27–30 ms median warm round trip.
+- Kalshi WS: ping RTT ~22–36 ms; **delta push latency (exchange `ts_ms` →
+  local receive) median ~8 ms, range 5.5–12.5 ms across two sessions** —
+  subject to local NTP accuracy, but consistent.
+
 ### Observed live behavior (2026-09-13, public gateway, unauthenticated)
 
 - `GET /v1/markets` and `GET /v1/markets/{slug}/book` returned 200 with no
