@@ -125,3 +125,24 @@
 .pair-row.quiet-line:hover { background: none; }
 
 .pair-row:hover:not(.sel) { background: #0f0f0f; }
+
+/* ---------- decide buttons: the mouse route to a decision ----------
+   A decision used to be a bare letter and nothing else, so there was no way
+   to make one with a mouse and no way to make one with the keyboard that was
+   not a letter. These sit at the top of the detail pane, above the evidence
+   they are a judgement on. */
+
+.pair-acts { display: flex; gap: 4px; margin: 0 0 10px; }
+.pair-acts .pact { height: 18px; padding: 0 9px; letter-spacing: 0.1em; }
+.pact:not(:disabled).st-confirmed { color: var(--bid); border-color: var(--bid); }
+.pact:not(:disabled).st-rejected { color: var(--ask); border-color: var(--ask); }
+.pact:not(:disabled):hover { background: var(--raised); }
+/* The status the row already has: disabled, because re-deciding it is a write
+   that changes nothing — and rendered like a pressed filter chip, so the strip
+   also reads as "this is where this pair stands". */
+.pact:disabled { cursor: default; }
+.pact[aria-pressed="true"] { background: var(--raised); border-color: var(--amber); color: var(--amber); }
+
+/* .pairs-right zeroes the margin on its first .sys-title; the action strip is
+   the first child now, so KALSHI has to lose its top margin here instead. */
+#pair-detail .pair-acts + .sys-title { margin-top: 0; }

@@ -123,12 +123,12 @@ and survives a reload, and the browser's back/forward buttons work:
 
 | Path | Screen | Reached by |
 | --- | --- | --- |
-| `/` | MONITOR — market list, depth ladder, tape, latency | nav, `ALT+1`, `MON` |
-| `/arb` | cross-venue edge over tracked pairs | nav, `ALT+2`, `ARB` |
-| `/pairs` | pair review queue | nav, `ALT+3`, `PAIRS` |
-| `/paper` | simulated ledger; without `--paper` it shows stored history and says so | nav, `ALT+4`, `PAPER` |
-| `/system` | run, venue, engine, recorder, database and clock diagnostics | nav, `ALT+5`, `SYS` |
-| `/help` | keys, commands, how to read each screen, glossary | nav, `ALT+6`, `HELP` |
+| `/` | MONITOR — market list, depth ladder, tape, latency | nav, the chord + `1`, `MON` |
+| `/arb` | cross-venue edge over tracked pairs | nav, the chord + `2`, `ARB` |
+| `/pairs` | pair review queue | nav, the chord + `3`, `PAIRS` |
+| `/paper` | simulated ledger; without `--paper` it shows stored history and says so | nav, the chord + `4`, `PAPER` |
+| `/system` | run, venue, engine, recorder, database and clock diagnostics | nav, the chord + `5`, `SYS` |
+| `/help` | keys, commands, how to read each screen, glossary | nav, the chord + `6`, `HELP` |
 | `/market/<market_id>` | DES — one market's rules, metadata and live book | `⏎` on a selection, or `DES` — not in the nav |
 
 Routing is client side, over the History API, on purpose: the session holds
@@ -145,22 +145,30 @@ reports the miss.
 
 ### Keys and commands
 
-Typing anywhere goes to the `ARB>` line, except inside the monitor's filter
-box, which owns every key while it has focus — Alt shortcuts included, so
-`ALT+←` stays word-navigation in a text field. Keys that belong to one screen
-are printed in that screen's footer strip and collected on `/help`; these are
-the global ones.
+A bare printable character **always** goes to the `ARB>` line. A page's
+single-letter keys fire only while focus is inside its row list, which you enter
+deliberately with `↑`/`↓` — clicking a row selects it but does not move focus.
+That rule exists because typing the word `RUN` on `/pairs` used to reload the
+list and then write two pair decisions to Postgres; see
+[`ui.md`](ui.md#the-keyboard-model) for the full model and
+[`decisions.md`](decisions.md) for why.
+
+The page chord is **`CTRL` on macOS and `ALT` everywhere else** — Option is the
+insert-special-character modifier on a Mac, so `⌥1` types `¡`. `ALT` stays live
+as an alias on every platform; only the label changes.
 
 | Key | Effect |
 | --- | --- |
-| `ALT+1`…`ALT+6` | jump to that nav page |
-| `ALT+[` / `ALT+]` | previous / next page, wrapping |
-| `ALT+←` / `ALT+→` | browser history back / forward |
-| `↑` `↓` | move the selection on the current screen |
-| `1`–`9` | quick-select one of the first nine monitor rows (empty command line only) |
+| chord + `1`…`6` | jump to that nav page |
+| chord + `[` / `]` | previous / next page, wrapping |
+| `↑` `↓` | from `ARB>`, focus the page's row list; inside it, move the selection |
+| `1`–`9` | quick-select one of the first nine monitor rows (with the list focused) |
 | `⏎` | run the typed command; with an empty command line, the page's action on the current selection (DES on the monitor, the Kalshi leg on `/arb`) |
-| `ESC` | clear a half-typed command; with nothing to clear, return to the monitor |
+| `ESC` | clear a filter box, then leave the list for `ARB>`, then clear a half-typed command, then return to the monitor |
 | `⌫` | edit the command line |
+
+History back/forward is **not** bound here — `⌘[` / `⌘]` on macOS and
+`ALT+←` / `ALT+→` elsewhere are already the browser's own.
 
 Commands are typed at `ARB>` and run with `⏎`; a trailing `<GO>` or `GO` is
 stripped first (Bloomberg muscle memory, kept deliberately).

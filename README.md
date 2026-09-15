@@ -37,8 +37,10 @@ The UI is a keyboard-driven multi-page app: one URL per screen — `/`
 book) — all served by the one `arb ui` process on the one port, so every
 screen deep-links, reloads and back-buttons like a normal web page.
 
-`ALT+1`…`ALT+6` jump between the nav pages, typing anywhere goes to the
-`ARB>` command line, and `/help` documents the rest of it in the app. See
+`CTRL+1`…`CTRL+6` jump between the nav pages on macOS (`ALT` elsewhere), a bare
+letter typed anywhere always goes to the `ARB>` command line, and a page's own
+single-letter keys fire only once you have focused its row list with `↑`/`↓`.
+`/help` documents the rest of it in the app. See
 [`docs/ui.md`](docs/ui.md) for how each screen reads and
 [`docs/cli.md`](docs/cli.md#arb-ui) for the routes, keys and flags.
 

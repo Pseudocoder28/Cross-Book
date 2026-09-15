@@ -28,6 +28,11 @@
   padding: 0 10px;
   line-height: 20px;
   background: var(--raised);
+  /* One 20px grid row: clip rather than wrap, so a narrow window loses the
+     tail of the note instead of pushing the cards' scroll area off-screen.
+     The chord label is leftmost, so it is the last thing to go. */
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 /* AWAITING DATA is a banner, not a row: it carries no .kv, so select-to-copy

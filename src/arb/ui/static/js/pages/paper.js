@@ -20,11 +20,17 @@
    The poll is started in mount() and cleared in unmount(): a 3s fetch that
    outlives navigation is exactly the bug the spec names. The `paper` WS frame
    is handled at module load, so trades pushed while you are on another page
-   still land in the ledger. */
+   still land in the ledger.
+
+   Keyboard: the focused region owns every key (.context/keyboard-model.md).
+   The ledger (`ptr-rows`) is this page's list region; R only refreshes while
+   that list has the keyboard, so typing a command that starts with R at the
+   ARB> line is typing, not a fetch. */
 
 import { $, el, setText } from "../core/dom.js";
 import { state, schedule, registerRenderer } from "../core/state.js";
 import { onMessage } from "../core/ws.js";
+import { SCOPE, focusCommand } from "../core/keys.js";
 import * as cmd from "../core/cmd.js";
 import {
   nf, fmtCents, fmtQty, fmtWhen, fmtSignedCents, fmtDollarsFromTicks,
@@ -74,7 +80,9 @@ tradesBand.append(filterChip, filterCount);
 
 filterChip.addEventListener("click", (e) => {
   setFilter(null);
-  if (e.detail > 0) filterChip.blur();   // pointer click: hand the keyboard back to ARB>
+  // pointer click: hand the keyboard back to ARB>, the home position. blur()
+  // used to leave it on <body> — the right scope, but no visible cursor.
+  if (e.detail > 0) focusCommand();
 });
 
 // cumulative expected-net curve, between the totals strip and POSITIONS
@@ -137,10 +145,22 @@ $("pl-minnet").parentNode.after(netNote);
 const qtyMeter = meter("pl-maxqty", "PEAK PAIR");
 const notMeter = meter("pl-maxnot", "NOTIONAL USED");
 
-// the footer has to stay true: ENTER now filters, and it did not before
-$("paperpage").querySelector(".des-foot").textContent =
-  "↑↓ SELECT · ENTER FILTER PAIR · ESC CLOSE · R REFRESH"
+// The footer is this page's only key list — help.js reads it out of the page
+// root to build its table — so it is built here rather than declared in
+// index.html and overwritten from two places. R is a LIST-scope key now: at
+// the ARB> line an R is the first letter of a command, not a refresh.
+const FOOT = "↑↓ LIST · ⏎ FILTER PAIR · R REFRESH (IN LIST) · ESC ARB>"
   + " · SIMULATED FILLS AT DISPLAYED LIQUIDITY — NO ORDERS";
+
+const paperPage = $("paperpage");
+// Adopt the shell's footer if one is still shipped, else create it: whichever
+// way index.html goes there is exactly one .des-foot on this page.
+const paperFoot = paperPage.querySelector(".des-foot") || el("div", "des-foot");
+paperFoot.textContent = FOOT;
+if (!paperFoot.parentNode) {
+  const right = paperPage.querySelector(".paper-right");
+  if (right) right.append(paperFoot);
+}
 
 // ---------- data ----------
 
@@ -526,7 +546,14 @@ function renderPaper() {
     );
     row.title = (pos.label || "") + (on ? " — CLICK TO SHOW EVERY PAIR" : " — CLICK TO FILTER THE TRADES BELOW");
     if (pos.pair_id != null) {
-      row.addEventListener("click", () => setFilter(on ? null : pos.pair_id));
+      // POSITIONS is not a `[data-keyregion="list"]` region, so the core's
+      // click handler does not bounce focus off it: a pointer click here
+      // would otherwise park the keyboard on a list with no keys. Focus ends
+      // at the ARB> line, as it does everywhere else.
+      row.addEventListener("click", (e) => {
+        setFilter(on ? null : pos.pair_id);
+        if (e.detail > 0) focusCommand();
+      });
     }
     pc.append(row);
   }
@@ -627,6 +654,13 @@ export default {
   nav: true,
   root: "paperpage",
 
+  // The ledger is the only keyboard-driven region: TAB from the ARB> line
+  // lands on it and ↑/↓ from there focuses it rather than moving a cursor
+  // nobody can see. POSITIONS stays mouse-driven (ENTER on a trade is the
+  // keyboard route to the same filter).
+  regions: ["ptr-rows"],
+  listRegion: "ptr-rows",
+
   mount() {
     mounted = true;
     state.paper.open = true;
@@ -653,19 +687,37 @@ export default {
     renderPaper();
   },
 
+  /** What the strip and the ARB> band say while the ledger has the keyboard.
+      R appears here and nowhere else, because here is where it fires. */
+  keyHints(scope) {
+    if (scope !== SCOPE.LIST) return [];
+    return [
+      { k: "↑↓", d: "SELECT" },
+      { k: "⏎", d: "FILTER PAIR" },
+      { k: "R", d: "REFRESH" },
+    ];
+  },
+
   // Escape belongs to core/keys.js — claiming it here would break the uniform
-  // "ESC CLOSE". Letter keys are taken only with an empty command buffer, so
-  // typing PAIRS or ARB on this page still reaches the ARB> line.
-  onKey(e) {
+  // "ESC ARB>". The old `cmd.buffer() === ""` guard on R is gone: it could
+  // never protect the FIRST letter typed, which is the whole bug. R is a LIST
+  // key now, so it only fires with the ledger focused.
+  onKey(e, scope) {
     const k = e.key;
+    // Arrows and the filter are view-only (G0/G0), free in whatever scope the
+    // core hands them over in; from the ARB> line arrows focus the list first.
     if (k === "ArrowUp" || k === "ArrowDown") { movePaper(k === "ArrowUp" ? -1 : 1); return true; }
-    if (k === "Enter" && cmd.buffer() === "") {
+    // ENTER is shared with cmd.exec(): a typed command always wins, and only
+    // an empty buffer means "filter the ledger by this trade's pair".
+    if (k === "Enter" && cmd.buffer().trim() === "") {
       const t = visibleTrades()[state.paper.idx];
       if (t && t.pair_id != null) { setFilter(filterPairId === t.pair_id ? null : t.pair_id); return true; }
       return false;
     }
+    if (scope !== SCOPE.LIST) return false;      // every letter below is LIST-only
+    if (e.repeat) return false;                  // a leaned-on key is not N requests
     const up = k.length === 1 ? k.toUpperCase() : k;
-    if (up === "R" && cmd.buffer() === "") { loadPaper(); return true; }
+    if (up === "R") { loadPaper(); return true; }
     return false;
   },
 

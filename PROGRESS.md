@@ -2,9 +2,111 @@
 
 ## Current milestone
 
-**M18 — the terminal becomes a multi-page app: real URLs, ES modules, SYSTEM and HELP.**
+**M19 — the keyboard gets a focus model: typing can no longer write to the database.**
 
 ## What works
+
+- **The reported bug is fixed.** "Why can't I type R, U and N in the search
+  bar" was the symptom; the disease was that on `/pairs` with nothing focused,
+  typing the word "RUN" ran `R` reload → `U` set the selected pair PROPOSED →
+  `N` set it REJECTED — two Postgres writes from someone who believed they
+  were typing. `core/keys.js` gave the active page's `onKey()` first refusal on
+  every key including bare printables, *before* the `ARB>` line saw them, so
+  any page with single-letter actions turned those letters into hotkeys.
+- Keys now resolve by **scope**, derived from `document.activeElement` on every
+  keydown, never from a mode flag: `TEXT` (an input owns every key), `LIST`
+  (focus is inside a `[data-keyregion="list"]` row container — the page's
+  action keys are live) and `COMMAND` (everything else — the `ARB>` buffer owns
+  every printable, always). The printable branch sits ABOVE `page.onKey` in the
+  resolution order, so a page can only ever be handed a bare letter in `LIST`
+  scope; pages receive `onKey(e, scope)` and re-assert the same guard
+  themselves. The old `cmd.buffer() === ""` guards in `monitor.js`, `paper.js`
+  and `help.js` are deleted rather than widened — the buffer is empty precisely
+  when you type the first character, so they could never protect the character
+  that fires the action.
+- Every page mounts with focus on `#cmd` (the router's mount-focus guard only
+  takes focus when nothing better holds it, so DES's `{replace: true}`
+  re-navigation on each arrow does not steal it). `↑`/`↓` from `COMMAND`
+  focuses the list **without** moving the cursor, so row 0 is the next
+  candidate. Clicking a row selects it but does **not** enter `LIST` scope.
+  `Esc` leaves `LIST` back to `ARB>`. A printable with a non-empty command
+  buffer keeps typing in every scope (the dirty-buffer rule), and an unclaimed
+  printable in `LIST` blurs to `COMMAND` and then types, so `KXPRES` into a
+  focused list gets you `KXPRES` rather than six swallowed keystrokes.
+- One five-rung global Escape ladder (clear a field → leave an empty field →
+  disarm and leave a list → clear the buffer → back to MONITOR); pages no
+  longer implement Escape at all. `Enter` with a non-empty buffer always runs
+  the command, whatever the scope.
+- **Consequence grading** is now the standing rule for every future binding,
+  recorded in `docs/decisions.md` M19: G0 view/scroll is free in any scope, G1
+  navigation is a cheap chord, G2 one-row writes (`Y` `N` `U`) are one key in
+  `LIST` scope with no autorepeat, G3 many-row writes (`Shift+Y`/`Shift+N`)
+  arm then confirm with the exact count stated, and **G4 irreversible/money is
+  never a hotkey** — a typed command plus a typed confirmation. G4 is written
+  down now because day 3 is live order placement.
+- Destructive keys reject `e.repeat`: a leaned-on `Y` was one POST per
+  autorepeat, and `decidePair` advances the cursor under a status filter, so it
+  walked the queue writing as it went. A pending `Shift+Y`/`Shift+N` disarms on
+  the list's `focusout`, which covers Escape, TAB, a click on the detail pane
+  and a page jump alike.
+- **macOS**: the page chord is `CTRL+1`–`CTRL+6` / `CTRL+[` `CTRL+]` on macOS
+  and `ALT` elsewhere — Option is the insert-special-character modifier there
+  (`Option+1` types `¡`), so the old `ALT` chord was a typo generator on a Mac.
+  One `NAVMOD`/`NAVLABEL` constant drives the nav hint, the keys strip, every
+  page footer and `/help`; Alt stays live as an alias everywhere. A
+  platform-detection bug was caught in testing:
+  `navigator.userAgentData.platform` reports `"macOS"` with a lower-case m and
+  short-circuits `navigator.platform`, so a case-sensitive `/Mac/` test
+  mislabelled every Chromium browser on a Mac — the test is now
+  `/mac|iphone|ipad|ipod/i`.
+- The four history bindings are **deleted**, not re-mapped: `⌘[`/`⌘]` on macOS
+  and `Alt+←`/`Alt+→` elsewhere are already the browser's own, and `chordHeld()`
+  refuses `metaKey` so the app can never shadow them.
+- `/pairs`: the status filter moved off `TAB` (which trapped focus — you could
+  not `Tab` out of the page) onto `←`/`→`; real `CONFIRM` / `REJECT` /
+  `UNDECIDE` buttons were added, because a decision only a letter can make is
+  unreachable with a mouse; and in `LIST` scope the keys strip and the `ARB>`
+  line show a reversed-video band naming the keys that are live. `/help`'s `/`
+  binding is gone (`TAB` focuses its filter). MARKET and SYSTEM footers say
+  `ESC MONITOR`, list pages say `ESC ARB>`, and every footer's live text is
+  authored in its page module — `help.js` parses each page's key table out of
+  that element, so a binding and its documentation change in one edit.
+- Spec frozen before implementation as `.context/keyboard-model.md` (the model
+  was picked 3-0 by a judged panel of user / implementation / safety judges) so
+  that parallel agents coded against the same names.
+- **Verified in a real browser** (see the checklist below): typing "RUN" on
+  `/pairs` from the home position leaves the buffer reading `RUN`, the chips
+  unchanged and **zero POSTs**.
+- 195 tests (unchanged — this milestone is entirely browser code); ruff,
+  pyright and `node --check` clean across all 15 JS modules, now 6,245 lines.
+- **Open**: there is still no JS test harness. 15 modules and 6,245 lines of
+  browser code are checked by `node --check` and by driving a real browser, and
+  nothing else (`docs/testing.md`). That means this fix — a *safety* property,
+  not a cosmetic one — is guarded only by the manual pass below. Re-run it
+  after any change to `core/keys.js`, `core/router.js`, or any page's `onKey`,
+  `regions`, `listRegion` or `keyHints`:
+
+  | # | Do this | Expect |
+  | --- | --- | --- |
+  | 1 | Load `/pairs`, click nothing | `document.activeElement` is `#cmd`; keys strip reads `ARB> COMMAND` |
+  | 2 | Type `RUN` | buffer shows `RUN`; PROPOSED/CONFIRMED/REJECTED chips unchanged; **zero** `POST /api/pairs/*` in the network log |
+  | 3 | `Esc` | buffer clears, focus stays on `#cmd` |
+  | 4 | `↓` | focus moves to `#pair-rows`; cursor does **not** move (row 0 is still the candidate); `ARB>` becomes a reversed-video `LIST` band |
+  | 5 | `Y` | one POST; CONFIRMED count +1 (observed 94 → 95); list head reads `#40 CONFIRMED` |
+  | 6 | `UNDO` chip | CONFIRMED back to 94 |
+  | 7 | Hold `Y` for ~2 s | exactly one POST, not one per autorepeat |
+  | 8 | `Esc`, then type `Y` `N` at the `ARB>` line | buffer reads `YN`; CONFIRMED unchanged; zero POSTs |
+  | 9 | Click a pair row, then type `Y` | it selects and shows the detail, but `Y` **types** — scope stayed `COMMAND` |
+  | 10 | `Shift+Y` once, then `Esc` | armed prompt states a count, then disarms; zero POSTs |
+  | 11 | `Shift+Y` once, then click away | armed prompt disarms on `focusout`; zero POSTs |
+  | 12 | `CTRL+2` (macOS) / `ALT+2` | navigates to `/arb`; `ALT+3` still works as an alias on macOS |
+  | 13 | Read the nav hint | `CTRL+1-6 PAGE · CTRL+[ ] CYCLE` on macOS, `ALT+…` elsewhere |
+  | 14 | `TAB` on `/pairs` and on `/help` | focus enters the filter box and `TAB` again returns to `ARB>` — the page never traps it |
+  | 15 | `⌘[` (macOS) / `Alt+←` | browser history back; the app does not intercept it |
+
+### From M18
+
+**M18 — the terminal becomes a multi-page app: real URLs, ES modules, SYSTEM and HELP.**
 
 - The browser UI is a real multi-page app. Seven routes, all served by the one
   `arb ui` process on one port: `/` MONITOR, `/arb`, `/pairs`, `/paper`,
@@ -39,9 +141,10 @@
   one-way reading can go negative and points at `uv run arb doctor`.
 - New page `/help`: keyboard reference, command reference, how to read every
   screen column by column, and a glossary. Most of it is derived rather than
-  typed — the page list, paths and `ALT+N` numbers come from the router's
-  `navPages()`, and each page's key table is parsed out of that page's own
-  footer strip on mount — so it cannot drift from the app.
+  typed — the page list, paths and nav-chord numbers come from the router's
+  `navPages()` (and the modifier's label from `NAVLABEL`, M19), and each
+  page's key table is parsed out of that page's own footer strip on mount —
+  so it cannot drift from the app.
 - Two reported bugs fixed on the monitor: the header said `MONITOR — KALSHI`
   while the list held both venues (now `MONITOR — KALSHI 13 · POLYMARKET US 9`
   from live counts, and the stat line reflects the filter), and the `#` column
@@ -52,8 +155,10 @@
   `localStorage` under `arb.monitor.v1`, and applied by moving existing row
   nodes so a re-sort never costs the selection or a drag in progress.
 - New keys: `ALT+1`–`ALT+6` jump to a page, `ALT+[` / `ALT+]` cycle,
-  `ALT+←` / `ALT+→` are history back/forward. Escape is global — it clears a
-  half-typed command, otherwise it returns to MONITOR. New `ARB>` commands:
+  `ALT+←` / `ALT+→` are history back/forward. *(M19: the chord is `CTRL` on
+  macOS and `ALT` elsewhere, and the history bindings are gone — the
+  browser's own do it.)* Escape is global — it clears a half-typed command,
+  otherwise it returns to MONITOR. New `ARB>` commands:
   `MON`/`MONITOR`, `SYS`/`SYSTEM`, `HELP`/`?`, `BACK`; `PAIRS`, `ARB`,
   `PAPER`, `DES`, `<TICKER>` and `<TICKER> DES` all still work and now
   navigate instead of opening an overlay.

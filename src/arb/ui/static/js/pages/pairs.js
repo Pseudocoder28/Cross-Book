@@ -11,11 +11,28 @@
    and every one of them is written down in the comment above it:
      - the list is fetched ONCE, unfiltered, and filtered in the client;
      - only the first MAX_ROWS rows are put in the DOM;
-     - Escape is the shell's now (core/keys.js), so it is not claimed here. */
+     - Escape is the shell's now (core/keys.js), so it is not claimed here.
+
+   THE KEY MODEL (core/keys.js). This page is the one the scope model was
+   written for: typing the word "RUN" at the ARB> line used to reload the
+   list, set a pair PROPOSED and then set one REJECTED — two Postgres writes
+   from a user who believed they were typing in a search box. So:
+     - Y / N / U / R and SHIFT+Y / SHIFT+N act ONLY in SCOPE.LIST, i.e. only
+       while the focus is actually inside #pair-rows. In COMMAND scope the
+       core never even offers them to us, and the explicit guard below means
+       it stays that way if the core ever changes;
+     - every one of them refuses an autorepeat, because a decision advances
+       the cursor and a leaned-on key would walk the queue writing as it goes;
+     - the status filter moved off TAB (which trapped the focus on this page —
+       you could not TAB out of /pairs) onto ← →, which are not printable and
+       so shadow nothing;
+     - CONFIRM / REJECT / UNDECIDE also exist as buttons, because a decision
+       that only a letter can make is unreachable with a mouse. */
 
 import { $, el, titled, setText } from "../core/dom.js";
 import { state, schedule } from "../core/state.js";
 import { nf, fmtWhen } from "../core/format.js";
+import { SCOPE, focusRegion } from "../core/keys.js";
 
 const PAIR_FILTERS = ["proposed", "confirmed", "rejected", "all"];
 // A full universe proposal is ~12k rows. Building them all costs ~100k DOM
@@ -63,6 +80,26 @@ function clearMsg() {
   if (msgTimer) { clearTimeout(msgTimer); msgTimer = null; }
   armed = null;
   if (!state.pairs.msg) return;
+  state.pairs.msg = "";
+  schedule("pairs");
+}
+
+/** Drop a pending SHIFT+Y / SHIFT+N and the prompt that announced it.
+
+    This used to happen as a side effect of onPairsKey seeing any other key,
+    which included Escape. Escape is resolved above the page now, so leaving
+    the list no longer runs a single line of this module: without this, an
+    armed decision would sit there until ARM_MS expired and fire on the next
+    SHIFT+Y typed minutes later. Called from the list's focusout, so ANY way
+    of leaving — Escape, TAB, a click elsewhere, a page jump — disarms.
+
+    Only touches the message when something was actually armed: a sticky
+    "LOAD FAILED" is the only report of a failure and must not be swept away
+    by a focus change. */
+function disarm() {
+  if (!armed) return;
+  armed = null;
+  if (msgTimer) { clearTimeout(msgTimer); msgTimer = null; }
   state.pairs.msg = "";
   schedule("pairs");
 }
@@ -366,7 +403,7 @@ function buildControls() {
     b.type = "button";
     b.dataset.status = s;
     b.append(el("span", "pc-l", s.toUpperCase()), el("span", "pc-n num", "—"));
-    b.title = s === "all" ? "SHOW EVERY PAIR (TAB)" : "SHOW " + s.toUpperCase() + " PAIRS (TAB)";
+    b.title = (s === "all" ? "SHOW EVERY PAIR" : "SHOW " + s.toUpperCase() + " PAIRS") + " (← →)";
     b.addEventListener("click", (e) => {
       setFilter(s);
       if (e.detail > 0) b.blur();   // pointer click: hand typing back to ARB>
@@ -407,34 +444,90 @@ function buildControls() {
     applyFilter();
     schedule("pairs");
   });
-  qInput.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      if (qInput.value) {
-        qInput.value = "";
-        state.pairs.q = "";
-        state.pairs.idx = 0;
-        clearMsg();
-        applyFilter();
-        schedule("pairs");
-      } else qInput.blur();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      qInput.blur();              // hand the keyboard back to the ARB> line
-    }
-  });
+  // No keydown handler: Escape and Enter in a text field belong to the shell's
+  // ladder (core/keys.js). Escape clears the box and dispatches `input`, which
+  // is the listener above, so clearing still re-filters; a second Escape goes
+  // home to ARB>, and Enter or ArrowDown drops into the list. A local copy of
+  // any of that is a second source for a rule the shell already states.
 
-  const foot = document.querySelector("#pairs .des-foot");
-  if (foot) {
-    foot.textContent = "↑↓ SELECT · PGUP/PGDN ±10 · Y / N DECIDE · SHIFT+Y / SHIFT+N TWICE"
-      + " = VISIBLE ROWS OF THIS EVENT · U UNDECIDE · TAB FILTER · / SEARCH · R REFRESH · ESC CLOSE";
+  // Leaving the list disarms, whatever the exit was. Rows are non-focusable by
+  // design, so the region itself is the focus target and one focusout on it
+  // covers Escape, TAB, a click on the detail pane and a page jump alike.
+  const rows = $("pair-rows");
+  if (rows) rows.addEventListener("focusout", disarm);
+
+  buildActions();
+  buildFoot();
+}
+
+// The footer is BUILT here, not overwritten: index.html no longer carries one
+// (it disagreed with this string, which is how the two drifted). help.js reads
+// the page's key table out of this element, so it is also where the PAIRS keys
+// are published — change a binding, change this line in the same edit.
+function buildFoot() {
+  const right = document.querySelector("#pairs .pairs-right");
+  if (!right) return;
+  right.append(el("div", "des-foot",
+    "LIST KEYS — ↑↓ AT THE ARB> LINE ENTERS THE LIST"
+    + " · ↑↓ SELECT · PGUP/PGDN ±10 · Y / N DECIDE"
+    + " · SHIFT+Y / SHIFT+N TWICE = VISIBLE ROWS OF THIS EVENT · U UNDECIDE"
+    + " · ←→ FILTER · / SEARCH · R REFRESH · ESC ARB>"));
+}
+
+// Mouse parity. Every decision on this page was a bare letter, so a mouse user
+// had no route to one at all and a keyboard user had no route that was not a
+// letter. These are the same three writes as Y / N / U, on the row the cursor
+// is on — which is the row whose evidence is on screen beside them.
+const ACTIONS = [
+  ["confirmed", "CONFIRM", "Y"],
+  ["rejected", "REJECT", "N"],
+  ["proposed", "UNDECIDE", "U"],
+];
+const actEls = new Map();
+
+function buildActions() {
+  const detail = $("pair-detail");
+  if (!detail) return;
+  const acts = el("div", "pair-acts");
+  acts.setAttribute("role", "group");
+  acts.setAttribute("aria-label", "Decide the selected pair");
+  for (const [status, label, key] of ACTIONS) {
+    const b = el("button", "pchip pact st-" + status);
+    b.type = "button";
+    b.textContent = label;
+    b.dataset.hint = label + " THIS PAIR (" + key + " IN THE LIST)";
+    b.title = b.dataset.hint;
+    b.addEventListener("click", (e) => {
+      // A pointer click hands typing straight back to ARB>, exactly like the
+      // filter chips: a button that keeps the focus turns the next letter you
+      // type into a repeat of the decision you just made.
+      if (e.detail > 0) b.blur();
+      decidePair(status);
+    });
+    actEls.set(status, b);
+    acts.append(b);
+  }
+  detail.insertBefore(acts, detail.firstChild);
+}
+
+function renderActions(row) {
+  for (const [status, b] of actEls) {
+    const on = row.status === status;
+    // The status a row already has is not a decision: disabled, so the button
+    // cannot POST a write that changes nothing.
+    b.disabled = on;
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    const t = on ? "ALREADY " + String(row.status).toUpperCase() : b.dataset.hint;
+    if (b.title !== t) b.title = t;
   }
 }
 
 function focusSearch() {
-  if (!qInput) return;
-  qInput.focus();
-  qInput.select();
+  // focusRegion is the shell's focus helper: it also re-syncs the keys strip,
+  // so the mode chip flips to TEXT FIELD in the same tick as the caret lands.
+  if (!focusRegion("pair-q")) return false;
+  if (qInput && qInput.select) qInput.select();
+  return true;
 }
 
 // ---------- render ----------
@@ -575,6 +668,7 @@ function renderDetail() {
   const st = $("pd-status");
   st.textContent = String(row.status).toUpperCase();
   st.className = "v " + (row.status === "confirmed" ? "st-live" : row.status === "rejected" ? "st-off" : "");
+  renderActions(row);
 }
 
 function renderPairs() {
@@ -592,25 +686,60 @@ function renderPairs() {
 
 // ---------- keys ----------
 
-function onPairsKey(e) {
+function onPairsKey(e, scope) {
   const k = e.key;
   const up = k.length === 1 ? k.toUpperCase() : k;
   // Only a repeat of the same bulk key keeps the armed prompt alive: moving the
-  // cursor or touching anything else must not leave a loaded Shift+Y behind.
-  if (!(e.shiftKey && (up === "Y" || up === "N"))) armed = null;
-  // Escape belongs to core/keys.js now ("ESC CLOSE" = back to the monitor);
-  // claiming it here would make this page the one that behaves differently.
+  // cursor or touching anything else must not leave a loaded SHIFT+Y behind.
+  if (!(e.shiftKey && (up === "Y" || up === "N"))) disarm();
+
+  // G0 — moving the cursor and changing what is on screen writes nothing, so
+  // it is free in whatever scope the shell hands us. In practice ↑↓ arrive
+  // only from the list: from the ARB> line the shell turns them into "focus
+  // the list" and never consults the page.
   if (k === "ArrowUp" || k === "ArrowDown") { movePair(k === "ArrowUp" ? -1 : 1); return true; }
   if (k === "PageUp" || k === "PageDown") { movePair(k === "PageUp" ? -10 : 10); return true; }
   if (k === "Home") { movePair(-state.pairs.rows.length); return true; }
   if (k === "End") { movePair(state.pairs.rows.length); return true; }
-  if (k === "Tab") { cyclePairFilter(e.shiftKey ? -1 : 1); return true; }
-  if (k === "/") { focusSearch(); return true; }
+  // ← → cycles the status filter. It used to be TAB, which trapped the focus:
+  // TAB is how you get OUT of a region, and a page that eats it is a page you
+  // cannot leave with the keyboard. ← → are non-printable, so unlike a letter
+  // they shadow nothing that could be typed.
+  if (k === "ArrowLeft" || k === "ArrowRight") { cyclePairFilter(k === "ArrowLeft" ? -1 : 1); return true; }
+
+  // Everything below is an action on the selected row. The shell will not hand
+  // a page a bare printable outside LIST scope, and this is the guard that says
+  // so out loud: a letter typed at the ARB> line is typing, never a write.
+  if (scope !== SCOPE.LIST) return false;
+
+  // Returns false if the box is not there, so an unfocusable "/" falls through
+  // to the shell rather than being swallowed by a page that could not act.
+  if (k === "/") return focusSearch();
+
+  // G2/G3 writes. An autorepeat is not a decision: decidePair drops the row
+  // out of a status filter and leaves the cursor on the next candidate, so a
+  // leaned-on Y would march down the queue POSTing at the key-repeat rate.
+  // The shell drops repeats in LIST scope too; this is the page's own promise.
+  if (e.repeat) return false;
   if (up === "Y") { (e.shiftKey ? decideEventGroup : decidePair)("confirmed"); return true; }
   if (up === "N") { (e.shiftKey ? decideEventGroup : decidePair)("rejected"); return true; }
   if (up === "U") { decidePair("proposed"); return true; }
   if (up === "R") { loadPairs(); return true; }
   return false;
+}
+
+// The keys strip and the reversed-video ARB> band read this. Four entries max:
+// `.keys` is one clipped nowrap line. LIST scope only — in COMMAND scope none
+// of these letters do anything, and advertising them there is the lie that
+// made "RUN" look like a search.
+function pairsKeyHints(scope) {
+  if (scope !== SCOPE.LIST) return [];
+  return [
+    { k: "Y / N", d: "DECIDE" },
+    { k: "SHIFT+Y/N", d: "EVENT" },
+    { k: "U", d: "UNDECIDE" },
+    { k: "/", d: "SEARCH" },
+  ];
 }
 
 // ---------- init (module scope: the DOM is parsed, type=module defers) ----------
@@ -624,6 +753,12 @@ export default {
   title: "PAIRS",
   nav: true,
   root: "pairs",
+  // TAB order from the ARB> line: the search box, then the list. [0] is also
+  // where "/" lands. The shell returns TAB off either end to ARB>, so the
+  // focus can always get out of this page.
+  regions: ["pair-q", "pair-rows"],
+  listRegion: "pair-rows",
+  keyHints: pairsKeyHints,
 
   mount() {
     mounted = true;
@@ -653,7 +788,7 @@ export default {
     renderPairs();
   },
 
-  onKey(e) {
-    return onPairsKey(e);
+  onKey(e, scope) {
+    return onPairsKey(e, scope);
   },
 };

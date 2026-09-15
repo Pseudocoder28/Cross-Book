@@ -56,11 +56,25 @@ function desPath(id) {
   return "/market/" + encodeURIComponent(id);
 }
 
+/** A command always ends on the ARB> line. Running one is a COMMAND-scope
+    act, so the next bare letter has to be typing again even when the command
+    was typed with the focus parked in a list (the dirty-buffer rule lets you
+    do exactly that). Done before navigating, so the router's mount-focus
+    guard sees the keyboard already home and leaves it alone.
+
+    Deliberately not an import from core/keys.js: keys.js imports this module,
+    and a two-line getElementById beats a circular import. */
+function home() {
+  const c = $("cmd");
+  if (c && document.activeElement !== c) c.focus({ preventScroll: true });
+}
+
 /** Run whatever is in the buffer, then empty it. */
 export function exec() {
   const raw = cmdBuf.trim();
   cmdBuf = "";
   render();
+  home();
   if (!raw) return;
   let q = raw.replace(/\s*<\s*GO\s*>\s*$/i, "").replace(/\s+GO$/i, "").trim().toUpperCase();
   if (!q) return;

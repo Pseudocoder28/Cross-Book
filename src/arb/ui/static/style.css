@@ -93,7 +93,10 @@ body {
 /* the monitor page is the old default workspace: markets, ladder, tape */
 .monitor-page {
   display: grid;
-  grid-template: "monitor depth tape" minmax(0, 1fr) / 360px minmax(0, 1fr) 360px;
+  grid-template:
+    "monitor depth tape" minmax(0, 1fr)
+    "foot    foot  foot" 18px
+    / 360px minmax(0, 1fr) 360px;
   gap: 1px;
   background: var(--hair);
 }
@@ -101,6 +104,18 @@ body {
 #monitor    { grid-area: monitor; }
 #depth      { grid-area: depth; }
 #tape-col   { grid-area: tape; }
+#mon-foot   { grid-area: foot; }
+
+/* .des-foot carries an 18px top margin for the DES right rail; as a grid row
+   it is the row itself, so the margin has to go. */
+.mon-foot {
+  margin-top: 0;
+  padding: 0 8px;
+  background: var(--panel);
+  line-height: 18px;
+  overflow: hidden;
+  white-space: nowrap;
+}
 
 /* ---------- nav strip ---------- */
 
@@ -154,9 +169,22 @@ body {
   overflow: hidden;
 }
 
-.panel:focus-visible, .cmdline:focus-visible, .mon-rows:focus-visible {
+.panel:focus-visible, .cmdline:focus-visible {
   outline: 1px solid var(--amber);
   outline-offset: -1px;
+}
+
+/* ---------- LIST scope ----------
+   A focused list region owns the page's action keys, and single letters stop
+   being typing while it does. That is a big enough change of meaning that it
+   gets a ring you cannot miss — on :focus, not :focus-visible, because the
+   focus is moved programmatically (arrow from the ARB> line) and the
+   heuristic must not be allowed to decide this one is invisible. */
+[data-keyregion="list"]:focus,
+[data-keyregion="list"]:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
+  background-color: rgba(255, 176, 46, 0.04);
 }
 
 .panel-head {
@@ -250,6 +278,27 @@ body {
 .cmd-msg { margin-left: auto; white-space: nowrap; }
 .cmd-msg.ok { color: var(--ink); }
 .cmd-msg.err { color: var(--amber); }
+
+.cmd-mode {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  letter-spacing: 0.08em;
+}
+
+/* LIST scope: the cue lives on the element whose behaviour changed. The
+   command line is still there and still takes a printable the moment you type
+   one — it just stops being the thing the keyboard is pointed at. */
+.cmdline.scope-list { background: var(--amber); color: #000; }
+.cmdline.scope-list .prompt,
+.cmdline.scope-list #cmd-text,
+.cmdline.scope-list .cmd-mode,
+.cmdline.scope-list .cmd-msg,
+.cmdline.scope-list .cmd-msg.ok,
+.cmdline.scope-list .cmd-msg.err { color: #000; }
+.cmdline.scope-list .cursor { background: #000; }
+.cmdline.scope-list ::selection { background: #000; color: var(--amber); }
 
 /* ---------- monitor ---------- */
 
@@ -508,7 +557,25 @@ body.has-sel #depth { border-left-color: var(--amber); }
   overflow: hidden; white-space: nowrap;
 }
 .keys b { color: var(--ink); font-weight: 700; }
-.keys-note { margin-left: auto; }
+/* One clipped nowrap line: nothing shrinks, it just runs off the right. The
+   mode chip is therefore first (clipped last) and the advisory note last. */
+.keys span { flex: none; }   /* .keys-hints is display:contents, so not > */
+.keys-note { margin-left: auto; color: var(--ink2); }
+
+/* display:contents so the hint spans stay direct flex items of .keys and
+   keep the 16px gap; the wrapper exists only so the live region above it can
+   persist across repaints. */
+.keys-hints { display: contents; }
+
+.keys-mode {
+  padding: 0 6px;
+  background: var(--raised);
+  color: var(--ink2);
+  letter-spacing: 0.10em;
+}
+.keys-mode-command { color: var(--amber); }
+.keys-mode-list { background: var(--amber); color: #000; }
+.keys-mode-text { background: var(--bg); color: var(--amber); }
 
 /* ---------- venue column on monitor rows ----------
    A real cell, not a ::before: select-to-copy reads textContent, and a
