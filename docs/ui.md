@@ -148,6 +148,29 @@ or `|skew| > 25ms` — a real observed case: median −24.5ms, RTT 24ms → skew
 ≈ −36ms, meaning the local clock was running behind the venue's (fixed with
 an `sntp` clock sync, per `PROGRESS.md`).
 
+The banner changes the *display*, not the measurement: the sample stays
+exactly as measured, because a de-biased "latency" that silently subtracts a
+drifting offset estimate would be a worse lie than an honest negative number.
+Three things make the honest number legible instead:
+
+- **The chart shows negative samples.** The sparkline's y-domain is
+  `0 -> 1.5x p95`, and `yAt()` clamps both edges, so a sub-zero sample pins to
+  the bottom edge with a 3 px amber tick — the mirror of the over-range tick
+  already used for spikes. Before, `yAt()` clamped only the top and negative
+  points were drawn *below* the canvas: the panel printed `MED -14` next to a
+  chart with no median line on it.
+- **A quiet second is a gap, not a repeat.** `pushLatencyPoint()` pushes a
+  null bucket when no delta arrived in the last second. It used to fall back
+  to `latency_ms.last`, which `ServerState` never resets — so a quiet market
+  painted a confident flat line out of no data at all. `drawSpark()` already
+  splits segments on null, so a gap now renders as a gap.
+- **`arb doctor` and Grafana can see it too.** The `ntp clock` check
+  ([`cli.md`](cli.md#the-ntp-clock-check)) measures the offset against a time
+  server rather than against a venue, and `arb_clock_skew_ms` /
+  `arb_ws_one_way_latency_negative_total` carry it to Prometheus — so the
+  failure mode is no longer invisible on a VM with nobody watching the
+  terminal. Runbook: [`ops.md`](ops.md#host-clock-discipline).
+
 ## Screens
 
 The terminal is one page with a command line (`ARB> `, type anywhere to

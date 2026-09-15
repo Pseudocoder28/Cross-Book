@@ -34,6 +34,63 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M17 — the negative latency, and what was deliberately not fixed
+
+- **Diagnosis: it was never a latency.** `latency_ms = raw.recv_ts_ns / 1e6 -
+  adapter.last_delta_ts_ms` subtracts Kalshi's wall clock from the local one,
+  so it measures `true_transit + (local clock − venue clock)`. Units and
+  pairing were both verified clean (`ts_ms` is genuine epoch ms, floored from
+  µs, which biases *positive*; `adapter.parse()` resets `last_delta_ts_ms` on
+  entry so a frame can only pair with its own stamp). With the local clock
+  ~20–27 ms behind and real push delay 5.5–12.5 ms, every sample read
+  negative. M16's banner was correctly diagnosing it, not malfunctioning.
+- **No trading impact, and that was checked rather than assumed.** Every
+  decision path is monotonic: `Book.status(now_mono_ns=…)`, `books.apply(…,
+  mono_ns=…)`, `ArbMonitor`'s staleness; `edge.py`, `fees.py` and `paper.py`
+  hold no clock at all, and `replay.py` uses the recorded `recv_mono_ns`. The
+  wall clock only reaches display `ts_ms` fields — and recorded
+  `recv_ts_ns`, which means a skewed host does bias cross-run wall-clock
+  analytics even though nothing within a run moves.
+- **Deliberately NOT fixed: de-biasing the metric.** The obvious fix — track
+  a rolling offset estimate and subtract it from every sample — was rejected.
+  Two reasons. `clock_skew_ms = median − rtt/2` is circular as a *correction*
+  (subtracting it forces the corrected median to equal `rtt/2` by
+  construction) even though it is fine as a *warning*; and a number that
+  quietly self-corrects hides a broken host clock instead of reporting it.
+  The sample stays raw everywhere it is stored, reported or exported. What
+  changed is that the raw number is now visible in four places instead of
+  silently wrong in one.
+- **`arb doctor` warns before the symmetric threshold, not at it.** The
+  `ntp clock` check keeps `|offset| > 25 ms` to match the UI's
+  `SKEW_WARN_MS`, but adds a second rule: a *lag* past 5.5 ms also warns,
+  because that is the floor of Kalshi's measured push delay and therefore the
+  point where one-way readings start going negative — the UI's other banner
+  trigger. Without it, doctor reported `ok` at the real −19.7 ms reading
+  while the terminal was already showing a negative median.
+- **Doctor measures against a time server, not a venue.** The existing HTTP
+  `Date` check has 1 s resolution and exists to protect request signing; it
+  is structurally blind to tens of milliseconds. `src/arb/clock.py` is a
+  ~150-line stdlib SNTP client (RFC 4330) — 4 samples, keep the lowest
+  round trip, never fatal, `warn` when UDP 123 is blocked.
+- **Sign convention is load-bearing and pinned by a test.** RFC 5905's
+  `offset` is the correction to *apply* to the local clock (positive =
+  behind); this repo reports local-minus-venue (negative = behind) so doctor,
+  the UI and `arb_clock_skew_ms` all read the same sign for the same reality.
+  `clock.py` negates explicitly and `test_local_behind_server_reads_negative`
+  guards it.
+- **Negative histogram buckets, and what they cost.**
+  `arb_ws_one_way_latency_ms` spans below zero so the failure mode shows up
+  as bucket counts: a delay cannot physically be negative, so any count at
+  `le="0"` is proof of clock offset. The price is that `prometheus_client`
+  suppresses the `_sum` series for a negative-floored histogram, so bucket
+  counts are its only output — the skew gauge and the negative counter are
+  the alerting signals, the quantiles are for shape.
+- **Gauges go `NaN`, not stale.** `arb_ws_rtt_ms` and `arb_clock_skew_ms` are
+  set to `NaN` whenever the quantity was not measured. A gauge frozen at
+  −27 ms through a reconnect would look like a live measurement of the
+  outage — the same fabricated-continuity bug being fixed in the sparkline,
+  one layer down.
+
 ## M16 — skew-aware latency, NO-side fixture, infra
 
 - **The latency panel now trusts RTT over one-way when clocks disagree.**

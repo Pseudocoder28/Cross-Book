@@ -70,10 +70,57 @@ dependencies) at container start.
 
 The pre-flight check for all of the above — see
 [`cli.md`](cli.md#arb-doctor) for what it checks and how to read its
-output. Works identically on the host (`uv run arb doctor`) and inside the
-container (`docker compose exec app arb doctor`); inside the container, the
-database check goes over the Compose network and keys are read from the
-mounted `secrets/` volume.
+output, including the millisecond-resolution `ntp clock` check that backs
+[Host clock discipline](#host-clock-discipline) below. Works identically on
+the host (`uv run arb doctor`) and inside the container (`docker compose exec
+app arb doctor`); inside the container, the database check goes over the
+Compose network and keys are read from the mounted `secrets/` volume.
+
+## Host clock discipline
+
+One-way latency (venue timestamp → local receive) is a subtraction across two
+machines' wall clocks, so it measures `true_transit + (local clock − venue
+clock)`. Real Kalshi push delay is 5.5–12.5 ms
+([`venue-notes.md`](venue-notes.md)); a local clock lagging by more than that
+drives every reading negative. This has bitten twice (M16: median −24.5 ms;
+M17: median −14.4 ms, SKEW −27 ms), so it is a runbook item, not a one-off.
+
+Check it first — this is what `arb doctor`'s `ntp clock` check is for:
+
+```sh
+uv run arb doctor | grep 'ntp clock'
+# [ok  ] ntp clock  offset -2.1 ms vs pool.ntp.org (rtt 24.0 ms)
+```
+
+**macOS.** "Set date and time automatically" being on is *not* sufficient:
+`timed` slews lazily and tolerates tens of milliseconds of error, which is
+exactly the range that matters here. Step-correct it:
+
+```sh
+sudo sntp -sS time.apple.com     # or the NTP_SERVER you configured
+```
+
+That is a one-shot correction — the clock drifts again after sleep/wake, so
+re-run `arb doctor` when the latency panel looks wrong rather than assuming
+the last sync still holds.
+
+**The VM.** Discipline the *host*, not the container: a container shares the
+host kernel's clock, so running an NTP client inside it needs `CAP_SYS_TIME`
+and would only fight the host. On the VM host:
+
+```sh
+sudo timedatectl set-ntp true    # systemd-timesyncd
+timedatectl status               # confirm "System clock synchronized: yes"
+```
+
+Prefer `chrony` over `systemd-timesyncd` where accuracy matters — it
+disciplines continuously rather than stepping periodically.
+
+**In the container**, `arb doctor`'s clock check needs outbound UDP 123. The
+Compose network allows it by default, but a locked-down host firewall will
+make the check report `warn: could not query ... (UDP 123 may be blocked)`.
+That is a degraded check, not a failure — the container's clock is the host's
+clock, so measuring it from the host is equivalent.
 
 ## Migrations
 
@@ -118,6 +165,32 @@ gets a new metric there, per `CLAUDE.md`. Current metrics:
 | `arb_seq_gaps_total` | `venue` | subscription-level sequence gaps detected |
 | `arb_ui_ws_clients` | — | connected terminal-UI WS clients (gauge) |
 | `arb_ui_ws_clients_dropped_total` | — | UI WS clients dropped for a full send queue |
+| `arb_ws_one_way_latency_ms` | `venue` | venue-stamped one-way push delay (histogram; buckets span negative — see below) |
+| `arb_ws_one_way_latency_negative_total` | `venue` | one-way samples that came out negative, i.e. proof of clock skew |
+| `arb_ws_rtt_ms` | `venue`, `stream` | WS keepalive round-trip time (gauge, skew-immune) |
+| `arb_clock_skew_ms` | `venue` | estimated local-vs-venue clock offset (gauge; negative = local behind) |
+
+The last four exist because a local clock running behind the venue's makes
+every one-way latency reading negative, and until they were added that failure
+mode was invisible outside the terminal UI — on the VM, where nobody is
+watching the terminal, nothing caught it. Three things about them:
+
+- `arb_ws_one_way_latency_ms`'s buckets deliberately extend below zero. A
+  one-way delay cannot physically be negative, so **any count at or below the
+  `le="0"` bucket is proof of a clock offset**, not of fast networking. The
+  cost of negative buckets is that `prometheus_client` suppresses the `_sum`
+  series, so bucket counts are the histogram's only output — there is no
+  `arb_ws_one_way_latency_ms_sum` to average with, and `histogram_quantile`
+  interpolates unreliably once mass piles up in the lowest bucket. Alert on
+  the skew gauge and the negative counter; read the quantiles for shape only.
+- The gauges are set to `NaN`, not left at their last value, whenever the
+  quantity was not measured (a reconnecting WebSocket reports no RTT). A
+  frozen gauge reading `-27 ms` through an outage would look like a live
+  measurement of that outage.
+- Both are populated from `ServerState.stats_payload`, the same arithmetic
+  that feeds the UI's latency panel, so Grafana and the terminal can never
+  disagree about the skew estimate. They are therefore exported by `arb ui`,
+  not by a bare `arb record` run.
 
 ## Dashboards: Grafana
 
@@ -126,9 +199,10 @@ Provisioned automatically from
 `allowUiUpdates: false`, so the JSON files under `dashboards/` are the
 source of truth; edit them, don't edit in the Grafana UI (changes there
 would be lost on the next provisioning pass). One dashboard currently
-exists: **"ARB — Data Plane"** (`dashboards/arb.json`, 31 panels) covering
+exists: **"ARB — Data Plane"** (`dashboards/arb.json`, 36 panels) covering
 recorder throughput, book invalidations, WS reliability, REST poll health,
-and UI client counts. Datasource: `Prometheus` at `http://prometheus:9090`
+UI client counts, and a **"Clock & latency"** row (skew gauge, negative-sample
+count, one-way quantiles, skew vs. keepalive RTT). Datasource: `Prometheus` at `http://prometheus:9090`
 (the in-network service name), provisioned as the default datasource.
 
 Access at `http://127.0.0.1:3000`, `admin`/`admin` (change this before

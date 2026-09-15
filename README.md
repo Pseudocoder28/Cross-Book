@@ -66,8 +66,10 @@ uv run ruff check .
 uv run pyright
 ```
 
-`arb doctor` checks environment, keys, clock skew, database and venue
-reachability before you run anything else:
+`arb doctor` checks environment, keys, clock skew (including a
+millisecond-resolution SNTP check — a lagging host clock makes every latency
+reading negative), database and venue reachability before you run anything
+else:
 
 ```sh
 uv run arb doctor

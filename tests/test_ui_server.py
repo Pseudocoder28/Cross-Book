@@ -2,12 +2,14 @@
 plus ServerState payload shapes fed from the real captured Kalshi frames."""
 
 import asyncio
+import math
 import time
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
 from fastapi import FastAPI, WebSocket
+from prometheus_client import REGISTRY
 from starlette.testclient import TestClient
 
 from arb.books import BookManager
@@ -277,3 +279,68 @@ def test_server_state_payload_shapes_from_real_capture() -> None:
     assert stats["recorder"] is None  # not recording
     assert stats["ws_clients"] == 0
     assert state.kalshi_status()[0] == "live"
+
+
+def sample_value(name: str, labels: dict[str, str]) -> float:
+    """Current value of a process-global collector, 0.0 when never touched."""
+    value = REGISTRY.get_sample_value(name, labels)
+    return 0.0 if value is None else value
+
+
+def test_negative_latency_sample_is_counted_not_corrected() -> None:
+    state = ServerState(
+        run_id="testrun", recording=False, books=BookManager(staleness_limit_ns=10**12)
+    )
+    labels = {"venue": "kalshi"}
+    before_neg = sample_value("arb_ws_one_way_latency_negative_total", labels)
+    before_count = sample_value("arb_ws_one_way_latency_ms_count", labels)
+    # A one-way delay cannot be negative: this is the clock-skew signature.
+    below_zero = {**labels, "le": "0.0"}
+    before_below_zero = sample_value("arb_ws_one_way_latency_ms_bucket", below_zero)
+
+    state.record_latency(-27.4)
+
+    assert sample_value("arb_ws_one_way_latency_negative_total", labels) - before_neg == 1.0
+    assert sample_value("arb_ws_one_way_latency_ms_count", labels) - before_count == 1.0
+    assert sample_value("arb_ws_one_way_latency_ms_bucket", below_zero) - before_below_zero == 1.0
+    assert state.last_latency_ms == -27.4  # stored raw, never de-biased
+
+    state.record_latency(9.0)
+
+    assert sample_value("arb_ws_one_way_latency_negative_total", labels) - before_neg == 1.0
+    assert sample_value("arb_ws_one_way_latency_ms_count", labels) - before_count == 2.0
+    assert sample_value("arb_ws_one_way_latency_ms_bucket", below_zero) - before_below_zero == 1.0
+
+
+def test_stats_payload_publishes_skew_and_rtt_gauges() -> None:
+    state = ServerState(
+        run_id="testrun", recording=False, books=BookManager(staleness_limit_ns=10**12)
+    )
+    state.rtt_fn = lambda: 25.0
+    for latency_ms in (-30.0, -28.0, -26.0):
+        state.record_latency(latency_ms)
+
+    stats = state.stats_payload(msg_rate_1s=0.0)
+
+    assert stats["clock_skew_ms"] == -28.0 - 25.0 / 2
+    # Same arithmetic reaches Grafana, so the two can never disagree.
+    assert sample_value("arb_clock_skew_ms", {"venue": "kalshi"}) == stats["clock_skew_ms"]
+    assert sample_value("arb_ws_rtt_ms", {"venue": "kalshi", "stream": "ws"}) == stats["rtt_ms"]
+
+
+def test_gauges_go_nan_when_nothing_was_measured() -> None:
+    """A stale gauge would read as a live measurement of an outage."""
+    state = ServerState(
+        run_id="testrun", recording=False, books=BookManager(staleness_limit_ns=10**12)
+    )
+    state.rtt_fn = lambda: 25.0
+    state.record_latency(-28.0)
+    state.stats_payload(msg_rate_1s=0.0)
+
+    state.rtt_fn = lambda: None  # what a reconnecting WebSocket reports
+    stats = state.stats_payload(msg_rate_1s=0.0)
+
+    assert stats["rtt_ms"] is None
+    assert stats["clock_skew_ms"] is None
+    assert math.isnan(sample_value("arb_ws_rtt_ms", {"venue": "kalshi", "stream": "ws"}))
+    assert math.isnan(sample_value("arb_clock_skew_ms", {"venue": "kalshi"}))

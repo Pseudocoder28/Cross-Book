@@ -501,13 +501,11 @@
     if (sctx) sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  function pushLatencyPoint(statsMsg) {
-    let v = null;
+  function pushLatencyPoint() {
+    let v = null; // a delta-free second is a gap, not a repeat of the last sample
     if (latBucket.length) {
       latBucket.sort((a, b) => a - b);
       v = latBucket[Math.floor(latBucket.length / 2)]; // 1s median bucket
-    } else if (statsMsg.latency_ms && statsMsg.latency_ms.last != null) {
-      v = statsMsg.latency_ms.last;
     }
     latBucket = [];
     state.latPoints.push({ v });
@@ -548,19 +546,22 @@
     const dmax = state.latDomainMax;
     const step = plotW / (SPARK_WINDOW - 1);
     const xAt = (i) => plotW - (n - 1 - i) * step;
-    const yAt = (v) => Math.max(2, H - 2 - (v / dmax) * (H - 4));
+    // clamps both edges; the raw one-way sample goes negative when the local clock lags the venue's
+    const yAt = (v) => Math.min(H - 2, Math.max(2, H - 2 - (v / dmax) * (H - 4)));
 
     // segments split on null buckets
     const segs = [];
     let cur = null;
-    const clamped = [];
+    const clampedHi = [];
+    const clampedLo = [];
     for (let i = 0; i < n; i++) {
       const v = pts[i].v;
       if (v == null) { cur = null; continue; }
       if (!cur) { cur = []; segs.push(cur); }
       const x = xAt(i);
-      cur.push([x, yAt(Math.min(v, dmax))]);
-      if (v > dmax) clamped.push(x);
+      cur.push([x, yAt(v)]);
+      if (v > dmax) clampedHi.push(x);
+      else if (v < 0) clampedLo.push(x);
     }
 
     // area fill: same-hue 6% fading to 0
@@ -583,7 +584,7 @@
     const hot = lm.p95 != null && lm.p95 > P95_HOT_MS;
     const labels = [];
     const drawRule = (v, color) => {
-      const yy = Math.round(yAt(Math.min(v, dmax))) + 0.5;
+      const yy = Math.round(yAt(v)) + 0.5;
       sctx.save();
       sctx.strokeStyle = color;
       sctx.lineWidth = 1;
@@ -608,7 +609,7 @@
     let last = null;
     for (let i = n - 1; i >= 0; i--) {
       if (pts[i].v != null) {
-        last = { y: yAt(Math.min(pts[i].v, dmax)), v: pts[i].v };
+        last = { y: yAt(pts[i].v), v: pts[i].v };
         break;
       }
     }
@@ -645,9 +646,10 @@
       sctx.stroke();
     }
 
-    // spikes clamp to top edge with a 3px amber tick
+    // out-of-domain samples clamp to an edge and say so with a 3px amber tick
     sctx.fillStyle = "#ffb02e";
-    for (const x of clamped) sctx.fillRect(x - 1, 0, 2, 3);
+    for (const x of clampedHi) sctx.fillRect(x - 1, 0, 2, 3);
+    for (const x of clampedLo) sctx.fillRect(x - 1, H - 3, 2, 3);
 
     // hover: 1px crosshair + tooltip
     if (sparkHover != null && sparkHover <= plotW + 4) {
@@ -1752,7 +1754,7 @@
     state.stats = m;
     state.statsBuf.push(m);
     if (state.statsBuf.length > STATS_KEEP) state.statsBuf.shift();
-    pushLatencyPoint(m);
+    pushLatencyPoint();
     schedule("latnums", "system", "status", "spark", "poly");
   }
 

@@ -1,13 +1,15 @@
 """``arb doctor``: environment and connectivity checks.
 
-Checks env/config, key-file presence (never contents), venue reachability and
-clock skew, database connectivity and migration state, and free disk. Each
-check reports ok/warn/fail; the command exits non-zero only on failures.
+Checks env/config, key-file presence (never contents), venue reachability,
+the local clock (an SNTP query for millisecond skew, plus the venues' whole-
+second Date header), database connectivity and migration state, and free disk.
+Each check reports ok/warn/fail; the command exits non-zero only on failures.
 """
 
 from __future__ import annotations
 
 import shutil
+import sys
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
@@ -17,6 +19,7 @@ from typing import Literal
 import httpx
 from sqlalchemy import text
 
+from arb.clock import query_clock_offset
 from arb.config import AppConfig
 from arb.storage.db import make_engine
 
@@ -25,6 +28,15 @@ Status = Literal["ok", "warn", "fail"]
 # Venue clocks matter: Kalshi/Polymarket US signatures embed a timestamp
 # (Polymarket US rejects anything ±30 s from server time).
 CLOCK_SKEW_WARN_S = 3.0
+# Deliberately the same 25 ms as SKEW_WARN_MS in src/arb/ui/static/app.js:20,
+# so doctor warns at exactly the point the UI flips to its CLOCK SKEW banner.
+CLOCK_OFFSET_WARN_MS = 25.0
+# The UI's other banner trigger is a negative one-way median, which happens as
+# soon as the local clock lags by more than the real push delay — measured at
+# 5.5 to 12.5 ms for Kalshi's WS (docs/venue-notes.md). So a lag past this warns
+# too, well before the symmetric 25 ms: otherwise doctor would report "ok" for
+# a clock that is already making every latency reading negative.
+CLOCK_LAG_WARN_MS = 5.5
 DISK_FREE_WARN_GB = 5.0
 
 
@@ -90,8 +102,55 @@ async def check_venue(client: httpx.AsyncClient, name: str, url: str) -> list[Ch
             # Date has 1 s resolution; compare against the request midpoint.
             skew = (t0 + t1) / 2 - server_ts
             status: Status = "ok" if abs(skew) <= CLOCK_SKEW_WARN_S else "warn"
-            results.append(CheckResult(f"{name} clock", status, f"skew {skew:+.1f} s"))
+            results.append(
+                CheckResult(
+                    f"{name} clock",
+                    status,
+                    f"skew {skew:+.1f} s (Date header, 1 s resolution: catches only "
+                    "gross skew that would break request signing — see the ntp clock "
+                    "check for milliseconds)",
+                )
+            )
     return results
+
+
+def _clock_fix_hint(server: str) -> str:
+    if sys.platform == "darwin":
+        return f"sudo sntp -sS {server}"
+    return "enable chrony or systemd-timesyncd (sudo timedatectl set-ntp true)"
+
+
+async def check_clock(config: AppConfig) -> CheckResult:
+    """Millisecond-resolution clock check against ``config.ntp_server``.
+
+    Never fails: a skewed clock does not break read-only market data, it only
+    biases the one-way latency the UI reports. UDP 123 is blocked often enough
+    (containers, locked-down networks) that not being able to ask is a warn too.
+    """
+    try:
+        sample = await query_clock_offset(config.ntp_server)
+    except Exception as exc:
+        return CheckResult(
+            "ntp clock",
+            "warn",
+            f"could not query {config.ntp_server} (UDP 123 may be blocked): "
+            f"{type(exc).__name__}: {exc}",
+        )
+    detail = (
+        f"offset {sample.skew_ms:+.1f} ms vs {config.ntp_server} "
+        f"(rtt {sample.round_trip_ms:.1f} ms)"
+    )
+    lagging = sample.skew_ms < -CLOCK_LAG_WARN_MS
+    if not lagging and abs(sample.skew_ms) <= CLOCK_OFFSET_WARN_MS:
+        return CheckResult("ntp clock", "ok", detail)
+    direction = (
+        "local clock behind — one-way latency will read negative"
+        if sample.skew_ms < 0
+        else "local clock ahead"
+    )
+    return CheckResult(
+        "ntp clock", "warn", f"{detail} — {direction}; fix: {_clock_fix_hint(config.ntp_server)}"
+    )
 
 
 async def check_database(config: AppConfig) -> list[CheckResult]:
@@ -135,6 +194,7 @@ async def run_doctor(config: AppConfig | None = None) -> list[CheckResult]:
                 f"{config.polymarket_us_gateway_base}/v1/markets?limit=1",
             )
         )
+    results.append(await check_clock(config))
     results.extend(await check_database(config))
     results.append(check_disk())
     return results

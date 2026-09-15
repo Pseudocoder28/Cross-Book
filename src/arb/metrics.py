@@ -4,7 +4,7 @@ Every metric name in the system is declared here so names stay consistent and
 discoverable. Every new failure mode gets a metric.
 """
 
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 # Incremented by the book manager whenever a Book transitions to invalid.
 # reason is an arb.book.InvalidReason value.
@@ -108,4 +108,44 @@ UI_WS_CLIENTS = Gauge(
 UI_WS_CLIENTS_DROPPED = Counter(
     "arb_ui_ws_clients_dropped_total",
     "UI WebSocket clients dropped for not keeping up with the send queue",
+)
+
+# One-way push delay: local receive wall clock minus the venue's own timestamp
+# on the message. It measures true_transit + (local clock - venue clock), so
+# the buckets deliberately extend below zero: a delay cannot physically be
+# negative, and any count at or below the 0 bucket is proof of a clock offset
+# rather than of fast networking. The sample is stored raw — never corrected.
+# Note: prometheus_client suppresses the _sum series when the lowest bucket is
+# negative, so bucket counts are this histogram's only output — there is no
+# arb_ws_one_way_latency_ms_sum to average with.
+WS_ONE_WAY_LATENCY_MS = Histogram(
+    "arb_ws_one_way_latency_ms",
+    "Venue-stamped one-way WebSocket delay (includes local-vs-venue clock offset)",
+    labelnames=["venue"],
+    buckets=(-100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100, 250, 500, 1000),
+)
+
+# The crisp failure mode: any nonzero rate here means the local clock is
+# running behind the venue's, so every one-way reading is biased low.
+WS_ONE_WAY_LATENCY_NEGATIVE = Counter(
+    "arb_ws_one_way_latency_negative_total",
+    "One-way latency samples that came out negative (impossible without clock skew)",
+    labelnames=["venue"],
+)
+
+# Keepalive round-trip time from the WebSocket transport. Only the local clock
+# is involved, so this is immune to skew — the figure to trust when the
+# one-way number goes strange.
+WS_RTT_MS = Gauge(
+    "arb_ws_rtt_ms",
+    "WebSocket keepalive round-trip time (skew-immune)",
+    labelnames=["venue", "stream"],
+)
+
+# Derived estimate: median one-way latency minus rtt/2. Sign convention —
+# negative means the LOCAL clock is running behind the venue's.
+CLOCK_SKEW_MS = Gauge(
+    "arb_clock_skew_ms",
+    "Estimated local clock offset from the venue's (negative: local is behind)",
+    labelnames=["venue"],
 )

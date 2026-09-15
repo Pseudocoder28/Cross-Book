@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import statistics
 import time
 from collections import deque
@@ -48,7 +49,15 @@ from arb.book import BookLevelUpdate, BookSnapshot
 from arb.books import BookManager, level_deltas
 from arb.config import AppConfig
 from arb.interfaces import ParseError, ResyncRequired
-from arb.metrics import PARSE_ERRORS, UI_WS_CLIENTS, UI_WS_CLIENTS_DROPPED
+from arb.metrics import (
+    CLOCK_SKEW_MS,
+    PARSE_ERRORS,
+    UI_WS_CLIENTS,
+    UI_WS_CLIENTS_DROPPED,
+    WS_ONE_WAY_LATENCY_MS,
+    WS_ONE_WAY_LATENCY_NEGATIVE,
+    WS_RTT_MS,
+)
 from arb.pairs import store as pairs_store
 from arb.pairs.tracked import load_tracked_pairs
 from arb.paper import PaperLimits, PaperTrader
@@ -63,6 +72,8 @@ from arb.venues.kalshi.detail import build_market_detail
 from arb.venues.kalshi.discovery import fetch_event, fetch_liquid_markets, fetch_market
 from arb.venues.kalshi.rest import KalshiEvent, KalshiMarket
 from arb.venues.kalshi.rest import market_id as kalshi_market_id
+from arb.venues.kalshi.source import STREAM as KALSHI_STREAM
+from arb.venues.kalshi.source import VENUE as KALSHI_VENUE
 from arb.venues.kalshi.source import KalshiWSSource
 from arb.venues.polymarket_us.adapter import PolymarketUSMarketDataAdapter
 from arb.venues.polymarket_us.detail import build_market_detail as build_pm_detail
@@ -513,8 +524,17 @@ class ServerState:
         self._kalshi_last_frame_mono_ns = time.monotonic_ns()
 
     def record_latency(self, latency_ms: float) -> None:
+        """Record one venue-stamped one-way sample, exactly as measured.
+
+        Kalshi's WS is the only source of these today. The value is never
+        corrected or clamped: it carries the local-vs-venue clock offset, and
+        the negative counter is how that offset makes itself visible.
+        """
         self.last_latency_ms = latency_ms
         self._latencies.append(latency_ms)
+        WS_ONE_WAY_LATENCY_MS.labels(venue=KALSHI_VENUE).observe(latency_ms)
+        if latency_ms < 0:
+            WS_ONE_WAY_LATENCY_NEGATIVE.labels(venue=KALSHI_VENUE).inc()
 
     def mark_dirty(self, market_ids: set[str]) -> None:
         self._dirty |= market_ids
@@ -547,10 +567,28 @@ class ServerState:
         }
 
     def stats_payload(self, *, msg_rate_1s: float) -> dict[str, Any]:
+        """Build the 1s stats frame — and, as a side effect, publish the RTT
+        and clock-skew gauges from the same arithmetic.
+
+        Deliberate: one source of truth means the UI panel and Grafana can
+        never disagree about the skew estimate.
+        """
         window = sorted(self._latencies)
         n = len(window)
         median = statistics.median(window) if n else None
         rtt_ms = self.rtt_fn() if self.rtt_fn is not None else None
+        # Keepalive RTT is skew-immune; one-way latency = true + skew, so
+        # median - rtt/2 estimates the local clock's offset from the venue
+        # (negative: local is behind).
+        clock_skew_ms = (median - rtt_ms / 2) if (median is not None and rtt_ms) else None
+        # NaN, not "leave the last value": a gauge that keeps reading -27 ms
+        # through a reconnect would look like a live measurement of an outage.
+        WS_RTT_MS.labels(venue=KALSHI_VENUE, stream=KALSHI_STREAM).set(
+            rtt_ms if rtt_ms is not None else math.nan
+        )
+        CLOCK_SKEW_MS.labels(venue=KALSHI_VENUE).set(
+            clock_skew_ms if clock_skew_ms is not None else math.nan
+        )
         recorder = (
             {"enqueued": self.recorder_enqueued, "dropped": self.recorder_dropped}
             if self.recording
@@ -580,10 +618,8 @@ class ServerState:
                 "p95": window[min(n - 1, int(0.95 * n))] if n else None,
                 "n": n,
             },
-            # Keepalive RTT is skew-immune; one-way latency = true + skew, so
-            # median - rtt/2 estimates the local clock's offset from the venue.
             "rtt_ms": rtt_ms,
-            "clock_skew_ms": (median - rtt_ms / 2) if (median is not None and rtt_ms) else None,
+            "clock_skew_ms": clock_skew_ms,
             "parse_errors": self.parse_errors,
             "seq_gaps": self.seq_gaps,
             "ws_clients": len(self._clients),

@@ -165,3 +165,12 @@ not part of the automated suite.
   keyboard shortcuts) has been verified manually over the Chrome DevTools
   protocol at several milestones (see `PROGRESS.md`) but has no automated
   browser test suite.
+- **`src/arb/ui/static/app.js` has no unit tests at all** — there is no JS
+  harness in the repo (no `package.json`, no vitest/jest), and the file is a
+  single IIFE with no exports, so nothing is reachable from one. `node
+  --check` catches syntax errors and nothing else. That makes the pure
+  geometry helpers (`yAt`, the clamp/segment loop, `pushLatencyPoint`) an
+  untested surface: the M17 sparkline fixes were verified by a throwaway node
+  script against the extracted source, which guards nothing going forward.
+  Reverting either fix would pass every check in the repo. Worth a harness if
+  the frontend grows more logic than rendering.

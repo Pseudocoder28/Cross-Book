@@ -2,9 +2,41 @@
 
 ## Current milestone
 
-**M16 — polish: skew-aware latency, NO-side fixture.**
+**M17 — negative latency: root cause, ms-scale clock check, metrics, honest chart.**
 
 ## What works
+
+- Root-caused the negative latency panel (MED −14.4 ms, SKEW −27 ms): the
+  one-way sample subtracts Kalshi's wall clock from the local one, so it
+  measures `true_transit + (local − venue)`. The local Mac clock was ~20 ms
+  behind (confirmed independently: `sntp` reported `+0.0197 s`, i.e. local
+  behind, and the new `arb doctor` check read `−19.7 ms`). Nothing in the
+  trading path is affected — staleness, `BookManager`, `ArbMonitor` and
+  replay are all monotonic — so it was a measurement/visibility defect.
+- `arb doctor` gained an `ntp clock` check backed by `src/arb/clock.py`, a
+  stdlib SNTP client (RFC 4330; 4 samples, lowest round trip wins). Warns at
+  `|offset| > 25 ms` *or* a lag past 5.5 ms (the floor of Kalshi's measured
+  push delay — past that, one-way readings go negative), never fails,
+  degrades to `warn` when UDP 123 is blocked, and prints the platform's fix
+  command. Reported sign is local-minus-server, matching the UI.
+- Four new metrics: `arb_ws_one_way_latency_ms` (histogram, buckets spanning
+  negative — a count at `le="0"` is proof of clock offset),
+  `arb_ws_one_way_latency_negative_total`, `arb_ws_rtt_ms`,
+  `arb_clock_skew_ms`. Gauges go `NaN` rather than stale when unmeasured.
+  Grafana gained a "Clock & latency" row (36 panels total).
+- Latency sparkline stopped lying: `yAt()` clamps both edges so negative
+  samples pin to the bottom with an amber tick instead of drawing off-canvas,
+  and a delta-free second renders as a gap instead of repeating the
+  never-reset `latency_ms.last`.
+- Deliberately **not** done: de-biasing the sample by subtracting an offset
+  estimate. The raw number stays raw everywhere it is stored, reported or
+  exported — see `docs/decisions.md` M17 for why.
+- **Open**: the host clock is still ~19 ms behind. `sudo sntp -sS
+  pool.ntp.org` needs an interactive password; run it to clear the warn.
+  Runbook in `docs/ops.md` ("Host clock discipline").
+- 189 tests; ruff, pyright, `node --check` clean.
+
+### From M16
 
 - Latency panel: the Kalshi source exposes the keepalive RTT (`ReconnectingWebSocket.rtt_s`); stats carry `rtt_ms` and `clock_skew_ms = median − rtt/2`; the panel shows RTT and SKEW and flips to `CLOCK SKEW · TRUST RTT/2` when the one-way median is negative or |skew| > 25 ms. Observed live: median −24.5 ms, RTT 24 ms → skew ≈ −36 ms (local clock behind the venue; see the `sntp` fix in the conversation notes).
 - Real NO-side Kalshi delta captured (`ws_orderbook_capture_no_side.jsonl`, 12 markets, 2 `side: "no"` deltas) via the now-parameterized capture script; parser test pins the complement mapping (NO bid at 0.7500 → YES ask at 2500 ticks, −35.32 contracts).

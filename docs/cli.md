@@ -16,14 +16,46 @@ uv run arb doctor
 
 Checks, in order: `.env` presence, Kalshi/Polymarket US key provisioning
 (paths only — file contents are never read into a log or printed), venue
-reachability plus clock skew (via each venue's HTTP `Date` header vs. local
-time — both venues sign timestamps into requests, so skew matters), database
+reachability plus gross clock skew (via each venue's HTTP `Date` header vs.
+local time — both venues sign timestamps into requests, so skew matters), the
+local clock at millisecond resolution (`ntp clock`, below), database
 connectivity and Alembic migration state, and free disk space. Each check
 reports `ok` / `warn` / `fail`; the process exits non-zero only if any check
 `fail`s (missing keys are a `warn`, not a `fail` — the system can still
 record public REST/WS market data is fine without them for Kalshi's REST
 paths, though Kalshi's WebSocket always needs credentials — see
 [`venues/kalshi.md`](venues/kalshi.md)).
+
+### The `ntp clock` check
+
+The per-venue `Date`-header check has **1 second** resolution, so it can only
+catch skew gross enough to break request signing — it is blind to the tens of
+milliseconds that actually matter. `ntp clock` closes that gap: a real SNTP
+exchange ([`src/arb/clock.py`](../src/arb/clock.py), RFC 4330, stdlib sockets,
+no new dependency) against `NTP_SERVER` (default `pool.ntp.org`), four samples
+keeping the lowest-round-trip one.
+
+It reports the offset in this repo's convention — **local minus server, so
+negative means the local clock is running behind** — matching the UI's
+`clock_skew_ms` so the same reality reads the same sign in both places. Note
+this is the *negation* of RFC 5905's `offset`, which is the correction to
+apply to the local clock.
+
+It `warn`s when either:
+
+- `|offset| > 25 ms`, the same `SKEW_WARN_MS` the UI uses to flip its
+  `CLOCK SKEW · TRUST RTT/2` banner, or
+- the local clock lags by more than `5.5 ms` — the floor of Kalshi's measured
+  WS push delay ([`venue-notes.md`](venue-notes.md)). Past that, one-way
+  latency readings go negative, which is the UI's *other* banner trigger.
+  Without this second rule doctor would report `ok` for a clock that is
+  already making every latency number in the terminal wrong.
+
+It never `fail`s (a skewed clock does not break read-only market data) and it
+degrades to `warn`, never an exception, when outbound UDP 123 is blocked —
+common in containers and on locked-down networks. The warn text carries the
+platform-appropriate remediation command. See
+[`ops.md`](ops.md#host-clock-discipline) for the runbook.
 
 Details: [`src/arb/doctor.py`](../src/arb/doctor.py).
 
