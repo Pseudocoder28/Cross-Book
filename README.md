@@ -10,10 +10,9 @@ pair matcher, fee models, depth-aware edge measurement, and paper execution.
 No code that places, amends or cancels a real order exists yet — that's a
 later milestone.
 
-The project is currently on milestone **M16** — see
-[`PROGRESS.md`](PROGRESS.md) for exactly what works today. The build plan,
-hard rules and conventions that govern every change live in
-[`CLAUDE.md`](CLAUDE.md); read it before adding code.
+See [`PROGRESS.md`](PROGRESS.md) for the current milestone and exactly what
+works today. The build plan, hard rules and conventions that govern every
+change live in [`CLAUDE.md`](CLAUDE.md); read it before adding code.
 
 ## What's actually running today
 
@@ -23,13 +22,25 @@ hard rules and conventions that govern every change live in
 - Every raw inbound message recorded to Postgres before parsing, so any run
   can be replayed byte-for-byte.
 - A cross-venue pair matcher that proposes candidate equivalent markets for
-  human review, with a `PAIRS` screen to confirm or reject them.
-- A depth-aware, fee-exact edge calculation over confirmed pairs, live in an
-  `ARB` screen.
+  human review, with a `/pairs` screen to confirm or reject them.
+- A depth-aware, fee-exact edge calculation over confirmed pairs, live on the
+  `/arb` screen.
 - A paper trader that simulates fills against measured edges under risk
   limits — no order is ever placed, amended or cancelled.
 - A black/amber terminal UI (`arb ui`) serving all of the above at
   `http://127.0.0.1:8080`, plus a Grafana dashboard and Prometheus metrics.
+
+The UI is a keyboard-driven multi-page app: one URL per screen — `/`
+(markets, depth ladder, tape, latency), `/arb` (cross-venue edge), `/pairs`
+(pair review), `/paper` (simulated ledger), `/system` (diagnostics), `/help`
+(keys, commands, glossary) and `/market/<id>` (one market's rules and live
+book) — all served by the one `arb ui` process on the one port, so every
+screen deep-links, reloads and back-buttons like a normal web page.
+
+`ALT+1`…`ALT+6` jump between the nav pages, typing anywhere goes to the
+`ARB>` command line, and `/help` documents the rest of it in the app. See
+[`docs/ui.md`](docs/ui.md) for how each screen reads and
+[`docs/cli.md`](docs/cli.md#arb-ui) for the routes, keys and flags.
 
 ## Documentation
 
@@ -46,7 +57,8 @@ map. Highlights:
 - [`docs/pairs.md`](docs/pairs.md) — the cross-venue pair matcher
 - [`docs/engine.md`](docs/engine.md) — fees, edge math, the ARB monitor,
   paper trading, replay
-- [`docs/ui.md`](docs/ui.md) — the terminal UI's backend and wire protocol
+- [`docs/ui.md`](docs/ui.md) — the terminal UI: its pages, backend and
+  wire protocol
 - [`docs/cli.md`](docs/cli.md) — every `arb` subcommand, with examples
 - [`docs/ops.md`](docs/ops.md) — Docker Compose stack, Prometheus/Grafana,
   `arb doctor`, deployment
@@ -87,7 +99,7 @@ while it runs):
 
 ```sh
 uv run arb record --top 10                 # headless recorder
-uv run arb ui --top 8 --pairs-top 10        # terminal UI at :8080
+uv run arb ui --top 8 --pairs-top 10        # terminal UI at :8080 — start on /, then /help
 ```
 
 See [`docs/cli.md`](docs/cli.md) for every command and flag.
@@ -102,7 +114,8 @@ src/arb/venues/        venue-specific code only (kalshi/, polymarket_us/) —
                        auth, discovery, REST/WS parsing, adapters
 src/arb/pairs/          cross-venue pair matcher, storage, review CLI wiring
 src/arb/storage/        SQLAlchemy models + engine/session helpers
-src/arb/ui/             FastAPI backend + static terminal frontend
+src/arb/ui/             FastAPI backend + the static frontend it serves
+                       (ES modules, one per page; no build step, no deps)
 migrations/             Alembic migrations (Postgres schema)
 infra/                  Prometheus + Grafana provisioning
 tests/                  pytest suite

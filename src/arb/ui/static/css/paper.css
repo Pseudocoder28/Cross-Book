@@ -1,0 +1,170 @@
+/* css/paper.css — styles that belong to the PAPER page only.
+   Loaded after style.css, so equal-specificity rules here win.
+
+   Everything below is either (a) chrome that did not exist on the ported
+   screen — the cumulative-net curve, the pair filter chip, the capacity
+   meters — or (b) the four-line restatement that lets the ledger rows carry
+   .mid-row so select-to-copy rebuilds them as TSV. */
+
+/* ---------- select-to-copy: ledger rows have to match main.js's ROW_SEL ----------
+   main.js only rebuilds TSV for `.ladder-row, .mon-row, .tape-row, .mid-row,
+   .kv`. Tagging the ledger rows .mid-row makes a drag across the trades paste
+   into a spreadsheet with its columns intact; these rules put back the layout
+   .mid-row would otherwise impose. Ordering, not a redesign. */
+
+.paperpage .pos-row.mid-row,
+.paperpage .ptr-row.mid-row {
+  display: grid;
+  align-items: center;
+  height: 24px;
+  line-height: 24px;
+  border-top: 0;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* ---------- cumulative expected net ---------- */
+
+.paper-curve {
+  position: relative;
+  flex: none;
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.pc-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  height: 14px;
+  line-height: 14px;
+}
+
+.pc-lbl {
+  color: var(--ink2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.pc-stat {
+  color: var(--ink2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.pc-stat.pos { color: var(--bid); }
+.pc-stat.neg { color: var(--ask); }
+
+.pc-canvas { display: block; }
+
+.pc-tip {
+  position: absolute;
+  top: 4px;
+  z-index: 3;
+  padding: 0 5px;
+  height: 15px;
+  line-height: 15px;
+  background: var(--raised);
+  border: 1px solid var(--hair);
+  color: var(--ink);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ---------- section band: it now carries the pair filter ---------- */
+
+.paperpage .paper-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 280px;
+  height: 14px;
+  padding: 0 5px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  color: var(--ink2);
+  font: 700 9px/12px var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pf-chip-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pf-x { flex: none; }
+.pf-chip:disabled { cursor: default; color: var(--dim); }
+.pf-chip.on {
+  background: var(--raised);
+  border-color: var(--amber);
+  color: var(--amber);
+}
+.pf-chip:focus-visible { outline: 1px solid var(--amber); outline-offset: 1px; }
+
+.pf-count {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+/* a filtered position reads like a selected trade: same amber thread */
+.paperpage .pos-row { cursor: pointer; }
+.paperpage .pos-row.sel {
+  background: var(--raised);
+  box-shadow: inset 2px 0 0 var(--amber);
+}
+.paperpage .pos-row.sel .ps-label { color: var(--amber); }
+.paperpage .pos-row.quiet-line { cursor: default; }
+
+/* ---------- limits vs. actuals ---------- */
+
+.pl-meter { margin: 1px 0 6px; }
+
+.pl-track {
+  height: 3px;
+  background: var(--hair);
+  overflow: hidden;
+}
+
+.pl-fill {
+  height: 3px;
+  width: 0;
+  background: var(--bid);
+  transition: width 200ms var(--ease);
+}
+.pl-fill.warn { background: var(--amber); }
+.pl-fill.hot { background: var(--ask); }
+.pl-fill.off { background: var(--dim); }
+
+.pl-note {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  height: 14px;
+  line-height: 14px;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.pl-note.pl-solo { margin: 1px 0 6px; }
+.pl-used { color: var(--ink2); }
+.pl-used.pos { color: var(--bid); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pl-fill { transition: none; }
+}

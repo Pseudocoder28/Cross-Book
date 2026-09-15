@@ -6,6 +6,20 @@
 tasks — and additionally parses frames through the Kalshi adapter, maintains
 normalized books and pushes JSON frames to connected UI WebSocket clients.
 
+The browser UI is a multi-page app routed client-side over the History API on
+one long-lived WebSocket, so every page URL must survive a deep link or a
+reload. This app serves the same shell document (``static/index.html``) for
+each of those routes:
+
+- ``/`` ``/arb`` ``/pairs`` ``/paper`` ``/system`` ``/help`` (:data:`SPA_ROUTES`)
+- ``/market/{market_id}`` — ``market_id`` is opaque and never validated here,
+  so a link to a market that has rolled off the discovery list still opens
+  the shell and lets the browser report the miss
+
+The route set is enumerated rather than a catch-all: ``/api/*``, ``/ws``,
+``/metrics`` and ``/static/*`` keep their own handlers, and an unknown path is
+still a 404 instead of a shell that hides broken links.
+
 Wire contract (server → client JSON text frames):
 
 - ``hello`` on connect: run id + market list (sorted by 24h volume desc)
@@ -100,11 +114,21 @@ SEND_QUEUE_MAX = 1024
 # DES metadata is re-fetched from the venue at most this often per market.
 DETAIL_TTL_MS = 30_000
 PAIR_STATUSES = ("proposed", "confirmed", "rejected")
+# Client-side routes without a path parameter; each serves the app shell.
+SPA_ROUTES = ("/", "/arb", "/pairs", "/paper", "/system", "/help")
 
 # (ticker, cached event or None) -> fresh (market, event)
 type DetailRefreshFn = Callable[
     [str, KalshiEvent | None], Awaitable[tuple[KalshiMarket, KalshiEvent | None]]
 ]
+
+
+def _shell_response(static_root: Path) -> Response:
+    """The app shell, or the plain-text fallback when assets are not built."""
+    index_file = static_root / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
+    return PlainTextResponse("UI assets missing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,12 +193,19 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="arb ui", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=static_root, check_dir=False), name="static")
 
-    @app.get("/")
-    async def index() -> Response:
-        index_file = static_root / "index.html"
-        if index_file.is_file():
-            return FileResponse(index_file)
-        return PlainTextResponse("UI assets missing")
+    async def spa_shell() -> Response:
+        return _shell_response(static_root)
+
+    for spa_path in SPA_ROUTES:
+        app.add_api_route(spa_path, spa_shell, methods=["GET"], include_in_schema=False)
+
+    # ":path" so an id whose escaped form contains %2F survives ASGI's decode.
+    @app.get("/market/{market_id:path}", include_in_schema=False)
+    async def spa_market(market_id: str) -> Response:
+        # Deliberately unvalidated: the browser resolves the id (and reports an
+        # unknown one), so a deep link to a market that has since rolled off
+        # the discovery list still opens the page instead of 404ing.
+        return _shell_response(static_root)
 
     @app.get("/api/status")
     async def api_status() -> dict[str, Any]:

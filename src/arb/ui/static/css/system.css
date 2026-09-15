@@ -1,0 +1,150 @@
+/* css/system.css — styles that belong to the SYSTEM page only.
+   Loaded after style.css, so equal-specificity rules here win.
+
+   The shared components do the work: .sys-block, .sys-title, .kv, .runs and
+   the whole .poly-* down-screen are style.css's. This file is the page frame
+   (a card grid inside one route instead of two panels on the old workspace),
+   plus the two re-layouts that let the ported markup live in a card. */
+
+.sys-page {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 24px minmax(0, 1fr) 20px;
+}
+
+.sys-page .des-head { grid-row: 1; }
+
+.sys-body {
+  grid-row: 2;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px 4px;
+}
+
+.sys-page .des-foot {
+  grid-row: 3;
+  margin: 0;
+  padding: 0 10px;
+  line-height: 20px;
+  background: var(--raised);
+}
+
+/* AWAITING DATA is a banner, not a row: it carries no .kv, so select-to-copy
+   never mistakes it for data. */
+.sys-banner {
+  height: 16px; line-height: 16px;
+  margin-bottom: 6px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+}
+
+/* ---------- the card grid ---------- */
+
+.sys-cards {
+  display: grid;
+  gap: 10px 18px;
+  grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.25fr) minmax(250px, 1.05fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    "engine clock  kalshi"
+    "rec    clock  poly"
+    "db     obs    poly";
+  align-items: start;
+}
+
+.a-engine { grid-area: engine; }
+.a-rec    { grid-area: rec; }
+.a-db     { grid-area: db; }
+.a-clock  { grid-area: clock; }
+.a-kalshi { grid-area: kalshi; }
+.a-poly   { grid-area: poly; }
+.a-obs    { grid-area: obs; }
+
+/* a card is a .sys-block with a seam under its title */
+.sys-card { overflow: visible; }
+
+.sys-head-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.sys-sub {
+  height: 16px; line-height: 16px;
+  color: var(--dim);
+  font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
+}
+
+/* The teaching text. Wraps (every other line on this page is nowrap), because
+   the point of it is to be read once, not scanned. */
+.sys-note {
+  margin: 5px 0 0;
+  color: var(--ink2);
+  font-size: 10px; line-height: 14px; letter-spacing: 0.04em;
+  white-space: normal;
+}
+
+.sys-link { color: var(--amber); text-decoration: none; }
+.sys-link:hover, .sys-link:focus-visible { text-decoration: underline; }
+
+/* ---------- database: which run is being written right now ---------- */
+
+#sys-runs { max-height: 168px; overflow: auto; }
+
+.runs .kv .run-id { flex: 1; min-width: 0; }
+
+.runs .run-tag {
+  width: 4ch;
+  color: var(--bid);
+  font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
+  text-align: left;
+}
+
+.runs .kv.run-live .run-id { color: var(--ink); }
+
+/* ---------- clock & latency ---------- */
+
+.a-clock .sys-banner {
+  margin: 2px 0 4px;
+  color: var(--bid);
+}
+
+.a-clock .sys-banner.warn { color: var(--amber); }
+.a-clock .sys-banner.quiet-line { color: var(--dim); }
+
+/* ---------- venue cards ---------- */
+
+/* .poly-body is the old full-panel down-screen: a centred, vertically
+   stretched hero. Inside a diagnostics card it is a three-line header, so it
+   is re-laid-out here rather than by editing the ported markup. */
+.a-poly .poly-body {
+  flex: none;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 2px;
+  padding: 2px 0 6px;
+  text-align: left;
+}
+
+.a-poly .poly-main { font-size: 12px; color: var(--ink); }
+.a-poly .poly-sub { white-space: normal; }
+.a-poly .poly-live { font-size: 10px; letter-spacing: 0.02em; }
+
+#sys-k-detail, #sys-k-tr { overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- narrow windows: the grid collapses to two columns ---------- */
+
+@media (max-width: 1340px) {
+  .sys-cards {
+    grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr);
+    grid-template-rows: auto auto auto auto;
+    grid-template-areas:
+      "engine clock"
+      "rec    clock"
+      "db     kalshi"
+      "db     poly"
+      "obs    poly";
+  }
+}

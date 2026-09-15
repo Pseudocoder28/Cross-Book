@@ -2,38 +2,83 @@
 
 ## Current milestone
 
-**M17 — negative latency: root cause, ms-scale clock check, metrics, honest chart.**
+**M18 — the terminal becomes a multi-page app: real URLs, ES modules, SYSTEM and HELP.**
 
 ## What works
 
-- Root-caused the negative latency panel (MED −14.4 ms, SKEW −27 ms): the
-  one-way sample subtracts Kalshi's wall clock from the local one, so it
-  measures `true_transit + (local − venue)`. The local Mac clock was ~20 ms
-  behind (confirmed independently: `sntp` reported `+0.0197 s`, i.e. local
-  behind, and the new `arb doctor` check read `−19.7 ms`). Nothing in the
-  trading path is affected — staleness, `BookManager`, `ArbMonitor` and
-  replay are all monotonic — so it was a measurement/visibility defect.
-- `arb doctor` gained an `ntp clock` check backed by `src/arb/clock.py`, a
-  stdlib SNTP client (RFC 4330; 4 samples, lowest round trip wins). Warns at
-  `|offset| > 25 ms` *or* a lag past 5.5 ms (the floor of Kalshi's measured
-  push delay — past that, one-way readings go negative), never fails,
-  degrades to `warn` when UDP 123 is blocked, and prints the platform's fix
-  command. Reported sign is local-minus-server, matching the UI.
-- Four new metrics: `arb_ws_one_way_latency_ms` (histogram, buckets spanning
-  negative — a count at `le="0"` is proof of clock offset),
-  `arb_ws_one_way_latency_negative_total`, `arb_ws_rtt_ms`,
-  `arb_clock_skew_ms`. Gauges go `NaN` rather than stale when unmeasured.
-  Grafana gained a "Clock & latency" row (36 panels total).
-- Latency sparkline stopped lying: `yAt()` clamps both edges so negative
-  samples pin to the bottom with an amber tick instead of drawing off-canvas,
-  and a delta-free second renders as a gap instead of repeating the
-  never-reset `latency_ms.last`.
-- Deliberately **not** done: de-biasing the sample by subtracting an offset
-  estimate. The raw number stays raw everywhere it is stored, reported or
-  exported — see `docs/decisions.md` M17 for why.
-- **Open**: the host clock is still ~19 ms behind. `sudo sntp -sS
-  pool.ntp.org` needs an interactive password; run it to clear the warn.
-  Runbook in `docs/ops.md` ("Host clock discipline").
+- The browser UI is a real multi-page app. Seven routes, all served by the one
+  `arb ui` process on one port: `/` MONITOR, `/arb`, `/pairs`, `/paper`,
+  `/system`, `/help`, and `/market/<market_id>` (DES, reachable by Enter or
+  the `DES` command, not in the nav). Every screen is bookmarkable, reloads
+  cold, and browser back/forward works. Previously DES, PAIRS, ARB and PAPER
+  were `role="dialog"` overlays hidden inside the monitor's own document, with
+  no URLs and no way to discover them except by typing a command.
+- Routing is client side over the History API precisely so the session keeps
+  **one** WebSocket: navigation calls `mount`/`unmount` and toggles a root
+  element's `hidden`, never `connect()`. Verified live in Chrome — the tape
+  kept counting (5 → 10 MSGS) across a full six-page round trip and the
+  connection pill never left LIVE.
+- `src/arb/ui/static/app.js` (1,886 lines, one IIFE) is **deleted**. In its
+  place: 15 ES modules, 5,461 lines — `js/main.js`, `js/core/` (state,
+  format, dom, ws, router, keys, cmd) and `js/pages/` (monitor, market, arb,
+  pairs, paper, system, help) — plus `style.css` for the shell and shared
+  components and one `css/<page>.css` per page. No build step, no npm, no
+  dependency, no external request; `<script type="module">` is the whole
+  loader. Each page module default-exports
+  `{id, path, title, nav, root, mount, unmount, render, onKey}`.
+- `src/arb/ui/server.py` enumerates the shell routes (`SPA_ROUTES` plus
+  `/market/{market_id:path}`) rather than using a catch-all, so `/api/*`,
+  `/ws`, `/metrics` and `/static/*` cannot be shadowed and a typo'd URL is
+  still a 404 instead of a silent 200. `market_id` is deliberately not
+  validated: a deep link to a market that rolled off discovery opens and lets
+  the page report the miss.
+- New page `/system`: engine counters, recorder state, database status and the
+  Polymarket US block — all four of which the restructure had dropped on the
+  floor — restored from the pre-multipage source, plus Kalshi/Polymarket
+  health cards and a CLOCK & LATENCY block that explains on the page why a
+  one-way reading can go negative and points at `uv run arb doctor`.
+- New page `/help`: keyboard reference, command reference, how to read every
+  screen column by column, and a glossary. Most of it is derived rather than
+  typed — the page list, paths and `ALT+N` numbers come from the router's
+  `navPages()`, and each page's key table is parsed out of that page's own
+  footer strip on mount — so it cannot drift from the app.
+- Two reported bugs fixed on the monitor: the header said `MONITOR — KALSHI`
+  while the list held both venues (now `MONITOR — KALSHI 13 · POLYMARKET US 9`
+  from live counts, and the stat line reflects the filter), and the `#` column
+  went blank after row 9 (every row is numbered; the first nine carry the 1-9
+  quick-select shortcut and say so by emphasis).
+- Also new on the monitor: a VENUE column, a ticker/title/id filter box, an
+  ALL/K/PM venue filter and sortable columns — all persisted in
+  `localStorage` under `arb.monitor.v1`, and applied by moving existing row
+  nodes so a re-sort never costs the selection or a drag in progress.
+- New keys: `ALT+1`–`ALT+6` jump to a page, `ALT+[` / `ALT+]` cycle,
+  `ALT+←` / `ALT+→` are history back/forward. Escape is global — it clears a
+  half-typed command, otherwise it returns to MONITOR. New `ARB>` commands:
+  `MON`/`MONITOR`, `SYS`/`SYSTEM`, `HELP`/`?`, `BACK`; `PAIRS`, `ARB`,
+  `PAPER`, `DES`, `<TICKER>` and `<TICKER> DES` all still work and now
+  navigate instead of opening an overlay.
+- Two screens stopped asserting things that were not true: ARB no longer
+  presents the paper trader's threshold as in force when no trader is running
+  (`/api/paper` serves `PaperLimits()` defaults with `enabled: false`), and
+  PAPER no longer draws capacity percentages against limits nothing is
+  enforcing. PAIRS' `Shift+Y`/`Shift+N` bulk decide now acts only on visible
+  rows and arms on the first keypress. See `docs/decisions.md` M18.
+- It was a port, not a rewrite: the moved functions were diffed against the
+  pre-multipage `app.js` function by function and most are byte-identical
+  modulo indentation; the few intentional changes carry a comment saying so.
+- **Open**: there is still no JS test harness. 15 modules and 5,461 lines of
+  browser code are checked by `node --check` and by driving a real browser,
+  and nothing else — the largest untested surface in the repo
+  (`docs/testing.md`).
+- 195 tests; ruff, pyright, `node --check` clean.
+
+### From M17
+
+- Root-caused the negative latency panel (MED −14.4 ms, SKEW −27 ms): the one-way sample subtracts Kalshi's wall clock from the local one, so it measures `true_transit + (local − venue)`; the local clock was ~20 ms behind (`sntp` +0.0197 s, the new `arb doctor` check −19.7 ms). Nothing in the trading path was affected — staleness, `BookManager`, `ArbMonitor` and replay are all monotonic — so it was a measurement/visibility defect.
+- `arb doctor` gained an `ntp clock` check backed by `src/arb/clock.py`, a stdlib SNTP client (RFC 4330; 4 samples, lowest round trip wins): warns at `|offset| > 25 ms` *or* a lag past 5.5 ms, never fails, degrades to `warn` when UDP 123 is blocked, sign is local-minus-server to match the UI.
+- Four metrics — `arb_ws_one_way_latency_ms` (buckets spanning negative; a count at `le="0"` is proof of clock offset), `arb_ws_one_way_latency_negative_total`, `arb_ws_rtt_ms`, `arb_clock_skew_ms`, the gauges going `NaN` rather than stale — plus a Grafana "Clock & latency" row (36 panels). Deliberately **not** done: de-biasing the sample; see `docs/decisions.md` M17.
+- Latency sparkline stopped lying: negative samples pin to the bottom edge with an amber tick instead of drawing off-canvas, and a delta-free second renders as a gap instead of repeating the never-reset `latency_ms.last`.
+- **Open**: the host clock is still ~19 ms behind. `sudo sntp -sS pool.ntp.org` needs an interactive password; run it to clear the warn. Runbook in `docs/ops.md` ("Host clock discipline").
 - 189 tests; ruff, pyright, `node --check` clean.
 
 ### From M16
@@ -88,7 +133,7 @@
 
 - `uv run arb ui` at http://127.0.0.1:8080 — black/amber terminal: live market monitor (real volumes + event titles from discovery), depth ladder with complement NO prices, mid/spread seam and flash-on-change, tape, latency sparkline (last/median/p95), system panel (recorder, parse errors, seq gaps, DB rows by run), Polymarket US down-screen driven by live REST reachability, keyboard navigation, dual UTC/ET clocks.
 - Backend: `BookManager` (`src/arb/books.py`) + `KalshiMarketDataAdapter` (per-`sid` seq tracking; gap → metric + `ResyncRequired` + forced WS reconnect for fresh snapshots per the reliability rules); FastAPI server (`src/arb/ui/server.py`) with `/api/status`, `/metrics`, and a WS push protocol (integer ticks / 0.0001-contract units on the wire); recorder-first ingest identical to `arb record`; per-client bounded send queues so a slow browser can never stall the feed.
-- Frontend: three static files, vanilla JS/CSS, no build step, no external requests; design synthesized from a judged three-way panel; staleness shown as calm "QUIET", red INVALID reserved for structural book failures.
+- Frontend: three static files, vanilla JS/CSS, no build step, no external requests; design synthesized from a judged three-way panel; staleness shown as calm "QUIET", red INVALID reserved for structural book failures. (M18 replaced the three files with 15 ES modules and moved the system/Polymarket panels to `/system`; no build step and no external requests still hold.)
 - Verified live end-to-end (2026-09-14): REST + WS contract probed, headless-Chrome renders confirmed live books, tape deltas, latency ~18 ms median, recorder rows growing in Postgres during viewing.
 - 119 tests; ruff, pyright, `node --check` clean.
 

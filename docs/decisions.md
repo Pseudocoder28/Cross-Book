@@ -12,6 +12,8 @@ Design choices and why. Newest first.
 - **Frontend is three static files, zero build step, zero external
   requests.** Vanilla JS/CSS served by FastAPI; system mono font stack; no
   CDN. A Python repo should not grow a node toolchain for one page.
+  *Superseded in part by M18:* the file count is now 15 ES modules and 8
+  stylesheets, but the no-build-step and no-external-request rules held.
 - **Wire format keeps integers.** Prices cross the WebSocket as ticks and
   quantities as 0.0001-contract units; the browser formats (ticks/100 =
   cents). No float drift server-side.
@@ -33,6 +35,131 @@ Design choices and why. Newest first.
   density maximalist): black/amber terminal chrome, tabular-nums data,
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
+
+## M18 — the terminal becomes a multi-page app
+
+- **Routing is client side over the History API, not one HTML document per
+  page.** The constraint that decided it: *one WebSocket for the whole
+  session.* The tape counter, the rolling latency window (300 one-second
+  buckets) and every entry in `state.books` live in page memory, and a fresh
+  document would take all of them with it — plus force the server to re-send
+  `hello` and a full book payload per navigation (`ui/server.py`'s
+  `ws_endpoint`). So `main.js` calls `connect()` exactly once in `boot()`,
+  and `core/router.js` does nothing more violent than toggle a root
+  element's `hidden` and call `unmount()`/`mount()`. The price is that the
+  server must serve the shell at every route and a browser without JS gets
+  the `noscript` bar; the screens were unusable without JS before this
+  anyway.
+- **ES modules, still no build step and no dependencies.** M9's rule — a
+  Python repo should not grow a node toolchain for one page — was re-tested
+  when "one page" became seven, and kept. `<script type="module">` plus
+  native `import` already provides the module boundary a bundler would have
+  been introduced for. What it buys: the file on disk is the file the
+  browser runs, so a stack trace points at a real line, and `node --check`
+  is the entire JS toolchain. What it costs: one request per module (cheap
+  against the default 127.0.0.1 bind), no minification, and no npm test
+  runner — so there is still no JS unit test and page behaviour is verified
+  in a real browser instead. See `docs/testing.md`.
+- **Every page is one module with a fixed shape, and the router owns its
+  lifecycle.** `js/pages/<page>.js` default-exports
+  `{id, path, title, nav, root, mount, unmount, render, onKey}` plus an
+  optional `onMessage`. The router — not the page — sets `hidden`, sets
+  `document.title`, and marks the nav tab. Reason: `mount`/`unmount` is the
+  only reliable place to start and stop a timer or a fetch, and a page that
+  also controlled its own visibility could leave itself on screen while
+  "closed". The concrete bug this forecloses is the PAPER page's 3 s
+  `/api/paper` poll outliving navigation. Registration order in `main.js`'s
+  `PAGES` *is* nav order, so the nav strip, the `Alt+N` numbering and the
+  page table on `/help` all read from one list.
+- **The rAF batch drops dirty keys nobody claimed, so ported pages
+  re-register their old key.** `core/state.js` sweeps `schedule()` keys with
+  no renderer rather than leaking them. The router auto-registers a page's
+  `render` under its `id` only, so `pages/market.js` calls
+  `registerRenderer("des", …)` and `pages/system.js` registers both
+  `"system"` and `"poly"` — those are the names `ws.js`, `state.select()`
+  and the status poll have always scheduled, and silently dropping them is
+  how a screen stops updating with nothing in the console.
+- **A page module that fails to import degrades to a stub, loudly.**
+  `main.js` wraps each `import()` and falls back to a placeholder that keeps
+  the route resolving and the nav tab working, after `console.error`. One
+  broken page should cost that page, not the terminal — but it must not
+  cost it silently, or a screen goes missing in production and looks empty.
+- **The server enumerates its shell routes instead of using a catch-all.**
+  `SPA_ROUTES = ("/", "/arb", "/pairs", "/paper", "/system", "/help")` are
+  registered one by one, alongside a single `/market/{market_id:path}`.
+  A catch-all would answer 200-with-the-shell for `/api/typo`, `/wss` or a
+  renamed static asset, which turns every broken link and every stale
+  endpoint into a blank screen instead of a 404. `/api/*`, `/ws`,
+  `/metrics` and `/static/*` therefore keep their own handlers and an
+  unknown path stays a 404 — pinned by
+  `test_spa_routes_do_not_shadow_the_api` and `test_unknown_path_is_still_404`.
+- **`/market/<id>` is the one deliberately unvalidated route.** The id is
+  opaque to the server: a deep link to a market that has since rolled off
+  the discovery list should open and let the page report the miss, rather
+  than 404 a URL that worked yesterday. It is declared `{market_id:path}`
+  so an id whose escaped form contains `%2F` survives ASGI's decode, and
+  the client reads it as `decodeURIComponent(pathname.slice("/market/".length))`.
+- **Escape is handled globally, once.** `core/keys.js` takes it before any
+  page: a half-typed command is the innermost thing open so it is cleared
+  first; otherwise anything that is not the monitor navigates to `/`. The
+  keys strip has advertised `ESC CLOSE` since M9, and seven pages each
+  implementing it is seven chances for one of them to disagree. Pages are
+  forbidden from claiming Escape in `onKey`.
+- **This was a port, not a rewrite.** Each moved function was diffed against
+  the pre-multipage `static/app.js` (now only in git history) and most are
+  byte-identical modulo indentation and an `export` keyword; where one did
+  change, the change carries a comment saying so — `pages/system.js`'s run
+  list tagging the live run is the example. The reason is that these screens
+  were verified against live venue data over M9–M17. A rewrite would have
+  re-opened every one of those questions simultaneously and left no way to
+  tell a restructure bug from an intended behaviour change.
+- **`/help` derives itself from live sources rather than restating them.**
+  The page list, paths and `ALT+N` numbers come from the router's
+  `navPages()`; each page's key table is parsed out of that page's own
+  `.des-foot` strip on every mount. A hardcoded help page is a second source
+  of truth that decays with no test to catch it, and a help page that lies
+  is worse than no help page. What remains hand-written — the global keys,
+  the command list, the glossary — is written against the source it
+  describes (`core/keys.js`, `core/cmd.js`, `docs/data-model.md`).
+- **A screen must not assert something that is not true.** Two fixes landed
+  under that one rule, and it is the rule, not the two instances, that is
+  being recorded. `GET /api/paper` answers with `PaperLimits()` defaults and
+  `enabled: false` when no trader is running, so the numbers alone never
+  mean a limit is in force: ARB's threshold preset now reads `PAPER 50` only
+  when the fetch says enabled and `DEFAULT 50` otherwise, with a tooltip
+  saying it filters this view only; and PAPER's capacity meters drop the
+  percentage entirely when the trader is off, labelling the block
+  `DEFAULTS — NOT IN FORCE · TRADER OFF` rather than drawing "1% OF $1000"
+  against a ceiling nothing enforces (with the trader off those totals are
+  also summed across every stored run, so they do not belong to this run
+  either). Generally: where the backend substitutes a default for a live
+  value, the screen has to show which one it got.
+- **A bulk write may only touch rows the operator can see, and it asks
+  first.** PAIRS' `Shift+Y`/`Shift+N` decide a whole event pairing at once —
+  a 30-team pennant race is one judgement, not thirty. It used to run over
+  the full status-filtered set and ignore the search box, so searching for
+  one candidate and pressing `Shift+Y` wrote all of its unseen siblings. The
+  group is now exactly the visible rows, the message says how many of the
+  event that reaches, and anything larger than one row is armed by the first
+  keypress and spent by a second within 8 s. The pairs table is the input to
+  what gets traded; it is the last place for a keystroke to reach further
+  than it looks.
+- **The monitor's view belongs to the operator and survives a reload.**
+  Filter text, venue filter (`ALL`/`K`/`PM`) and sort column/direction
+  persist under `arb.monitor.v1` in `localStorage`. Re-sorting moves the
+  existing row nodes via `replaceChildren` instead of rebuilding them, so
+  sorting by a live price cannot cost the selection, the flash-on-change
+  state or a drag in progress; markets with no book yet always sort last,
+  because an absent price is not a low one.
+- **The header counts what the list actually holds.** It read
+  `MONITOR — KALSHI` from M9 until now while the list had carried both
+  venues since M12; it is built from live counts
+  (`MONITOR — KALSHI 13 · POLYMARKET US 9`) and the row count reflects the
+  filter. Related: the `#` column numbers *every* row. It previously wrote
+  an empty string past row 9 because only nine rows have a quick-select key
+  — conflating "this row has a shortcut" with "this row has a position".
+  The number is positional information; the shortcut is a subset of it, and
+  is marked by emphasis.
 
 ## M17 — the negative latency, and what was deliberately not fixed
 

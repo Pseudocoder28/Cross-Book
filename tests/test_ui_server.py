@@ -6,6 +6,7 @@ import math
 import time
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, WebSocket
@@ -14,7 +15,7 @@ from starlette.testclient import TestClient
 
 from arb.books import BookManager
 from arb.types import RawMessage
-from arb.ui.server import DatabaseStatus, ServerState, create_app
+from arb.ui.server import SPA_ROUTES, DatabaseStatus, ServerState, create_app
 from arb.venues.kalshi.adapter import KalshiMarketDataAdapter
 
 FIXTURE = Path(__file__).parent / "fixtures" / "kalshi" / "ws_orderbook_capture.jsonl"
@@ -181,6 +182,89 @@ async def test_root_serves_index_when_present(tmp_path: Path) -> None:
     assert "terminal" in root.text
     assert static.status_code == 200
     assert "terminal" in static.text
+
+
+async def test_spa_routes_serve_shell_when_present(tmp_path: Path) -> None:
+    """Every client-side route is a deep link: a fresh GET returns the shell."""
+    (tmp_path / "index.html").write_text("<html><body>terminal</body></html>")
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        for path in SPA_ROUTES:
+            response = await client.get(path)
+            assert response.status_code == 200, path
+            assert "terminal" in response.text, path
+
+
+async def test_spa_routes_fall_back_when_assets_missing(tmp_path: Path) -> None:
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        for path in SPA_ROUTES:
+            response = await client.get(path)
+            assert response.status_code == 200, path
+            assert response.text == "UI assets missing", path
+
+
+async def test_market_page_route_serves_shell(tmp_path: Path) -> None:
+    """market_id is opaque: it is never checked against the known markets, and
+    an id needing URL escaping still resolves to the shell."""
+    (tmp_path / "index.html").write_text("<html><body>terminal</body></html>")
+    app = create_app(StubState(), static_dir=tmp_path)
+    ids = [
+        "kalshi:AAA",
+        "kalshi:NOT-A-KNOWN-MARKET",  # rolled off discovery: must not 404
+        "polymarket_us:will-x-happen?",
+        "kalshi:A B/C",  # escapes to %20 and %2F
+    ]
+    async with client_for(app) as client:
+        responses = [await client.get("/market/" + quote(market_id, safe="")) for market_id in ids]
+    for market_id, response in zip(ids, responses, strict=True):
+        assert response.status_code == 200, market_id
+        assert "terminal" in response.text, market_id
+
+
+async def test_market_page_falls_back_when_assets_missing(tmp_path: Path) -> None:
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        response = await client.get("/market/" + quote("kalshi:AAA", safe=""))
+    assert response.status_code == 200
+    assert response.text == "UI assets missing"
+
+
+async def test_spa_routes_do_not_shadow_the_api(tmp_path: Path) -> None:
+    """Regression guard: a greedy catch-all would answer the shell here and
+    silently break every real endpoint."""
+    (tmp_path / "index.html").write_text("<html><body>shell-sentinel</body></html>")
+    (tmp_path / "app.js").write_text("export const marker = 1;\n")
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        status = await client.get("/api/status")
+        detail = await client.get("/api/markets/kalshi:AAA")
+        pairs = await client.get("/api/pairs")
+        arb = await client.get("/api/arb")
+        paper = await client.get("/api/paper")
+        metrics = await client.get("/metrics")
+        asset = await client.get("/static/app.js")
+    assert status.status_code == 200 and status.json()["run_id"] == "testrun"
+    assert detail.status_code == 200 and detail.json()["ticker"] == "AAA"
+    assert pairs.status_code == 200 and [r["id"] for r in pairs.json()["pairs"]] == [1, 2]
+    assert arb.status_code == 200 and "quotes" in arb.json()
+    assert paper.status_code == 200 and paper.json()["enabled"] is False
+    assert metrics.status_code == 200 and b"arb_ui_ws_clients" in metrics.content
+    assert asset.status_code == 200 and asset.text == "export const marker = 1;\n"
+    for response in (status, detail, pairs, arb, paper, metrics, asset):
+        assert "shell-sentinel" not in response.text
+
+
+async def test_unknown_path_is_still_404(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<html><body>terminal</body></html>")
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        nope = await client.get("/nope")
+        nested = await client.get("/arb/deeper")
+        api = await client.get("/api/nope")
+    assert nope.status_code == 404
+    assert nested.status_code == 404
+    assert api.status_code == 404
 
 
 async def test_metrics_served_from_app(tmp_path: Path) -> None:
