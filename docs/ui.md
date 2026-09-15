@@ -137,7 +137,10 @@ export default {
   mount(params) {},          // navigated TO. params = {} or {id: "..."}
   unmount() {},              // navigated AWAY. Stop every timer and fetch here.
   render() {},               // called by the rAF batch when the dirty key `id` is set
-  onKey(e) { return false }, // page-scoped keys; return true to claim one
+  onKey(e, scope) { return false },  // page keys; return true to claim one
+  regions: ["arb-min", "arb-rows"],  // optional: TAB order from ARB>; [0] takes "/"
+  listRegion: "arb-rows",            // optional: what ↑/↓ from ARB> focuses
+  keyHints(scope) { return [] },     // optional: what the keys strip prints per scope
   onMessage(msg) {},         // optional: every WS frame, after the core handled it
 };
 ```
@@ -171,6 +174,26 @@ Rules that are load-bearing rather than stylistic:
 - **Every page owes an empty state and an accurate `.des-foot` footer.** The
   footer is not decoration: `/help` reads the per-page key tables out of it, so a
   binding and its footer change in the same edit or the help page starts lying.
+  There is exactly **one** footer per page — the pages that used to declare one
+  in `index.html` *and* overwrite it from JS now build or adopt a single element
+  (`buildFoot()` in `pairs.js` and `arb.js`, the module-scope block in
+  `paper.js`), because two copies of a key list is how a page and its strip
+  drift apart.
+- **The keyboard belongs to the shell, not the page.** `onKey(e, scope)` takes
+  the live scope, and a page guards every letter with it
+  (`if (scope !== SCOPE.LIST) return false`); the shell will not hand a page a
+  bare printable in any other scope, and the guard is the page saying so out
+  loud. No page implements Escape. `regions`, `listRegion` and `keyHints(scope)`
+  are how a page joins the focus model at all — see
+  [The keyboard model](#the-keyboard-model).
+- **Focus on mount is the router's, and it is conditional.** `restoreFocus()`
+  puts the keyboard on `#cmd` only when nothing holds it, or when what held it
+  was inside the root being unmounted — a fact read *before* hiding that root,
+  since hiding the element containing `activeElement` drops focus to `<body>`
+  and erases the answer. It must not be unconditional: `pages/market.js`
+  re-navigates with `{replace: true}` on every arrow press and `show()` does not
+  early-return when the `:id` param changed, so a blind `focus()` would fire on
+  every DES arrow and fight whatever the user had focused.
 
 Adding a page means five edits, and the fifth is the one that is easy to forget:
 a root element in `index.html`, a nav anchor with `data-page` and its digit, a
@@ -187,7 +210,7 @@ and the nav tab alive and logs the failure; it never takes the terminal down.
 | `core/state.js` | the one shared `state` object, the rAF render batch and its dirty keys, the market selection (`select`, `selectRelative`), and the pointer-down render pause |
 | `core/ws.js` | the session's single WebSocket, jittered exponential backoff (0.5 s → 15 s), the core handling of `hello`/`book`/`delta`/`stats`, the `onMessage` registry, the tape queue and the 1-second latency buckets |
 | `core/router.js` | path compilation and matching, page registration, `navigate`/`popstate`, the nav's active tab, `hidden` toggling, `document.title` |
-| `core/keys.js` | the document-level `keydown` listener and the whole resolution order below |
+| `core/keys.js` | the document-level `keydown` listener, the scope resolver, the whole resolution order below, the focus helpers (`focusCommand` `focusRegion` `focusList`), the platform chord (`NAVMOD`/`NAVLABEL`) and the keys strip |
 | `core/cmd.js` | the `ARB>` buffer and the command vocabulary |
 | `core/format.js` | pure formatters — no DOM, no state. If a formatter is used by one page it belongs in that page |
 | `core/dom.js` | `$ el titled flash setVal setText`, plus the live `prefers-reduced-motion` query |
@@ -209,45 +232,238 @@ once three reconnect attempts have failed.
 
 ## The keyboard model
 
-You type anywhere and it lands on the `ARB>` line. That is the primary input of
-the terminal, and every other binding is arranged around not breaking it.
+**The focused region owns every key.** Focus starts and ends on the `ARB>` line
+on every page, so a bare letter is always typing unless you deliberately moved
+the keyboard into a list that visibly says otherwise. The spec is
+[`.context/keyboard-model.md`](../.context/keyboard-model.md); the whole
+implementation is [`core/keys.js`](../src/arb/ui/static/js/core/keys.js), which
+owns the one document-level `keydown` listener.
 
-`core/keys.js` resolves one keydown in this order:
+It used to be the other way round, and that was a data-integrity bug rather than
+an ergonomic complaint. `core/keys.js` gave the active page's `onKey()` first
+refusal on **every** key, bare printables included, *before* the command line
+saw them — so on `/pairs`, with nothing focused, typing the word `RUN` did: `R`
+reload, `U` set the selected pair PROPOSED, `N` set it REJECTED. Two Postgres
+writes from someone who believed they were typing in a search box. The
+`cmd.buffer() === ""` guards the pages carried could not help and have been
+deleted rather than extended: the buffer is empty precisely when you start
+typing, so nothing keyed on it can protect the *first* character — which is the
+character that fired.
 
-1. **A real text field wins outright.** If the target is an `<input>`,
-   `<textarea>` or `contenteditable`, nothing below runs — not even the Alt
-   bindings, because Option+arrow is word navigation inside a field. This is what
-   lets the monitor filter, the pairs search and the help filter coexist with
-   type-anywhere-to-command. Those boxes each bind Escape (clear, then blur) and
-   Enter (blur, handing the keyboard back to `ARB>`) themselves.
-2. **Alt bindings.** `Alt+1`…`Alt+N` jump to the *n*th nav page (`N` = 6 today;
-   the handler has room for seven), `Alt+[` / `Alt+]` cycle with wrap, and
-   `Alt+←` / `Alt+→` are browser history back/forward.
-3. **Any other modifier returns**, and a focused `<button>`/`<a>`/`<select>`
-   keeps its own Enter and Space.
-4. **The active page's `onKey(e)`.** Returning `true` claims the key and
-   `preventDefault()`s it.
-5. **The global bindings**, below.
+### Three scopes
 
-| Key | Global behaviour |
+`scopeOf(target)` derives the scope from `document.activeElement` on every
+keydown. Nothing is remembered between keys, so the scope can never disagree
+with where the caret visibly is.
+
+| Scope | `activeElement` | A bare printable goes to | Entered by | Left by |
+| --- | --- | --- | --- | --- |
+| `TEXT` | `<input>`, `<textarea>`, contenteditable | that field, unconditionally | `TAB` from `ARB>`, `/` from a list, a click in the box | `ESC` (twice if the box has a value); `⏎` or `↓` to the page's list, or `⏎` back to `ARB>` if it has none |
+| `LIST` | anything inside `[data-keyregion="list"]` | the page's action keys | `↑`/`↓` from `ARB>`, `TAB`, `⏎` or `↓` out of a filter box | `ESC`, `TAB` off the end, an unclaimed printable, any mouse click |
+| `COMMAND` | everything else — `#cmd`, `<body>`, a focused button or anchor | the `ARB>` buffer, always | every page mount, every navigation, every rung of the `ESC` ladder | deliberately, by one of the moves above |
+
+The list regions are `#mon-rows`, `#arb-rows`, `#pair-rows` and `#ptr-rows`,
+each carrying `data-keyregion="list"` in `index.html`. The rows inside them are
+**not focusable**: the cursor is `aria-activedescendant` on the container, never
+a roving `tabindex`, because a focusable row would make `Y` fire in a scope the
+resolver believes is `COMMAND`. PAPER's POSITIONS table is focusable but is
+deliberately *not* a key region, so `R` does not fire from it; `#cmd` carries
+`data-keyregion="command"` for the same kind of honesty, though `scopeOf()`
+reaches `COMMAND` by falling through rather than by reading it.
+
+### The resolution order
+
+`onKey(e)` returns immediately for an IME composition (`isComposing`, a `Dead`
+key, `keyCode === 229`) or anything already `defaultPrevented`, resolves the
+scope from `e.target`, and then walks these steps — numbered as the source
+numbers them:
+
+1. **The nav chord**, checked in *every* scope including `TEXT`. It is digits
+   and brackets with a modifier, so it cannot collide with editing a field —
+   and the old code returned before it whenever a filter box had focus, which
+   left the page shortcuts dead exactly when you wanted them. Anything still
+   carrying Ctrl/Meta/Alt after this check belongs to the browser and returns.
+2. **`Escape`**, resolved globally before any page sees it, down the ladder
+   below. No page implements Escape any more, so a page can never be left
+   holding an armed bulk decision.
+3. **A text field owns everything else it is sent.** The only two keys lifted
+   out are `⏎` and `↓`, which move focus to the page's list (or, for `⏎` on a
+   page with no list, back to `ARB>`). Note what this implies for `TAB`: inside
+   a field it is the browser's own tab order, not the region walk in step 12.
+4. **A focused `<button>`, `<a>` or `<select>` keeps `⏎` and `Space`** — its
+   own activation keys.
+5. **A typed command always wins.** `⏎` with a non-empty buffer runs
+   `cmd.exec()` — in `COMMAND` and in `LIST` alike. (`TEXT` never reaches here:
+   a field owns its own `⏎`, which is step 3.)
+6. **The dirty-buffer rule.** A printable with a non-empty buffer keeps typing,
+   in both of the scopes that get this far.
+7. **The fix.** A bare printable in `COMMAND` scope is typing, full stop — the
+   page is never consulted, so a single-letter action cannot fire from the home
+   position.
+8. **Arrows from home move focus, not the cursor.** `↑`/`↓` in `COMMAND` on a
+   page that declares a `listRegion` focuses that list and leaves the selection
+   alone, so row 0 is the next candidate and you can see where you are.
+9. **No autorepeat on a printable in `LIST`.** A leaned-on `Y` was one POST per
+   key repeat, and `decidePair()` advances the cursor under a status filter, so
+   a held key walked the queue writing as it went. The pages guard this too;
+   doing it here makes it structural rather than per-page discipline.
+10. **The page** — `page.onKey(e, scope)`, `true` claims the key. By
+    construction it can only ever see a bare printable in `LIST` scope.
+11. **`/` from a list** focuses that page's first text region, like every pager.
+12. **Global non-printables.** `TAB` walks the page's `regions`; `↑`/`↓` move
+    the market selection; `⏎` on an empty buffer opens DES for the selection;
+    `⌫` deletes a character.
+13. **The `LIST` fall-through.** An unclaimed printable blurs to `COMMAND` and
+    *then* types itself.
+
+| Key | Global behaviour (steps 5–13) |
 | --- | --- |
-| any printable character | appended to the `ARB>` buffer, uppercased, 48 characters max |
-| `⌫` | delete the last character |
-| `⏎` | empty buffer: open DES for the current selection. Otherwise: run the command |
-| `Esc` | clear a half-typed command; if there is none, leave the page for `/` |
-| `↑` `↓` | move the market selection through the full `hello`-order list |
+| any printable | appended to the `ARB>` buffer, uppercased, 48 characters max — from `COMMAND` always, from `LIST` when the page does not claim it, never from `TEXT` |
+| `⌫` | delete the last character of the buffer |
+| `⏎` | non-empty buffer: run the command. Empty: the page's Enter action, else open DES for the current selection |
+| `Esc` | one rung down the ladder below |
+| `↑` `↓` | at `ARB>`: enter the page's list (or, on a page with none, move the selection). Inside a list: the page moves its own cursor |
+| `TAB` | from `ARB>` into the page's `regions` in order (`⇧TAB` enters from the end); off either end of a non-text region, back to `ARB>`; a page with no regions and no list leaves `TAB` to the browser |
 
-Escape is handled once, globally, and no page may claim it. A half-typed command
-is the innermost thing open so it goes first; otherwise the rule is the one the
-keys strip has always advertised — ESC CLOSE, which on a route-based terminal
-means `navigate("/")`. Note that this is a forward navigation to the monitor,
-not a history pop; `BACK` and `Alt+←` are the history controls.
+### Why the dirty buffer and the fall-through both exist
 
-`1`–`9` quick-select is **not** global: it is the monitor page's own `onKey`, and
-only fires with an empty command buffer (otherwise typing a ticker containing a
-digit would jump the selection). Pages claim arrows for their own lists
-(`pairs`, `arb`, `paper`), scrolling (`help`), or paging between markets
-(`market`).
+They are the two halves of "nothing you type is silently swallowed".
+
+The **dirty-buffer rule** (step 6) keeps a word together across a focus change:
+once the buffer is non-empty every subsequent character goes to it in any scope
+the page can see, so a ticker half-typed at `ARB>` finishes as one word even if
+`↓` moved the keyboard into a list mid-word. It sits *above* the page precisely
+so that the second half of `PAIRS` can never be read as `A`, `I`, `R`, `S`.
+
+The **`LIST` fall-through** (step 13) covers the other direction: with the rows
+focused, typing `KXPRES` gets you `KXPRES` in the command line — `K` is not one
+of the page's actions, so it blurs to `COMMAND` and types, and the rest follow
+through the dirty-buffer rule. Without it those six keystrokes would vanish into
+a list that had no use for them, which is the failure mode that teaches people
+to distrust a terminal.
+
+`cmd.exec()` calls its own `home()` before navigating for the same reason: a
+command typed with the focus parked in a list is a `COMMAND`-scope act, so the
+next bare letter has to be typing again.
+
+### The Escape ladder
+
+One key, one meaning: step back out of whatever is innermost. First match wins,
+and `escapeLadder()` is the only implementation — pages are forbidden from
+claiming Escape.
+
+| Rung | Situation | Effect |
+| --- | --- | --- |
+| 1 | `TEXT`, box has a value | clear it (dispatching `input` so the page re-filters) and stay in the box |
+| 2 | `TEXT`, box empty | back to `ARB>` |
+| 3 | `LIST` | back to `ARB>`; leaving the region disarms any pending bulk decision (`/pairs` listens on the rows' `focusout`, and `keys.js` also publishes `onScopeChange`) |
+| 4 | `COMMAND`, buffer non-empty | `cmd.clear()` — a half-typed command is the innermost thing open |
+| 5 | `COMMAND`, buffer empty | `navigate("/")`, a no-op on the monitor |
+
+Rung 5 is a forward navigation to the monitor, not a history pop: `BACK` and the
+browser's own back binding are the history controls. The strip's wording tracks
+the rung you are actually on — `ESC CLEAR` in `COMMAND`, `ESC ARB>` in `LIST`
+and `TEXT` — and the page footers follow the same split: MARKET and SYSTEM, which
+have no list and no filter box, say `ESC MONITOR`, while the list pages say
+`ESC ARB>` because that is where their Escape lands first.
+
+### The page chord, and why history is unbound
+
+Option is the insert-special-character modifier on macOS — `Option+1` types `¡`,
+`Option+[` types a curly quote — so on a Mac the page chord is Control:
+
+| Binding | Action |
+| --- | --- |
+| `CTRL+1`…`CTRL+6` (macOS) / `ALT+1`…`ALT+6` (elsewhere) | jump to the *n*th nav page |
+| `CTRL+[` `CTRL+]` / `ALT+[` `ALT+]` | previous / next page, wrapping |
+| `⌘[` `⌘]` (macOS) / `ALT+←` `ALT+→` (elsewhere) | history back/forward — **the browser's own**, deliberately left unbound here |
+
+Alt stays live as an alias on every platform (`chordHeld()` accepts `NAVMOD` or
+`altKey`); it is simply never *labelled* on a Mac. The chord is matched on
+`e.code` (`Digit1`…, `BracketLeft`/`BracketRight`), so the physical key works
+whatever the modifier would otherwise have typed, and a digit past the nav count
+returns `false` rather than `preventDefault()` — a spare digit belongs to the
+browser, not to a dead binding. `Cmd` is never the chord (`chordHeld()` rejects
+`metaKey`), because `⌘[` / `⌘]` are already history on macOS.
+
+The four `history.back()` / `history.forward()` bindings that used to exist are
+**deleted**, not moved. Shadowing a binding the browser already owns buys
+nothing and costs the user their muscle memory.
+
+One constant drives every label. `NAVMOD` (the event property to test) and
+`NAVLABEL` (the string to print) are exported from `core/keys.js`, and the nav
+hint, the keys strip (`chordLabel()`), every page footer that mentions the chord
+and `/help`'s own key table all read them — a hand-edited `ALT+` is how the
+strip and the documentation drift apart. `help.js` even derives *"am I on a
+Mac"* as `NAVLABEL === "CTRL"` rather than sniffing the platform a second time.
+
+Platform detection is one regex, and it is case-insensitive on purpose:
+`navigator.userAgentData.platform` reports `"macOS"` with a lower-case m and
+short-circuits `navigator.platform` (`"MacIntel"`), so the obvious `/Mac/` test
+silently mislabelled every Chromium browser on a Mac. It is now
+`/mac|iphone|ipad|ipod/i`.
+
+### Consequence grading
+
+The rule the scope model came out of, and the one that matters most for day 3's
+live order placement: **how hard a key is to press scales with what it costs.**
+It is written up in [`decisions.md`](decisions.md).
+
+| Grade | Example | Price of pressing it |
+| --- | --- | --- |
+| G0 | view/scroll: arrows, filters, sort | free, any scope |
+| G1 | navigation: page jump, DES | free, a cheap chord |
+| G2 | one-row write: `Y` `N` `U` | one key, `LIST` scope only, no autorepeat |
+| G3 | many-row write: `⇧Y` `⇧N` | arm, then confirm; the exact count is stated |
+| G4 | irreversible / money (day 3: live orders) | **never a hotkey** — a typed command plus a typed confirmation |
+
+### The on-screen cue
+
+A scope model is only safe if the scope is visible, so `renderKeys()` repaints
+on every `focusin`, `focusout` and navigation.
+
+The keys strip (`#keys`) is: a mode chip — `ARB> COMMAND`, `LIST KEYS` or
+`TEXT FIELD`, reversed video in `LIST` — then the page's own `keyHints(scope)`,
+then whichever globals the page did not claim, then a note at the right
+(`TYPE ANYWHERE TO COMMAND` / `KEYS ACT ON THE LIST` / `TYPING IN A FIELD`).
+A page that names a key has the final word on it: `/help` binds the arrows to
+scrolling, so the global `↑↓ SELECT` is dropped beside its own `↑↓ SCROLL`
+rather than printed as a lie. `.keys` is one clipped `nowrap` line, which is why
+the mode chip is pinned **left** — whatever sits leftmost is the last thing to be
+clipped away — and why pages keep their hint lists to three or four entries.
+
+The stronger cue is on the element whose behaviour actually changed: in `LIST`
+scope the `ARB>` line itself becomes a reversed-video band (`.cmdline.scope-list`
+— amber ground, black text, black cursor) and `#cmd-mode` spells out the live
+keys, e.g. `LIST · Y / N DECIDE · SHIFT+Y/N EVENT · U UNDECIDE · / SEARCH`. You
+cannot be in a scope where a letter writes to Postgres and not see it.
+
+Mouse behaviour is arranged to keep that promise true. A click inside a list
+selects the row but does **not** hand the row the keyboard (`install()` returns
+focus to `#cmd`, ignoring keyboard-synthesised clicks with `e.detail === 0`), the
+page modules do the same after a click on their own buttons, and the router
+blurs a nav anchor clicked with the pointer. Anything that writes has to be
+reached deliberately, and the mouse route to a decision is a button, not a letter
+that fires because you clicked nearby.
+
+### What a page must do to participate
+
+Four optional fields. They are optional for real pages — `core/keys.js` reads
+every one defensively — and `main.js`'s placeholder for a module that failed to
+load answers all four explicitly (`regions: []`, `listRegion: null`,
+`keyHints() { return [] }`, `onKey() { return false }`), so a stub page falls
+through to the global bindings instead of throwing at the resolver:
+
+| Field | Meaning |
+| --- | --- |
+| `onKey(e, scope)` | page-scoped keys; return `true` to claim one. The second argument is the scope — guard every letter with `if (scope !== SCOPE.LIST) return false` |
+| `regions: ["pair-q", "pair-rows"]` | the `TAB` order from `ARB>`; `[0]` is also where `/` lands (the first `<input>` among them) |
+| `listRegion: "pair-rows"` | the region `↑`/`↓` from `ARB>` focuses. A page with no row list — MARKET, SYSTEM, HELP — declares none, and the arrows reach its `onKey` in `COMMAND` scope instead |
+| `keyHints(scope)` | what the strip and the `ARB>` band print in that scope; `{k, d}` objects or `"K LABEL"` strings. A page that throws here loses its hints, not the strip |
+
+Nothing about any individual page is hardcoded in `core/keys.js`, and the router
+does the rest: [every page mounts on the `ARB>` line](#the-page-module-contract),
+so a fresh page always starts in `COMMAND`.
 
 ### Commands
 
@@ -320,8 +536,12 @@ would shift the selection under the pointer.
 The **latency** panel is the sparkline plus `LAST / MED / P95 / N / RTT / SKEW` —
 see [Skew-aware latency](#skew-aware-latency).
 
-Keys: `↑↓` move through the list *as filtered and sorted*, `1`–`9` quick-select
-a visible row, click selects, double-click opens DES.
+Keys, all of them `LIST` scope — `↑`/`↓` at the `ARB>` line enters the rows, and
+`TAB` or `/` opens the filter box: `↑↓` move through the list *as filtered and
+sorted*, `1`–`9` quick-select a visible row, `⏎` opens DES. At the `ARB>` line a
+digit is just a character in a ticker, which is why the footer reads
+`1-9 QUICK (IN LIST)`. A click selects a row and leaves the keyboard on `ARB>`;
+double-click opens DES.
 
 ### DES — `/market/<market_id>`
 
@@ -346,7 +566,12 @@ and a `COPY` button for the ticker.
 
 `↑↓` page through markets without leaving the page, navigating with
 `replace: true` so arrowing through twenty markets does not bury the back
-button. Escape returns to the monitor, like everywhere else.
+button. This page declares no `listRegion` — there is no row list on it, so
+paging the universe *is* its list behaviour — and the arrows therefore reach its
+`onKey` in `COMMAND` scope rather than being diverted into a list. It owns no
+letter keys at all, so its footer says `ESC MONITOR`: with no list and no filter
+box to step out of, Escape lands on ladder rung 5 immediately. (SYSTEM says the
+same, for the same reason; the list pages say `ESC ARB>`.)
 
 Backed by `GET /api/markets/{id}`, seeded from discovery metadata and refreshed
 live on open with a 30 s TTL (`DETAIL_TTL_MS`), falling back to the seed if the
@@ -389,6 +614,11 @@ states are distinguished, because they mean completely different things: no
 confirmed pairs tracked at all (confirm pairs, then restart `arb ui`) versus no
 pair clearing the current filter.
 
+Keys: `↑`/`↓` at the `ARB>` line enters `#arb-rows` and then moves the cursor,
+`⏎` opens the Kalshi leg, `TAB` (or `/` from the list) lands in the `MIN NET/CT`
+box. This page binds **no letter at all, in any scope**, so typing `PAIRS` or a
+ticker here always reaches the command line.
+
 ### PAIRS — `/pairs`
 
 The cross-venue pair review queue described in
@@ -404,16 +634,38 @@ chip counts can be honest about the whole universe. Only the top 500 rows by
 score are put in the DOM, with a banner saying exactly how many are held back.
 A progress bar reports `proposed / confirmed / rejected · n% reviewed`.
 
-Keys: `↑↓` select, `PgUp`/`PgDn` ±10, `Home`/`End`, `Tab` cycles the status
+This is the page the scope model was written for, and the only one whose keys
+write to Postgres. Every letter below fires **only in `LIST` scope** — with the
+focus actually inside `#pair-rows`, where the `ARB>` line is a reversed-video
+band naming them. At the command line they are typing, and the word `RUN` is a
+word.
+
+Keys: `↑↓` select, `PgUp`/`PgDn` ±10, `Home`/`End`, `←`/`→` cycle the status
 filter, `/` focuses the search box, `Y` / `N` decide, `U` un-decides, `R`
-reloads. `Shift+Y` / `Shift+N` decide every candidate in the selected row's
+reloads. The filter moved off `TAB` because a page that eats `TAB` is a page you
+cannot leave with the keyboard — `TAB` is how you get *out* of a region — and
+`←`/`→`, being non-printable, shadow nothing anybody could type. `Y`, `N`, `U`
+and the bulk keys all reject `e.repeat`: `decidePair()` advances the cursor and
+a row leaves the queue under a status filter, so a leaned-on key used to march
+down the list POSTing at the key-repeat rate.
+
+`Shift+Y` / `Shift+N` decide every candidate in the selected row's
 event pairing at once — a 30-team pennant race is one judgement, not thirty —
 and are two keystrokes whenever the group holds more than one row: the first
 arms and names the exact count and event, the second spends it (8 s window). A
 bulk write only ever touches rows the operator can *see* — siblings hidden by
 the search box or by the 500-row cap are left alone, and the prompt says so.
+An armed decision disarms on any other key, on Escape and on the rows losing
+focus, so it can never be spent by a keystroke aimed at something else.
 The `UNDO` button restores the previous status of the last decision, row by row,
 whatever mix of statuses that was.
+
+Mouse parity is not an afterthought here: `#pair-detail` carries real `CONFIRM`,
+`REJECT` and `UNDECIDE` buttons beside the `UNDO` chip, disabled when the row
+already has that status so a click cannot POST a write that changes nothing.
+Before them a mouse user had no route to a decision at all, and a keyboard user
+had no route that was not a bare letter — the exact shape that made `RUN`
+dangerous.
 
 ### PAPER — `/paper`
 
@@ -424,7 +676,10 @@ the active `PaperLimits` — see [`engine.md`](engine.md#paper-trading).
 It polls `GET /api/paper` every 3 s **while mounted only**, and folds in `paper`
 WS frames subscribed at module load, so fills taken while you were on another
 page are already there when you arrive. Clicking a position (or `⏎` on a trade)
-filters the trade table to one pair; `R` refreshes.
+filters the trade table to one pair; `R` refreshes, and only from `LIST` scope —
+at the `ARB>` line an `R` is the first letter of a command. The ledger
+(`#ptr-rows`) is this page's list region; POSITIONS is focusable but is not a key
+region, so the arrows and `R` do not act from it.
 
 Limits are rendered as capacity *used*, not as three constants: `MAX NOTIONAL
 $1000.00` says nothing on its own, while `$12.40 · 1% OF $1000.00` says whether
@@ -464,17 +719,23 @@ an `sntp`/`timedatectl` sync.
 ### HELP — `/help`
 
 The reference card: start here, how to read each screen, the keyboard, the
-commands, a glossary and a safety statement. Sections are filterable (`/` focuses
-the box, the head stat shows `n OF m LINES`) with a jump rail that tracks
-scrolling.
+commands, a glossary and a safety statement. Sections are filterable (`TAB`
+focuses the box, the head stat shows `n OF m LINES`) with a jump rail that tracks
+scrolling. The old `/` binding is **gone**: this page declares no `listRegion`,
+so there is no scope in which `/` could be an action here, and at the `ARB>` line
+it is a character like any other. Everything the page does own — `↑↓`,
+`PgUp`/`PgDn`, `Home`/`End` — is a scroll, which is G0 and free in any scope.
 
 A help page that lies is worse than none, so most of it is **derived** rather
-than typed. The page list, paths and Alt numbers come from the router's
-`navPages()`; the `Alt+1..N` range is computed from how many nav pages exist; and
-the per-page key tables are read out of each page's own `.des-foot` strip in the
-DOM on every mount, verbatim, so they cannot drift from what the page advertises.
-What is written by hand — globals, commands, glossary — is written against
-`core/keys.js`, `core/cmd.js` and these docs.
+than typed. The page list and paths come from the router's `navPages()`; the
+chord numbering is `NAVLABEL` plus that count, so the page says `CTRL+1 - CTRL+6`
+on a Mac and `ALT+…` elsewhere without sniffing the platform a second time (it
+asks `NAVLABEL === "CTRL"`); and the per-page key tables are read out of each
+page's own `.des-foot` strip in the DOM on every mount, verbatim, so they cannot
+drift from what the page advertises. What is written by hand — the three scopes,
+the Escape ladder, the globals, the commands and the glossary — is written
+against `core/keys.js`, `core/cmd.js` and these docs, and it names the scopes
+with the same three words the keys strip prints.
 
 One deliberate departure from the house idiom, scoped to this page: definitions
 are sentence case, because two thousand words of caps is unreadable.

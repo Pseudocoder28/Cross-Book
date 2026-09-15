@@ -88,11 +88,18 @@ unknownEl.append(
 );
 if (leftEl) leftEl.insertBefore(unknownEl, leftEl.firstChild);
 
-// The footer is a promise about the keys; keep it true. Two deliberate lines
-// rather than one that wraps by accident in the 380px column.
-setText("des-foot", "↑↓ NEXT MARKET · ESC CLOSE · COPY = TICKER");
+// The footer is a promise about the keys; keep it true. It is CREATED here,
+// not overwritten: index.html used to declare one too and the two drifted, so
+// there is now exactly one source and it is the file that writes the text.
+// help.js reads this strip back out of the DOM to build its key table, so a
+// page that stops rendering a footer also disappears from HELP.
+// Two deliberate lines rather than one that wraps by accident in the 380px
+// column. ESC is the global ladder: it clears a half-typed command first, then
+// leaves for MONITOR.
+const footEl = el("div", "des-foot", "↑↓ NEXT MARKET · ESC MONITOR · COPY = TICKER");
+footEl.id = "des-foot";
 const footNoteEl = el("div", "des-foot-note", "DRAG ANY ROW TO COPY IT");
-if ($("des-foot")) $("des-foot").after(footNoteEl);
+if (rightEl) rightEl.append(footEl, footNoteEl);
 
 // ---------- helpers ----------
 
@@ -341,7 +348,14 @@ export default {
     renderDes();
   },
 
-  onKey(e) {
+  // This page has no `listRegion`: there is no row list on it, so paging the
+  // universe with the arrows IS its list behaviour and the arrows arrive here
+  // in COMMAND scope (core/keys.js only diverts them into a list when a page
+  // declares one). `scope` is accepted and deliberately not branched on —
+  // arrows are a G0 view action, free in whatever scope the core hands us, and
+  // there is no letter binding on this page that would need a LIST guard.
+  onKey(e, scope) {
+    void scope;
     const k = e.key;
     // app.js's select() ended with "if (state.des.open && ...) openDes(id)":
     // arrows page through markets while this page is open. replace: true so
@@ -354,6 +368,12 @@ export default {
     }
     return false;    // Escape belongs to core/keys.js
   },
+
+  // No keyHints: the core's own COMMAND-scope set already prints "↑↓ SELECT",
+  // which on this page is exactly what the arrows do (select the next market;
+  // the page follows the selection). A second ↑↓ entry with a different label
+  // would only eat room on a strip that is one clipped line. The footer in the
+  // right rail carries the longer wording.
 
   onMessage(msg) {
     // A cold deep link mounts before hello: adopt the selection once the

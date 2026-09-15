@@ -8,21 +8,29 @@
        (navPages()), so a page added or reordered later is documented for free;
      - the per-page key list is read out of each page's own `.des-foot` footer
        strip in the DOM, so it cannot drift from what the page advertises;
-     - the Alt+N range is computed from how many nav pages actually exist.
+     - the page-chord label and its digit range come from core/keys.js's
+       NAVLABEL and from navPages().length, never from a typed-out "ALT+".
+       NAVLABEL is CTRL on macOS, where Option is the insert-special-character
+       modifier, and ALT everywhere else; a hardcoded label here would be wrong
+       on half the machines that run this.
 
-   The rest (globals, commands, glossary) is written against the source it
-   describes — core/keys.js, core/cmd.js — and the project docs (data-model.md,
-   engine.md, pairs.md, ui.md). Nothing here is invented.
+   The rest (scopes, globals, commands, glossary) is written against the source
+   it describes — core/keys.js, core/cmd.js — and the project docs
+   (data-model.md, engine.md, pairs.md, ui.md). Nothing here is invented.
 
    The page is built once, lazily, on first mount: navPages() is only complete
    after main.js has registered every module. */
 
 import { $, el, isReducedMotion } from "../core/dom.js";
 import { navPages } from "../core/router.js";
-import * as cmd from "../core/cmd.js";
+import { NAVLABEL, SCOPE } from "../core/keys.js";
 
 const LINE_SCROLL = 48;         // arrow key scroll step, three text lines
 const PAGE_SCROLL = 0.9;        // PgUp/PgDn move most of a viewport
+// Autorepeat is the point of a scroll key and a hazard on anything else, so
+// the repeat guard the destructive pages carry is spelled out here too, with
+// scrolling as the explicit exception rather than an unexamined omission.
+const SCROLLABLE = new Set(["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End"]);
 
 
 // ---------- what each screen is, and what its columns mean ----------
@@ -38,7 +46,8 @@ const SCREENS = {
       {
         name: "MARKET LIST",
         cols: [
-          ["#", "row number; rows 1-9 carry a 1-9 quick-select shortcut, shown in amber"],
+          ["#", "row number; rows 1-9 carry a 1-9 quick-select shortcut, shown in amber. It "
+            + "fires while the list has focus, not while you are typing at the ARB> line"],
           ["VEN", "K = Kalshi (streamed), PM = Polymarket US (REST-polled)"],
           ["TICKER", "the venue's own market identifier; hover for title and 24h volume"],
           ["BID", "best YES bid, in dollars per contract"],
@@ -221,9 +230,13 @@ const SCREENS = {
 const FRAME = [
   ["STATUS BAR", "connection state, the run id (copy it whole — `arb replay` needs all of it), "
     + "each venue's state, whether this run is recording, and the UTC and ET clocks"],
-  ["NAV", "one tab per page; the small digit is its Alt shortcut"],
-  ["ARB>", "the command line. Any printable key you press anywhere lands here"],
-  ["KEYS STRIP", "the always-visible reminder at the bottom of the frame"],
+  ["NAV", "one tab per page; the small digit is its " + NAVLABEL + " shortcut"],
+  ["ARB>", "the command line, and the keyboard's home position. Any printable key you press "
+    + "lands here unless you have deliberately moved focus into a list or a text box. In a "
+    + "list it turns into a reversed band naming the keys that are live there"],
+  ["KEYS STRIP", "the always-visible reminder at the bottom of the frame. The chip on its "
+    + "left names the region that currently owns your keys: ARB> COMMAND, LIST KEYS or "
+    + "TEXT FIELD"],
   ["SELECT TO COPY", "drag across any rows and they are copied as tab-separated values, one "
     + "row per line; a selection inside one cell copies exactly what was highlighted"],
 ];
@@ -244,33 +257,77 @@ const COMMANDS = [
   ["<GO>", "a trailing <GO> or GO is stripped before the command runs", "KXPRES <GO>"],
 ];
 
+// ---------- the scope model (core/keys.js) ----------
+//
+// This is the part of the terminal most worth getting right in writing: which
+// region owns the key you just pressed. It is described here in the same three
+// names the keys strip prints, so the page and the documentation agree.
+
+const SCOPES = [
+  ["ARB>  (COMMAND)", "nothing else has focus. Every printable key goes to the command line — "
+    + "this is the home position, where every page starts and where ESC always brings you "
+    + "back. No page action key fires here, so typing a ticker can never trip one."],
+  ["LIST", "focus is inside a page's row list. The list draws a focus ring and the ARB> line "
+    + "becomes a reversed band naming the keys that are live. A page's single-letter actions "
+    + "— PAIRS' Y, N and U — work only here. A letter the page does not claim leaves the list "
+    + "and types itself into ARB>, so nothing you type is silently swallowed."],
+  ["TEXT", "focus is in a filter or search box. It owns every key it is sent. ESC clears it; "
+    + "a second ESC leaves it for ARB>."],
+];
+
+// The Escape ladder, first match wins. One key, one meaning: step back out of
+// whatever is innermost.
+const ESC_LADDER = [
+  ["1 · TEXT, not empty", "clears the box and stays in it"],
+  ["2 · TEXT, empty", "back to ARB>"],
+  ["3 · LIST", "back to ARB>, disarming any armed bulk decision on the way out"],
+  ["4 · ARB>, command typed", "throws the half-typed command away"],
+  ["5 · ARB>, nothing typed", "leaves the page for MONITOR"],
+];
+
 // ---------- global keys (core/keys.js) ----------
+
+/** True on macOS, where the page chord is Control rather than Alt. Derived
+    from the one constant rather than sniffing the platform a second time. */
+function isMac() {
+  return NAVLABEL === "CTRL";
+}
 
 function globalKeys() {
   const n = navPages().length;
+  const nav = NAVLABEL;
   return [
-    ["any character", "types into the ARB> line, uppercased (48 characters max)"],
-    ["⏎", "empty command line: open DES for the selection. Otherwise: run the command"],
+    ["any character", "types into the ARB> line, uppercased (48 characters max), unless a text "
+      + "box or a list has focus. Once the line is non-empty every key keeps going to it even "
+      + "if focus moves into a list, so a word typed across a focus change stays one word"],
+    ["⏎", "runs the typed command. With an empty command line: opens DES for the selection"],
     ["⌫", "delete the last character of the command"],
-    ["ESC", "clear a half-typed command; if there is none, leave the page for MONITOR"],
-    ["↑ ↓", "move the market selection (a page may use these for its own list)"],
-    ["1 - 9", "quick-select that row — monitor page only, and only with an empty command line"],
-    ["ALT+1 - ALT+" + n, "jump straight to the nth page in the nav"],
-    ["ALT+[  ALT+]", "previous / next page, wrapping"],
-    ["ALT+← ALT+→", "browser history back / forward"],
+    ["ESC", "steps back one level — see THE ESC LADDER above"],
+    ["↑ ↓", "at ARB>: moves focus into the page's list, leaving the selection where it is, so "
+      + "the first row is the next candidate. Inside a list: moves the selection. On DES, which "
+      + "has no list: pages to the previous / next market"],
+    ["TAB", "into this page's own regions — its filter box, then its list. TAB off either end "
+      + "returns to ARB>"],
+    ["/", "inside a list: focuses that page's filter box. At ARB> it is just a character"],
+    [nav + "+1 - " + nav + "+" + n, "jump straight to the nth page in the nav"],
+    [nav + "+[  " + nav + "+]", "previous / next page, wrapping"],
+    [isMac() ? "⌘[  ⌘]" : "ALT+←  ALT+→", "browser history back / forward — the browser's own "
+      + "binding, deliberately left unbound here so it cannot be shadowed"],
     ["⌘A / CTRL+A", "select the whole screen and copy it"],
   ];
 }
 
 // Keys this page adds. Kept in one place so the footer strip below cannot
-// disagree with the table above it.
+// disagree with the table above it. There is no "/" here: this page has no
+// list region, so "/" at ARB> is a character like any other and TAB is the
+// route to the filter box.
 const HELP_KEYS = [
   ["↑ ↓", "scroll this page"],
   ["PGUP PGDN", "scroll by a screen"],
   ["HOME END", "jump to the top / bottom"],
-  ["/", "focus the filter box (with an empty command line)"],
+  ["TAB", "focus the filter box"],
 ];
-const HELP_FOOT = "↑↓ SCROLL · PGUP/PGDN · HOME/END · / FILTER · ESC CLOSE";
+const HELP_FOOT = "↑↓ SCROLL · PGUP/PGDN · HOME/END · TAB FILTER · ESC MONITOR";
 
 // ---------- glossary (docs/data-model.md, engine.md, pairs.md, ui.md) ----------
 
@@ -466,15 +523,20 @@ function buildStart() {
     + "Polymarket US, measure what the gap is worth after fees, and — on the PAPER screen — "
     + "simulate taking it. It measures and simulates. It does not trade.");
   addLead("start",
-    "Everything is keyboard-first. Type anywhere and it goes to the ARB> line; press Enter to "
-    + "run it. ALT and a nav number jumps between pages, Esc comes back to MONITOR, and every "
-    + "page is a real URL you can bookmark or reload.");
+    "Everything is keyboard-first, and the keyboard has one home: the ARB> line. Type anywhere "
+    + "and it goes there; press Enter to run it. " + NAVLABEL + " and a nav number jumps "
+    + "between pages, Esc steps back out of wherever you are and eventually to MONITOR, and "
+    + "every page is a real URL you can bookmark or reload.");
+  addLead("start",
+    "A page's own single-letter keys — PAIRS' Y, N and U — never fire from the ARB> line. You "
+    + "reach them by moving focus into that page's list with ↑ or ↓ first, and the list says so "
+    + "while you are there. Typing the word RUN at ARB> types RUN.");
   addSub("start", "THE FRAME");
   for (const [k, v] of FRAME) addRow("start", k, v);
   addSub("start", "PAGES");
   for (const p of allPages()) {
     const nth = navPages().findIndex((n) => n.id === p.id);
-    const where = p.path + (nth >= 0 ? "  ·  ALT+" + (nth + 1) : "  ·  not in the nav");
+    const where = p.path + (nth >= 0 ? "  ·  " + NAVLABEL + "+" + (nth + 1) : "  ·  not in the nav");
     addRow("start", p.title, where, "help-pathrow");
   }
 }
@@ -503,16 +565,26 @@ function buildScreens() {
 
 function buildKeys() {
   addLead("keys",
-    "Keys are ignored while a text box has focus — the monitor's filter and this page's "
-    + "filter own every key while you are in them. A page gets first refusal on a key; "
-    + "anything it does not claim falls through to the global bindings below.");
+    "One rule decides every key: the focused region owns it. Focus starts and ends at the ARB> "
+    + "line on every page, so a bare letter is always typing unless you have deliberately moved "
+    + "into a list that visibly says otherwise. Three regions can hold the keyboard, and the "
+    + "chip at the left of the keys strip always names the one that has it.");
+  addSub("keys", "WHERE THE KEYS GO");
+  for (const [k, v] of SCOPES) addRow("keys", k, v);
+  addLead("keys",
+    "This is not a preference. On this terminal a single letter can write to the database — "
+    + "on PAIRS, N rejects a pair — so a letter is only ever an action when the list has focus, "
+    + "and never at the command line.");
+  addSub("keys", "THE ESC LADDER");
+  for (const [k, v] of ESC_LADDER) addRow("keys", k, v);
   addSub("keys", "GLOBAL");
   for (const [k, v] of globalKeys()) addRow("keys", k, v);
-  addSub("keys", "MONITOR");
-  addRow("keys", "↑ ↓", "move through the filtered, sorted list you can actually see");
-  addRow("keys", "1 - 9", "select that row, with an empty command line");
-  addRow("keys", "click", "select · double-click opens DES");
+  addSub("keys", "MOUSE");
+  addRow("keys", "click a row", "selects it — and leaves the keyboard at ARB>, so a click near "
+    + "a list cannot arm that list's letters");
+  addRow("keys", "double-click a row", "opens DES for it");
   addRow("keys", "column header", "sort by that column; click it again to reverse");
+  addRow("keys", "drag across rows", "copies them as tab-separated values, one row per line");
   addSub("keys", "HELP");
   for (const [k, v] of HELP_KEYS) addRow("keys", k, v);
   // Everything below is read out of the pages themselves, on every mount.
@@ -534,7 +606,10 @@ function refreshPageKeys() {
   dynTarget = pageKeysEl;
   try {
     for (const p of allPages()) {
-      if (p.id === "monitor" || p.id === "help") continue;
+      // HELP alone is excluded: its keys are the hardcoded block above, and
+      // reading its own footer back would print them twice. MONITOR is in —
+      // it has a footer of its own now (#mon-foot).
+      if (p.id === "help") continue;
       const fk = footKeys(p.root);
       if (!fk.length) continue;
       addSub("keys", p.title);
@@ -598,7 +673,7 @@ function build() {
   qEl = el("input", "help-q");
   qEl.id = "help-q";
   qEl.type = "text";
-  qEl.placeholder = "FILTER  ( / )";
+  qEl.placeholder = "FILTER  ( TAB )";
   qEl.autocomplete = "off";
   qEl.spellcheck = false;
   qEl.setAttribute("aria-label", "Filter help text");
@@ -652,15 +727,11 @@ function build() {
   buildSafety();
 
   qEl.addEventListener("input", applyFilter);
-  qEl.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();              // clear the box, do not leave the page
-      if (qEl.value) { qEl.value = ""; applyFilter(); } else qEl.blur();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      qEl.blur();                       // hand the keyboard back to the ARB> line
-    }
-  });
+  // No local Escape/Enter handler any more. The global ladder in core/keys.js
+  // already does exactly this and does it better: Escape on a filled box clears
+  // it (and dispatches `input`, so applyFilter still runs) and stays; Escape on
+  // an empty one returns the keyboard to the ARB> line, as does Enter. The old
+  // handler blurred to <body> instead, which is a scope nobody names.
   mainEl.addEventListener("scroll", onScroll, { passive: true });
   applyFilter();
 }
@@ -787,8 +858,20 @@ export default {
     build();
   },
 
-  onKey(e) {
+  // TAB from ARB> lands in the filter box; TAB again returns to ARB>. This
+  // page declares no `listRegion` — it has no row list, only a scrolling
+  // document — so the arrows are never diverted and reach onKey below.
+  regions: ["help-q"],
+
+  // Every key this page owns is a scroll, which is free in any scope. The old
+  // `cmd.buffer() === ""` guard on "/" is gone: it was structurally incapable
+  // of protecting the FIRST character typed, which is exactly the character
+  // that used to fire a page action. The command line now takes printables
+  // before any page is consulted, so "/" simply types.
+  onKey(e, scope) {
+    void scope;
     if (!mainEl) return false;
+    if (e.repeat && !SCROLLABLE.has(e.key)) return false;
     const k = e.key;
     if (k === "ArrowDown" || k === "ArrowUp") {
       mainEl.scrollTop += k === "ArrowDown" ? LINE_SCROLL : -LINE_SCROLL;
@@ -801,13 +884,20 @@ export default {
     }
     if (k === "Home") { mainEl.scrollTop = 0; return true; }
     if (k === "End") { mainEl.scrollTop = mainEl.scrollHeight; return true; }
-    // "/" is a printable character, so it would otherwise land in the command
-    // buffer. Claim it only when that buffer is empty.
-    if (k === "/" && cmd.buffer() === "") {
-      qEl.focus();
-      qEl.select();
-      return true;
-    }
     return false;
+  },
+
+  // The core pins a mode chip left and appends its own globals AFTER these,
+  // and `.keys` is one clipped nowrap line — so the page's own entries are the
+  // ones that survive a narrow window. ↑↓ is restated here on purpose: the
+  // core's generic entry reads "↑↓ SELECT", and on this page the arrows scroll
+  // the document instead. Three entries, no more.
+  keyHints(scope) {
+    if (scope === SCOPE.TEXT) return [];
+    return [
+      { k: "↑↓", d: "SCROLL" },
+      { k: "PGUP/PGDN", d: "SCREEN" },
+      { k: "TAB", d: "FILTER" },
+    ];
   },
 };

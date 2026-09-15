@@ -11,12 +11,18 @@
        side, and the rows that clear the threshold are marked, so "is there
        anything to act on" is one glance, not a scan. The threshold is the
        paper trader's own only when a paper trader is actually running;
-       otherwise it is labelled as the (unenforced) default it is. */
+       otherwise it is labelled as the (unenforced) default it is.
+
+   Keyboard: the focused region owns every key (.context/keyboard-model.md).
+   This page declares `arb-rows` as its list and `arb-min` as its text region,
+   and answers only to arrows and ENTER — no letter is a hotkey here, in any
+   scope, so typing PAIRS or a ticker always reaches the ARB> line. */
 
 import { $, el, titled, setText } from "../core/dom.js";
 import { state, schedule, select } from "../core/state.js";
 import { navigate } from "../core/router.js";
 import { onMessage } from "../core/ws.js";
+import { SCOPE, focusCommand } from "../core/keys.js";
 import * as cmd from "../core/cmd.js";
 import { nf, fmtCents, fmtQty, fmtSignedCents, fmtDollarsFromTicks } from "../core/format.js";
 
@@ -190,6 +196,27 @@ function buildControls() {
   syncControls();
 }
 
+// The keys this page answers to, in one place. help.js reads the footer out of
+// the page root to build its table, so this string IS the page's documentation:
+// ↑↓ from the ARB> line focuses the list (core/keys.js), ↑↓ inside it moves the
+// cursor, and ENTER only opens the Kalshi leg while nothing is typed.
+const FOOT = "↑↓ LIST · ⏎ DES (KALSHI LEG) · TAB MIN NET"
+  + " · ESC ARB> · MEASUREMENT ONLY — NO ORDERS";
+
+/** One source for the footer: adopt the shell's element if index.html still
+    ships one, otherwise create it. Two copies of a key list is how the strip
+    and the page drift apart. */
+function buildFoot() {
+  const page = $("arbpage");
+  if (!page) return;
+  const foot = page.querySelector(".des-foot") || el("div", "des-foot");
+  foot.textContent = FOOT;
+  if (!foot.parentNode) {
+    const right = page.querySelector(".arb-right");
+    if (right) right.append(foot);
+  }
+}
+
 function applyView() {
   saveView();
   schedule("arb");
@@ -241,20 +268,15 @@ function bindControls() {
     syncControls(true);
     applyView();
   });
-  min.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      if (min.value) { min.value = ""; setMin(null); } else min.blur();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      min.blur();                 // hand the keyboard back to the ARB> line
-    }
-  });
+  // No keydown handler: core/keys.js owns TEXT scope. Escape clears the box
+  // (the synthetic `input` event above re-applies the view) and a second one
+  // hands the keyboard back to ARB>; Enter and ↓ step into the list. A local
+  // copy of that ladder is how a filter box drifts from every other one.
   for (const b of document.querySelectorAll("#arb-presets .abtn")) {
     b.addEventListener("click", (e) => {
       const p = b.dataset.preset;
       setMin(p === "all" ? null : p === "edge" ? 1 : paperMin);
-      if (e.detail > 0) b.blur();
+      if (e.detail > 0) focusCommand();   // pointer click: focus ends at ARB>
     });
   }
   for (const b of document.querySelectorAll("#arb-sorts .abtn")) {
@@ -267,7 +289,7 @@ function bindControls() {
       }
       syncControls();
       applyView();
-      if (e.detail > 0) b.blur();
+      if (e.detail > 0) focusCommand();   // pointer click: focus ends at ARB>
     });
   }
 }
@@ -463,6 +485,7 @@ function moveArb(d) {
 
 loadView();
 buildControls();
+buildFoot();
 
 // Registered at module load, NOT in mount(): the snapshot has to stay current
 // while you are on another page, or arriving here shows a stale table.
@@ -477,6 +500,12 @@ export default {
   title: "ARB",
   nav: true,
   root: "arbpage",
+
+  // Tab from the ARB> line walks these in order; "/" inside the list opens the
+  // first text one. The list is where the cursor keys act, so ↑/↓ from the
+  // command line focuses it instead of moving anything.
+  regions: ["arb-min", "arb-rows"],
+  listRegion: "arb-rows",
 
   mount() {
     mounted = true;
@@ -498,14 +527,32 @@ export default {
     renderArb();
   },
 
-  onKey(e) {
+  /** The keys the list answers to, published for the strip and the ARB> band.
+      Only LIST scope has any: from the command line every letter is typing. */
+  keyHints(scope) {
+    if (scope !== SCOPE.LIST) return [];
+    return [
+      { k: "↑↓", d: "SELECT" },
+      { k: "⏎", d: "DES" },
+      { k: "/", d: "MIN NET" },
+    ];
+  },
+
+  // This page owns no letter keys, so there is nothing here that needs a
+  // `scope === SCOPE.LIST` guard: arrows are a view move (G0) and ENTER is
+  // navigation (G1), both free in any scope core/keys.js hands them over in.
+  // In practice arrows arrive in LIST scope — from COMMAND the core focuses
+  // the list first, without moving the cursor, so row 0 is the next candidate.
+  onKey(e, scope) {
     const k = e.key;
     if (k === "ArrowUp" || k === "ArrowDown") {
       moveArb(k === "ArrowUp" ? -1 : 1);
       return true;
     }
     // Enter is the command line's whenever something is typed; empty buffer
-    // means "open the Kalshi leg", exactly as the footer says.
+    // means "open the Kalshi leg", exactly as the footer says. The core only
+    // consults a page for Enter once the buffer is empty; this second check is
+    // the one that survives if that ever changes.
     if (k === "Enter" && cmd.buffer().trim() === "") {
       const q = visibleQuotes()[state.arb.idx];
       if (!q) return false;

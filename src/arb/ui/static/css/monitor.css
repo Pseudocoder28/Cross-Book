@@ -72,10 +72,16 @@
 
 /* ---------- rows ---------- */
 
-/* Every row is numbered; only the first nine carry a 1-9 shortcut, and the
-   amber weight is what says so. */
+/* Every row is numbered; only the first nine carry a 1-9 shortcut. Those
+   digits are LIST-scope keys — at the ARB> line a digit is typing — so the
+   number is merely brighter while the list is unfocused and goes full amber
+   only when the list owns the keyboard and the shortcut is actually armed.
+   :focus, not :focus-visible: the focus arrives programmatically (an arrow
+   from the ARB> line) and the heuristic must not hide this one. */
 .mon-idx { color: var(--dim); font-size: 10px; text-align: right; padding-right: 5px; }
-.mon-idx.qs { color: var(--amber); font-weight: 700; }
+.mon-idx.qs { color: var(--ink2); font-weight: 400; }
+.mon-rows:focus .mon-idx.qs,
+.mon-rows:focus-visible .mon-idx.qs { color: var(--amber); font-weight: 700; }
 
 .mon-ven { text-align: left; padding-right: 4px; }
 

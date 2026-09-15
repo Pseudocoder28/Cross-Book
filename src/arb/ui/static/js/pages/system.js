@@ -16,6 +16,7 @@
 import { $, el, setVal } from "../core/dom.js";
 import { state, schedule, registerRenderer } from "../core/state.js";
 import { nf, fmtRate, fmtUptime, fmtAge, fmtAgo, fmtMs } from "../core/format.js";
+import { chordLabel } from "../core/keys.js";
 
 const SKEW_WARN_MS = 25;        // matches monitor.js and arb doctor's ntp check
 const P95_HOT_MS = 250;         // matches monitor.js
@@ -24,6 +25,14 @@ const TICK_MS = 1000;           // "checked Ns ago" ticks
 
 let mounted = false;
 let tickTimer = 0;
+let footEl = null;
+
+// NAVLABEL is CTRL on macOS (Option is the insert-special-character modifier
+// there, so Alt stays live but is never labelled) and ALT everywhere else.
+function footText() {
+  return "ESC MONITOR · " + chordLabel() + " PAGE · READ-ONLY DIAGNOSTICS "
+    + "· LIVE FROM THE 1S STATS FRAME AND /api/status";
+}
 
 // ---------- markup (module scope: type=module defers, the DOM is parsed) ----------
 
@@ -186,8 +195,11 @@ function build() {
 
   cards.append(engine, rec, db, clock, kal, poly, obs);
   body.append(banner, cards);
-  page.append(head, body, el("div", "des-foot",
-    "ESC MONITOR · ALT+1-6 PAGE · READ-ONLY DIAGNOSTICS · LIVE FROM THE 1S STATS FRAME AND /api/status"));
+  // The chord label comes from keys.js, never hand-typed — that is how a
+  // footer starts lying. build() runs before main.js has registered the pages,
+  // so the digit range is not countable yet; mount() rewrites it once it is.
+  footEl = el("div", "des-foot", footText());
+  page.append(head, body, footEl);
   $("system-page").append(page);
 
   // Static values that never change once the DOM exists.
@@ -390,6 +402,9 @@ export default {
 
   mount() {
     mounted = true;
+    // Now that the router has registered every page, the chord label can name
+    // the real digit range instead of the placeholder build() could compute.
+    if (footEl) footEl.textContent = footText();
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
     schedule("system", "poly");
   },
@@ -407,7 +422,13 @@ export default {
     renderShell();
   },
 
-  onKey() {
+  // No letter bindings live here: this page is read-only diagnostics with no
+  // row list, so it declares no `listRegion` and the core never consults it for
+  // a printable. The scope argument is accepted for the contract's sake and
+  // deliberately unused — there is nothing on this page to guard.
+  onKey(e, scope) {
+    void e;
+    void scope;
     return false;
   },
 };

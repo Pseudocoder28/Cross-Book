@@ -81,6 +81,20 @@ function markNav(entry) {
   }
 }
 
+/* Every page mounts in COMMAND scope with focus on the ARB> line — but only
+   when the keyboard has nowhere better to be. It must NOT be unconditional:
+   pages/market.js re-navigates with {replace:true} on every arrow press and
+   show() does not early-return when the :id param changed, so an unconditional
+   focus() would fire on every single DES arrow and fight whatever the user had
+   focused. Focus only when nothing holds it, or when what held it is the root
+   being unmounted. */
+function restoreFocus(hadFocusInPrev) {
+  const a = document.activeElement;
+  if (!hadFocusInPrev && a && a !== document.body) return;
+  const c = document.getElementById("cmd");
+  if (c) c.focus({ preventScroll: true });
+}
+
 function show(entry, params) {
   if (active === entry && sameParams(activeParams, params)) {
     activeParams = params;
@@ -91,15 +105,22 @@ function show(entry, params) {
   active = entry;
   activeParams = params;
   markNav(entry);
+  // Read this BEFORE hiding: hiding the element that contains activeElement
+  // makes the browser drop focus to <body>, which would erase the answer.
+  let hadFocusInPrev = false;
   if (prev) {
-    prev.page.unmount();
     const prevRoot = document.getElementById(prev.page.root);
+    hadFocusInPrev = !!(prevRoot && prevRoot.contains(document.activeElement));
+    prev.page.unmount();
     if (prevRoot) prevRoot.hidden = true;
   }
   const root = document.getElementById(entry.page.root);
   if (root) root.hidden = false;
   document.title = "ARB · " + entry.page.title;
   entry.page.mount(params);
+  restoreFocus(hadFocusInPrev);
+  // core/keys.js listens: the keys strip names the live page and its scope.
+  document.dispatchEvent(new CustomEvent("arb:navigate", { detail: { id: entry.page.id } }));
   schedule(entry.page.id);
 }
 
