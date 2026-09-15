@@ -40,6 +40,10 @@ class AppConfig(BaseSettings):
     # --- Postgres (127.0.0.1 only; SSH tunnel on the VM) ---
     database_url: str = "postgresql+asyncpg://arb:arb@127.0.0.1:5432/arb"
 
+    # --- Clock (SNTP server doctor measures the local clock against; the
+    # venues' HTTP Date header only has 1 s resolution) ---
+    ntp_server: str = "pool.ntp.org"
+
     # --- Books ---
     book_staleness_limit_ms: int = 5_000
 

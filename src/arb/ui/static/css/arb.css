@@ -1,0 +1,104 @@
+/* css/arb.css — styles that belong to the ARB page only.
+   Loaded after style.css, so equal-specificity rules here win. */
+
+/* ---------- filter / sort strip ---------- */
+
+.arb-ctl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 6px 0 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hair);
+}
+
+.arb-ctl-lbl {
+  flex: none;
+  color: var(--ink2);
+  font-size: 9px; font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.arb-ctl-gap { flex: 1; min-width: 6px; }
+
+.arb-min {
+  flex: none;
+  width: 56px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  color: var(--amber);
+  font: 700 10px/14px var(--mono);
+  letter-spacing: 0.06em;
+  text-align: right;
+}
+.arb-min::placeholder { color: var(--dim); font-weight: 700; letter-spacing: 0.08em; }
+.arb-min:focus { outline: none; border-color: var(--amber); }
+.arb-min:focus-visible { outline: 1px solid var(--amber); outline-offset: -1px; }
+
+.arb-btns { display: flex; gap: 1px; flex: none; }
+
+.abtn {
+  height: 16px;
+  min-width: 22px;
+  padding: 0 5px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  color: var(--ink2);
+  font: 700 9px/14px var(--mono);
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.abtn:hover { color: var(--ink); }
+.abtn:focus-visible { outline: 1px solid var(--amber); outline-offset: -1px; }
+.abtn[aria-pressed="true"] { background: var(--raised); border-color: var(--amber); color: var(--amber); }
+
+/* ---------- summary line ---------- */
+
+/* What the table is doing right now, so nothing has to be scanned for it:
+   pairs tracked, how many show a positive net, how many clear the paper
+   trader's threshold, and the best net/contract on the book. */
+.arb-sum {
+  flex: none;
+  height: 18px; line-height: 18px;
+  padding: 0 12px;
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-bottom: 1px solid var(--hair);
+}
+.arb-sum.has-act { color: var(--bid); }
+
+/* ---------- rows ---------- */
+
+/* Rows carry .mon-row so main.js's select-to-copy sees them as tabular. That
+   class also brings a 2px transparent left border the arb grid never had. */
+.arb-row.mon-row { border-left: 0; }
+
+/* "K:QUIET P:QUIET" is wider than the 64px books column, and it inherited the
+   row's 24px line-height, so the wrapped second line printed on top of the
+   next row. Two 11px lines fit inside the row instead. */
+.arb-row .ar-books { font-size: 9px; line-height: 11px; align-self: center; }
+
+/* Actionable: an edge the paper trader's own min-net threshold would take.
+   Three signals, only one of them colour — tint, a green net, and the "▸"
+   on the direction — so the distinction survives a monochrome screen. */
+.arb-row.act { background: rgba(47, 224, 160, 0.07); box-shadow: inset 2px 0 0 var(--bid); }
+.arb-row.act .ar-net { color: var(--bid); font-weight: 700; }
+.arb-row.act .ar-dir { color: var(--bid); }
+
+/* Below that threshold the net is information, not a signal: style.css greens
+   the net of every row that merely has size, including negative ones. */
+.arb-row.pos:not(.act) .ar-net { color: var(--ink); }
+
+/* The selection thread stays amber wherever it lands. */
+.arb-row.act.sel { background: var(--raised); box-shadow: inset 2px 0 0 var(--amber); }
+
+.arb-none { padding: 4px 12px; }

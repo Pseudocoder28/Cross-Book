@@ -55,12 +55,12 @@ body {
 .terminal {
   display: grid;
   grid-template:
-    "status  status status" 24px
-    "cmd     cmd    cmd"    24px
-    "monitor depth  tape"   minmax(0, 1fr)
-    "system  system poly"   168px
-    "keys    keys   keys"   24px
-    / 340px  minmax(0, 1fr) 360px;
+    "status" 24px
+    "nav"    22px
+    "cmd"    24px
+    "page"   minmax(0, 1fr)
+    "keys"   24px
+    / minmax(0, 1fr);
   gap: 1px;
   background: var(--hair);
   height: 100vh;
@@ -69,13 +69,79 @@ body {
 }
 
 #status-bar { grid-area: status; }
+#nav        { grid-area: nav; }
 #cmd        { grid-area: cmd; }
+#keys       { grid-area: keys; }
+
+/* ---------- pages: one route per screen, one root element each ----------
+   Every page root shares the single "page" grid area; the router toggles
+   [hidden]. The WebSocket is never touched by a navigation. */
+
+.page {
+  grid-area: page;
+  background: var(--panel);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.page-stub {
+  padding: 14px 16px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+}
+
+/* the monitor page is the old default workspace: markets, ladder, tape */
+.monitor-page {
+  display: grid;
+  grid-template: "monitor depth tape" minmax(0, 1fr) / 360px minmax(0, 1fr) 360px;
+  gap: 1px;
+  background: var(--hair);
+}
+
 #monitor    { grid-area: monitor; }
 #depth      { grid-area: depth; }
 #tape-col   { grid-area: tape; }
-#system     { grid-area: system; }
-#poly       { grid-area: poly; }
-#keys       { grid-area: keys; }
+
+/* ---------- nav strip ---------- */
+
+.nav {
+  background: var(--raised);
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  padding: 0 8px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; line-height: 22px;
+  letter-spacing: 0.10em;
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  transition: color 160ms var(--ease), background-color 160ms var(--ease);
+}
+.nav-tab:hover { color: var(--ink); background: var(--panel); }
+.nav-tab:focus-visible { outline: 1px solid var(--amber); outline-offset: -2px; }
+.nav-tab.active { color: var(--amber); background: var(--bg); border-bottom-color: var(--amber); }
+
+.nav-key {
+  color: var(--dim);
+  font-size: 9px; font-weight: 700;
+}
+.nav-tab.active .nav-key { color: var(--amber); }
+
+.nav-hint {
+  margin-left: auto;
+  align-self: center;
+  color: var(--dim);
+  font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
+}
 
 /* ---------- panels ---------- */
 
@@ -115,6 +181,9 @@ body {
   font-size: 10px; font-weight: 700; line-height: 16px;
   letter-spacing: 0.08em;
   white-space: nowrap;
+  /* Some heads carry a message, not just a count (PAIRS arms a bulk decide
+     here). Clip it rather than let it grow into the title on a narrow pane. */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* ---------- status bar ---------- */
@@ -186,7 +255,7 @@ body {
 
 .mon-cols {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) 46px 46px 46px 38px;
+  grid-template-columns: 20px 24px minmax(0, 1fr) 46px 46px 46px 38px;
   padding: 0 8px;
   height: 16px; line-height: 16px;
   color: var(--ink2);
@@ -198,7 +267,7 @@ body {
 
 .mon-row {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) 46px 46px 46px 38px;
+  grid-template-columns: 20px 24px minmax(0, 1fr) 46px 46px 46px 38px;
   height: 16px; line-height: 16px;
   padding: 0 8px 0 6px;
   border-left: 2px solid transparent;
@@ -441,14 +510,12 @@ body.has-sel #depth { border-left-color: var(--amber); }
 .keys b { color: var(--ink); font-weight: 700; }
 .keys-note { margin-left: auto; }
 
-/* ---------- venue badges on monitor rows ---------- */
+/* ---------- venue column on monitor rows ----------
+   A real cell, not a ::before: select-to-copy reads textContent, and a
+   pseudo-element is invisible to it. */
 
-.mon-row .mon-ticker::before {
-  content: "K";
-  display: inline-block; width: 12px;
-  color: var(--ink2); font-size: 9px; font-weight: 700;
-}
-.mon-row.v-pm .mon-ticker::before { content: "P"; color: var(--blue); }
+.mon-ven { color: var(--ink2); font-size: 9px; font-weight: 700; letter-spacing: 0.04em; }
+.mon-row.v-pm .mon-ven { color: var(--blue); }
 .st-polled { color: var(--amber); }
 
 /* ---------- DES: market description page ----------
@@ -456,11 +523,6 @@ body.has-sel #depth { border-left-color: var(--amber); }
    line and the keys strip, leaving the terminal frame in place. */
 
 .des {
-  position: fixed;
-  top: 50px;                /* below status (24) + seam + command line (24) */
-  left: 0; right: 0;
-  bottom: 25px;             /* above the keys strip */
-  z-index: 30;
   background: var(--panel);
   border-top: 1px solid var(--amber);
   display: flex; flex-direction: column;
@@ -510,9 +572,6 @@ body.has-sel #depth { border-left-color: var(--amber); }
 .des-right .kv .v.st-live { color: var(--bid); }
 .des-right .kv .v.st-off { color: var(--dim); }
 .des-foot { margin-top: 18px; color: var(--ink2); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; }
-
-body.des-open #monitor, body.des-open #depth, body.des-open #tape-col,
-body.des-open #system, body.des-open #poly { visibility: hidden; }
 
 /* ---------- PAIRS: cross-venue pair review ---------- */
 
@@ -678,3 +737,10 @@ body.des-open #system, body.des-open #poly { visibility: hidden; }
   }
   .cursor { opacity: 1; }
 }
+
+/* ---------- the hidden attribute outranks any author display rule ----------
+   `.kv { display: flex }` (and every other component display) would otherwise
+   beat the UA's `[hidden] { display: none }`, so a row marked hidden in the
+   markup would render anyway. Pages toggle `hidden`; this makes it mean it. */
+
+[hidden] { display: none !important; }

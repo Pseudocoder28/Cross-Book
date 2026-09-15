@@ -16,14 +16,46 @@ uv run arb doctor
 
 Checks, in order: `.env` presence, Kalshi/Polymarket US key provisioning
 (paths only — file contents are never read into a log or printed), venue
-reachability plus clock skew (via each venue's HTTP `Date` header vs. local
-time — both venues sign timestamps into requests, so skew matters), database
+reachability plus gross clock skew (via each venue's HTTP `Date` header vs.
+local time — both venues sign timestamps into requests, so skew matters), the
+local clock at millisecond resolution (`ntp clock`, below), database
 connectivity and Alembic migration state, and free disk space. Each check
 reports `ok` / `warn` / `fail`; the process exits non-zero only if any check
 `fail`s (missing keys are a `warn`, not a `fail` — the system can still
 record public REST/WS market data is fine without them for Kalshi's REST
 paths, though Kalshi's WebSocket always needs credentials — see
 [`venues/kalshi.md`](venues/kalshi.md)).
+
+### The `ntp clock` check
+
+The per-venue `Date`-header check has **1 second** resolution, so it can only
+catch skew gross enough to break request signing — it is blind to the tens of
+milliseconds that actually matter. `ntp clock` closes that gap: a real SNTP
+exchange ([`src/arb/clock.py`](../src/arb/clock.py), RFC 4330, stdlib sockets,
+no new dependency) against `NTP_SERVER` (default `pool.ntp.org`), four samples
+keeping the lowest-round-trip one.
+
+It reports the offset in this repo's convention — **local minus server, so
+negative means the local clock is running behind** — matching the UI's
+`clock_skew_ms` so the same reality reads the same sign in both places. Note
+this is the *negation* of RFC 5905's `offset`, which is the correction to
+apply to the local clock.
+
+It `warn`s when either:
+
+- `|offset| > 25 ms`, the same `SKEW_WARN_MS` the UI uses to flip its
+  `CLOCK SKEW · TRUST RTT/2` banner, or
+- the local clock lags by more than `5.5 ms` — the floor of Kalshi's measured
+  WS push delay ([`venue-notes.md`](venue-notes.md)). Past that, one-way
+  latency readings go negative, which is the UI's *other* banner trigger.
+  Without this second rule doctor would report `ok` for a clock that is
+  already making every latency number in the terminal wrong.
+
+It never `fail`s (a skewed clock does not break read-only market data) and it
+degrades to `warn`, never an exception, when outbound UDP 123 is blocked —
+common in containers and on locked-down networks. The warn text carries the
+platform-appropriate remediation command. See
+[`ops.md`](ops.md#host-clock-discipline) for the runbook.
 
 Details: [`src/arb/doctor.py`](../src/arb/doctor.py).
 
@@ -60,7 +92,7 @@ Details: [`src/arb/record.py`](../src/arb/record.py).
 
 ```sh
 uv run arb ui [--tickers ... | --top N] [--poly-top N | --poly-slugs ...] \
-              [--pairs-top N] [--port 8080] [--no-record] \
+              [--pairs-top N] [--host H] [--port 8080] [--no-record] \
               [--paper] [--min-net-ticks 50] [--max-cts-per-pair 100] [--max-notional 1000]
 ```
 
@@ -78,13 +110,79 @@ wire protocol.
 | `--no-record` | off | don't write raw messages to Postgres |
 | `--poly-top` | 8 | Polymarket US markets to poll (0 disables) |
 | `--poly-slugs` | — | explicit slugs, overrides discovery |
-| `--pairs-top` | 10 | confirmed pairs (by score) to track on the ARB screen (0 disables) |
+| `--pairs-top` | 10 | confirmed pairs (by score) to track on the `/arb` screen (0 disables) |
 | `--paper` | off | simulate fills on measured edges (see [`engine.md`](engine.md#paper-trading)) |
 | `--min-net-ticks` | 50 | paper: minimum net edge per contract, in ticks, to take a trade |
 | `--max-cts-per-pair` | 100 | paper: maximum contracts held per pair |
 | `--max-notional` | 1000 | paper: maximum total cost across all pairs, in dollars |
 
-Details: [`src/arb/ui/server.py`](../src/arb/ui/server.py).
+### Every screen is a URL
+
+One process, one port, one WebSocket — but seven routes. Each one deep-links
+and survives a reload, and the browser's back/forward buttons work:
+
+| Path | Screen | Reached by |
+| --- | --- | --- |
+| `/` | MONITOR — market list, depth ladder, tape, latency | nav, `ALT+1`, `MON` |
+| `/arb` | cross-venue edge over tracked pairs | nav, `ALT+2`, `ARB` |
+| `/pairs` | pair review queue | nav, `ALT+3`, `PAIRS` |
+| `/paper` | simulated ledger; without `--paper` it shows stored history and says so | nav, `ALT+4`, `PAPER` |
+| `/system` | run, venue, engine, recorder, database and clock diagnostics | nav, `ALT+5`, `SYS` |
+| `/help` | keys, commands, how to read each screen, glossary | nav, `ALT+6`, `HELP` |
+| `/market/<market_id>` | DES — one market's rules, metadata and live book | `⏎` on a selection, or `DES` — not in the nav |
+
+Routing is client side, over the History API, on purpose: the session holds
+exactly **one** WebSocket, and serving a separate document per page would tear
+it down on every navigation, dropping the tape, the latency window and every
+book with it. The server therefore hands the same shell document to each of
+these paths. It enumerates them (`SPA_ROUTES` in
+[`server.py`](../src/arb/ui/server.py)) rather than using a catch-all, so
+`/api/*`, `/ws`, `/metrics` and `/static/*` keep their own handlers and an
+unknown path is still a 404 instead of a shell that hides a broken link.
+`market_id` is deliberately not validated server-side — a link to a market
+that has since rolled off the discovery list opens the page, and the browser
+reports the miss.
+
+### Keys and commands
+
+Typing anywhere goes to the `ARB>` line, except inside the monitor's filter
+box, which owns every key while it has focus — Alt shortcuts included, so
+`ALT+←` stays word-navigation in a text field. Keys that belong to one screen
+are printed in that screen's footer strip and collected on `/help`; these are
+the global ones.
+
+| Key | Effect |
+| --- | --- |
+| `ALT+1`…`ALT+6` | jump to that nav page |
+| `ALT+[` / `ALT+]` | previous / next page, wrapping |
+| `ALT+←` / `ALT+→` | browser history back / forward |
+| `↑` `↓` | move the selection on the current screen |
+| `1`–`9` | quick-select one of the first nine monitor rows (empty command line only) |
+| `⏎` | run the typed command; with an empty command line, the page's action on the current selection (DES on the monitor, the Kalshi leg on `/arb`) |
+| `ESC` | clear a half-typed command; with nothing to clear, return to the monitor |
+| `⌫` | edit the command line |
+
+Commands are typed at `ARB>` and run with `⏎`; a trailing `<GO>` or `GO` is
+stripped first (Bloomberg muscle memory, kept deliberately).
+
+| Command | Effect |
+| --- | --- |
+| `MON` / `MONITOR` | go to `/` |
+| `ARB`, `PAIRS`, `PAPER` | go to that screen |
+| `SYS` / `SYSTEM` | go to `/system` |
+| `HELP` / `?` | go to `/help` |
+| `BACK` | browser history back, one step |
+| `DES` | description page for the current selection (`NO MARKET SELECTED` if there is none) |
+| `<TICKER>` | select a market: exact ticker first, then prefix, then substring |
+| `<TICKER> DES` | select it and open its description page |
+
+`/help` is the in-app version of this table, and most of it is derived at
+render time from the router's page list and each page's own footer rather
+than hardcoded, so it cannot drift from the bindings.
+
+Details: [`src/arb/ui/server.py`](../src/arb/ui/server.py) for the backend,
+[`src/arb/ui/static/js/`](../src/arb/ui/static/js/) for the router, pages and
+command line.
 
 ## `arb replay`
 
@@ -194,7 +292,7 @@ uv run arb pairs reject 43
 ```
 
 Sets one pair's status by id. (Batch decisions and "undo back to proposed"
-are available in the terminal UI's `PAIRS` screen — see
+are available on the terminal UI's `/pairs` screen — see
 [`pairs.md`](pairs.md#human-review-in-the-terminal-ui) — but not yet as a
 CLI subcommand.)
 

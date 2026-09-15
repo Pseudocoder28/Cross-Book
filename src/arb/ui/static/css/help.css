@@ -1,0 +1,157 @@
+/* css/help.css — styles that belong to the HELP page only.
+   Loaded after style.css, so equal-specificity rules here win.
+
+   The page reuses the .des shell (amber top border, .des-head, .des-body
+   grid) so it reads as a sibling of DES / PAIRS / ARB / PAPER rather than a
+   document dropped into the terminal. Two departures from the house idiom,
+   both deliberate: the definition column is sentence case, because two
+   thousand words of caps is unreadable, and .kv becomes a two-column grid so
+   a definition can wrap instead of being clipped. Both rules are scoped to
+   #help-page. */
+
+.help-body {
+  grid-template-columns: 208px minmax(0, 1fr);
+}
+
+/* ---------- left rail: filter, jump list, key strip ---------- */
+
+.help-rail {
+  background: var(--panel);
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.help-q {
+  flex: none;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--bg);
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  color: var(--amber);
+  font: 700 10px/16px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.help-q::placeholder { color: var(--dim); font-weight: 700; letter-spacing: 0.08em; }
+.help-q:focus { outline: none; border-color: var(--amber); }
+.help-q:focus-visible { outline: 1px solid var(--amber); outline-offset: -1px; }
+
+.help-jump { display: flex; flex-direction: column; gap: 1px; }
+
+.help-jbtn {
+  height: 20px;
+  padding: 0 6px;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  color: var(--ink2);
+  font: 700 10px/20px var(--mono);
+  letter-spacing: 0.08em;
+  text-align: left;
+  cursor: pointer;
+  transition: color 160ms var(--ease), background-color 160ms var(--ease);
+}
+.help-jbtn:hover { color: var(--ink); background: var(--raised); }
+.help-jbtn:focus-visible { outline: 1px solid var(--amber); outline-offset: -1px; }
+.help-jbtn.on { color: var(--amber); border-left-color: var(--amber); background: var(--bg); }
+.help-jbtn.off { color: var(--dim); opacity: 0.45; }   /* filtered to nothing */
+
+.help-foot { margin-top: auto; padding-top: 10px; line-height: 15px; }
+.help-foot span { display: block; white-space: nowrap; }
+
+/* ---------- right pane: the text ---------- */
+
+.help-main {
+  position: relative;            /* offsetTop of a section is measured against this */
+  background: var(--panel);
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 18px 28px;          /* the sticky section head covers the top edge */
+  scroll-behavior: auto;
+}
+.help-main:focus-visible { outline: 1px solid var(--amber); outline-offset: -2px; }
+
+.help-sec + .help-sec { margin-top: 8px; }
+
+.help-h {
+  position: sticky;              /* the section you are reading stays named */
+  top: 0;
+  z-index: 1;
+  margin: 12px 0 8px;
+  padding: 10px 0 3px;
+  background: var(--panel);
+  color: var(--amber);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+}
+.help-sec:first-child .help-h { margin-top: 0; }
+
+.help-sub {
+  margin: 14px 0 5px;
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+}
+.help-screen-h {
+  margin-top: 20px;
+  color: var(--ink);
+  font-size: 11px;
+  border-bottom: 1px solid var(--hair);
+  padding-bottom: 3px;
+}
+.help-group-h { margin-top: 10px; color: var(--ink2); }
+
+.help-lead {
+  margin: 4px 0 8px;
+  max-width: 96ch;
+  color: var(--ink2);
+  font-size: 11px; line-height: 17px;
+}
+
+/* A term/definition line. It keeps the .kv class so select-to-copy still
+   rebuilds it as two tab-separated columns. */
+#help-page .kv.help-row {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 12px;
+  height: auto;
+  line-height: 17px;
+  align-items: baseline;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--hair);
+  max-width: 116ch;
+}
+#help-page .kv.help-row .k {
+  color: var(--amber);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  white-space: normal;           /* a key list like ALT+1 - ALT+6 may wrap */
+  word-break: break-word;
+}
+#help-page .kv.help-row .v {
+  color: var(--ink);
+  font-size: 11px;
+  white-space: normal;           /* definitions wrap; nothing here is clipped */
+}
+#help-page .kv.help-row.quiet-line .k,
+#help-page .kv.help-row.quiet-line .v { color: var(--dim); }
+#help-page .kv.help-row.help-pathrow .v { color: var(--ink2); }
+#help-page .kv.help-row.help-safety .k { color: var(--ask); }
+
+.help-eg {
+  display: block;
+  margin-top: 1px;
+  color: var(--ink2);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.help-empty {
+  padding: 12px 0;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+}

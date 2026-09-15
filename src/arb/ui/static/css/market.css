@@ -1,0 +1,105 @@
+/* css/market.css — DES (/market/:id) page-only styles.
+
+   Everything shared (.des, .des-head, .des-body, .kv, .sys-title, ...) lives
+   in style.css. This file is only the chrome the overlay never had: a way
+   back, a venue badge, a position counter, a copy affordance and the
+   UNKNOWN MARKET state a deep link can land on. */
+
+/* The head was two items pushed apart; it is now back · title · position ·
+   status, so lay it out left to right and keep the status pinned right. */
+#des .des-head { justify-content: flex-start; gap: 14px; }
+#des .des-head #des-stat { margin-left: auto; }
+
+.des-back {
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; line-height: 24px;
+  letter-spacing: 0.10em;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 160ms var(--ease);
+}
+.des-back:hover { color: var(--amber); }
+.des-back:focus-visible { outline: 1px solid var(--amber); outline-offset: -2px; }
+
+/* This page serves both venues; say which one, in the venue's own colour
+   (Polymarket US is blue on the monitor too). */
+.des-venue {
+  padding: 0 5px;
+  border: 1px solid var(--hair);
+  color: var(--ink2);
+  font-size: 9px; font-weight: 700; line-height: 14px;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
+}
+.des-venue.v-kalshi { color: var(--ink); border-color: #2a2a2a; }
+.des-venue.v-poly { color: var(--blue); border-color: #1d3247; }
+.des-venue.v-unknown { color: var(--dim); }
+
+.des-copy {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--hair);
+  color: var(--ink2);
+  font: 700 9px/14px var(--mono);
+  letter-spacing: 0.12em;
+  padding: 0 5px;
+  cursor: pointer;
+  transition: color 160ms var(--ease), border-color 160ms var(--ease);
+}
+.des-copy:hover { color: var(--amber); border-color: var(--amber); }
+.des-copy:focus-visible { outline: 1px solid var(--amber); outline-offset: 1px; }
+.des-copy[disabled] { color: var(--dim); cursor: default; }
+.des-copy[disabled]:hover { color: var(--dim); border-color: var(--hair); }
+
+/* Up/Down page through markets, so the head says where in the list you are. */
+.des-pos {
+  color: var(--dim);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+.des-foot-note {
+  margin-top: 3px;
+  color: var(--dim);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+/* The ID row wraps onto its own line when the anatomy strip runs out of
+   room; ids are long and must never be truncated (copy must stay exact). */
+#des .des-anatomy .v { word-break: break-all; }
+
+/* ---------- UNKNOWN MARKET ----------
+   A deep link to a market that has rolled off the discovery list is expected,
+   so it gets a named state rather than a column of em dashes. */
+
+.des-unknown { margin-bottom: 4px; }
+.des-unknown-title {
+  color: var(--amber);
+  font-size: 16px; line-height: 22px; font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.des-unknown-id {
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 12px; line-height: 18px;
+  word-break: break-all;
+}
+.des-unknown-hint {
+  margin-top: 10px;
+  color: var(--ink2);
+  font-size: 11px; line-height: 16px;
+  max-width: 72ch;
+}
+#des.unknown .des-left > *:not(#des-unknown) { display: none; }
+/* The metadata column is all em dashes in this state: recede it rather than
+   remove it, so the footer's keys stay on screen and the arrows still work.
+   (Colour, not opacity — opacity would take the footer down with it.) */
+#des.unknown .des-right .kv .v,
+#des.unknown .des-right .kv .k,
+#des.unknown .des-right .sys-title { color: #33383f; }
+
+@media (prefers-reduced-motion: reduce) {
+  .des-back, .des-copy { transition: none; }
+}

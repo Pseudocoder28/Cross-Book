@@ -1,0 +1,127 @@
+/* css/pairs.css — styles that belong to the PAIRS page only.
+   Loaded after style.css, so equal-specificity rules here win.
+   The row, column and detail styles are shared and live in style.css
+   (.pair-cols/.pair-row/.pair-rules/...); everything below is new: the filter
+   strip, the status chips, the undo affordance and the review progress bar. */
+
+/* ---------- filter strip: search + status chips + undo ---------- */
+
+.pair-ctl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 6px 0 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hair);
+}
+
+.pair-q {
+  flex: 1;
+  min-width: 80px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  color: var(--amber);
+  font: 700 10px/14px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.pair-q::placeholder { color: var(--dim); font-weight: 700; letter-spacing: 0.08em; }
+.pair-q:focus { outline: none; border-color: var(--amber); }
+.pair-q:focus-visible { outline: 1px solid var(--amber); outline-offset: -1px; }
+
+.pair-chips { display: flex; gap: 1px; flex: none; }
+
+.pchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 16px;
+  padding: 0 6px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  color: var(--ink2);
+  font: 700 9px/14px var(--mono);
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.pchip:hover { color: var(--ink); }
+.pchip:focus-visible { outline: 1px solid var(--amber); outline-offset: -1px; }
+.pchip[aria-pressed="true"] { background: var(--raised); border-color: var(--amber); color: var(--amber); }
+
+/* The count is the point of the chip: it stays legible when the chip is not
+   the active filter, so "how much is left" reads without clicking. */
+.pchip .pc-n { color: var(--dim); font-variant-numeric: tabular-nums; }
+.pchip:hover .pc-n { color: var(--ink2); }
+.pchip[aria-pressed="true"] .pc-n { color: var(--amber); }
+
+/* Unselected chips carry their status colour, the same vocabulary the STATUS
+   column uses, so the strip and the rows agree. */
+.pchip.st-confirmed[aria-pressed="false"] .pc-l { color: var(--bid); }
+.pchip.st-rejected[aria-pressed="false"] .pc-l { color: var(--ask); }
+
+.pundo { margin-left: 6px; flex: none; }
+.pundo:disabled {
+  color: var(--dim);
+  border-color: var(--hair);
+  opacity: 0.45;
+  cursor: default;
+}
+.pundo:not(:disabled) { color: var(--amber); border-color: var(--amber); }
+
+/* ---------- review progress ---------- */
+
+.pair-prog {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 18px;
+  padding: 0 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hair);
+}
+
+.pb {
+  flex: none;
+  display: flex;
+  width: 160px;
+  height: 4px;
+  background: var(--hair);
+  overflow: hidden;
+}
+.pb-seg { display: block; height: 100%; }
+.pb-c { background: var(--bid); }
+.pb-r { background: var(--ask); }
+
+.pb-txt {
+  min-width: 0;
+  color: var(--ink2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- list banners ---------- */
+
+/* A banner is not a data row: it opts out of the 4-column grid so its text
+   runs the full width instead of being clipped into the SCORE column. */
+.pair-row.quiet-line {
+  display: block;
+  height: auto;
+  min-height: 24px;
+  padding: 5px 12px;
+  line-height: 14px;
+  cursor: default;
+}
+.pair-row.quiet-line:hover { background: none; }
+
+.pair-row:hover:not(.sel) { background: #0f0f0f; }

@@ -7,7 +7,7 @@ uv run pyright
 ```
 
 All three are expected to be clean after every change (`CLAUDE.md`: "After
-each milestone: run the checks..."). As of the current milestone: 160 tests,
+each milestone: run the checks..."). As of the current milestone: 195 tests,
 `pytest`/`pytest-asyncio`/`hypothesis`, `ruff`, `pyright` (standard mode) —
 see [`PROGRESS.md`](../PROGRESS.md) for the count at any given milestone.
 
@@ -114,16 +114,39 @@ suite — they're verified against a real Postgres instance manually / via
 
 ## UI server tests without a browser or network
 
-`test_ui_server.py` builds the FastAPI app via `create_app(state)` against
-a stub implementing the `UIState` protocol (see
+The UI splits cleanly into a **tested Python backend** and an **untested
+browser frontend** (see [what isn't automated](#what-isnt-automated-yet)),
+and the split is worth keeping in mind when reading a UI bug report: routes,
+payload shapes and framing are covered; anything that only exists once a DOM
+renders is not.
+
+`test_ui_server.py` (20 tests) builds the FastAPI app via `create_app(state)`
+against a stub implementing the `UIState` protocol (see
 [`ui.md`](ui.md#uistate-how-the-routes-stay-testable)) — every HTTP route
 and the WebSocket wire protocol (`hello`/`book`/`delta`/`stats`/`arb`/
 `paper` framing, the client-queue-overflow-drops-the-client behavior) is
 exercised with FastAPI's `TestClient`, no real network socket, no database,
-no live venue connection. End-to-end verification against a real browser
-(headless Chrome over the DevTools protocol) has been done manually at
-several milestones — see `PROGRESS.md` for what was checked live — but is
-not part of the automated suite.
+no live venue connection.
+
+Since the frontend became a multi-page app, that suite also pins the route
+behavior the client-side router depends on — this is the half of "deep links
+work" that Python can actually assert:
+
+- every path in `SPA_ROUTES` returns the shell document, and still returns the
+  plain-text fallback when `static/index.html` is absent;
+- `/market/<market_id>` returns the shell for an id that is *not* a known
+  market and for ids needing escaping (`%20`, `%2F`), because the id is
+  resolved in the browser, not at the route;
+- `/api/*`, `/metrics` and `/static/*` are not shadowed by any of the above —
+  the regression guard against someone "simplifying" the enumerated routes
+  into a catch-all;
+- an unknown path (`/nope`, `/arb/deeper`, `/api/nope`) is still a 404.
+
+End-to-end verification against a real browser (headless Chrome over the
+DevTools protocol) has been done manually at several milestones — see
+`PROGRESS.md` for what was checked live, including that the single WebSocket
+survives a full round trip through every page — but is not part of the
+automated suite.
 
 ## Adapter and matcher tests
 
@@ -161,7 +184,31 @@ not part of the automated suite.
 - Grafana dashboard correctness (panel queries actually rendering sensible
   data) is checked by hand against a live Compose stack, not asserted in a
   test.
-- Browser-level UI behavior (select-to-copy, DES page navigation,
-  keyboard shortcuts) has been verified manually over the Chrome DevTools
-  protocol at several milestones (see `PROGRESS.md`) but has no automated
-  browser test suite.
+- Browser-level UI behavior (select-to-copy, page navigation and the
+  History-API router, keyboard shortcuts) has been verified manually over the
+  Chrome DevTools protocol at several milestones (see `PROGRESS.md`) but has
+  no automated browser test suite.
+- **The browser frontend has no JS tests.** There is no JS harness in the repo
+  — no `package.json`, no vitest/jest — so the only check `src/arb/ui/static/js/`
+  gets is `node --check` per file, which finds syntax errors and nothing else.
+  Reverting either M17 sparkline fix would still pass every check in the repo.
+
+  What the multi-page restructure changed is *reachability*, not coverage.
+  The pre-multipage `static/app.js` (deleted; it lives in git history) was one
+  IIFE with no exports, so a harness had nothing to import. Today the frontend
+  is ES modules that do export: `js/core/*` exports named functions and every
+  `js/pages/*.js` default-exports its page object. The cheap first target is
+  [`js/core/format.js`](../src/arb/ui/static/js/core/format.js) — it imports
+  nothing and touches no DOM, and it is where the numbers come from (tick→cent
+  and fixed-point quantity formatting, `percentile`, the duration/age
+  formatters), exactly the kind of arithmetic that breaks silently and still
+  reads plausibly. `js/core/state.js`'s selection helpers are nearly as easy
+  (one `requestAnimationFrame` and one `document.body` touch away).
+
+  The rest still needs a real browser, and some of it is not even importable
+  in isolation: the sparkline geometry is a closure inside
+  `pages/monitor.js`'s `drawSpark`, the router's path compiler and matcher are
+  module-private and `register()` reaches for `document`, and mount/unmount,
+  key routing and select-to-copy are DOM behavior by definition. Worth a
+  harness — starting with `core/format.js` — if the frontend grows more logic
+  than rendering.
