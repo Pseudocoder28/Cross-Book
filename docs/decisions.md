@@ -36,6 +36,136 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M19 — the keyboard gets a focus model, and keys get a price
+
+- **The bug: typing was writing to the database.** On `/pairs` with nothing
+  focused, typing the word "RUN" ran `R` reload → `U` set the selected pair
+  PROPOSED → `N` set it REJECTED. Two Postgres writes from a user who
+  believed they were typing in a search box; reproduced in a real browser
+  with the REJECTED chip going 11 → 12. The root cause was the resolution
+  order in `core/keys.js`: it called `page.onKey(e)` for EVERY key including
+  bare printables, *before* the `ARB>` command line saw them. Any page with
+  single-letter actions therefore turned every one of those letters into a
+  hotkey, and the terminal's whole premise is that you type at `ARB>`
+  without clicking anything first. This was not a `/pairs` bug — `/pairs`
+  was merely the page whose letters cost the most.
+- **The existing `cmd.buffer() === ""` guards were deleted, not extended.**
+  `monitor.js`, `paper.js` and `help.js` each gated their letter on an empty
+  command buffer. That guard is structurally incapable of doing the job: the
+  buffer is empty *precisely* when you type the first character, so the
+  first character is exactly the one it cannot protect — and the first
+  character is what fires the action. Widening the condition (add a mode
+  flag, add a timer, check whether a list is non-empty) would have kept a
+  guard whose failure case is its intended case. What replaced it is
+  ordering, not a condition: the printable branch moved ABOVE `page.onKey`,
+  so a page is never *offered* a bare letter outside a list. Pages keep an
+  explicit `if (scope !== SCOPE.LIST) return false;` anyway, so the
+  guarantee survives a future edit to the core.
+- **Three scopes, derived from `document.activeElement` on every keydown —
+  not from a mode flag.** `TEXT` (an `<input>`/`<textarea>`/contenteditable
+  owns every key), `LIST` (focus is inside a `[data-keyregion="list"]` row
+  container, so the page's action keys are live) and `COMMAND` (everything
+  else — `#cmd`, `<body>`, a focused button — where the `ARB>` buffer owns
+  every printable, always). Focus is the state variable because it is the
+  only one that cannot desynchronize from what the user sees: the browser
+  maintains it, it survives a page mount, a click, a `Tab` and an alert, and
+  it is already rendered (the focus ring and the reversed-video band are the
+  same fact drawn twice). A `mode` boolean would be a second copy of that
+  fact, and every escape path out of a mode — Escape, click-away, navigate,
+  reload, a page that forgot to reset it — is a chance for the copy to
+  disagree with the screen. A mode flag left stuck on `LIST` is the original
+  bug again, and this time invisible. The invariant is stated once, in
+  [`core/keys.js`](../src/arb/ui/static/js/core/keys.js): *the focused region
+  owns every key; focus starts and ends at the `ARB>` line on every page.*
+- **Clicking a row selects it but does NOT hand it the keyboard.** A click
+  inside a list region blurs back to `#cmd`. This looks unhelpful until you
+  price it: if clicking a row entered `LIST` scope, then clicking a pair to
+  *read* its rules text — the reason the detail pane exists — would arm `Y`
+  and `N` under the user's hands, and the next thing they typed would decide
+  it. Mouse users get real `CONFIRM` / `REJECT` / `UNDECIDE` buttons in
+  `#pair-detail` instead; the mouse route to a write is a button, never a
+  letter that became live because you clicked nearby. Rows also stay
+  non-focusable (selection is `aria-activedescendant`, never a roving
+  `tabindex`) — a focusable row would put `Y` in a scope the resolver
+  believes is `COMMAND`.
+- **Consequence grading is now the standing rule for every binding.** The
+  question "should this be a hotkey?" was being answered per page, by
+  whoever wrote the page. It is answered here instead, and day 3 is live
+  order placement, so the top row is the one that matters most:
+
+  | Grade | Example | Price |
+  | --- | --- | --- |
+  | G0 view/scroll | arrows, filters, sort | free, any scope |
+  | G1 navigation | page jump, DES | free, cheap chord |
+  | G2 one-row write | `Y` `N` `U` | one key, LIST scope only, no autorepeat |
+  | G3 many-row write | `Shift+Y` `Shift+N` | arm then confirm, count stated |
+  | G4 irreversible / money | (day 3: live orders) | never a hotkey — typed command plus typed confirmation |
+
+  G4 is the reason the table is in this file rather than in a page comment.
+  Placing an order is not `Y` with a bigger confirmation dialog: it is a
+  typed command plus a typed confirmation, because the whole point of the
+  `ARB>` line is that what you typed is on screen before it happens. The
+  G2/G3 rows also earned a concrete hardening — every decision key rejects
+  `e.repeat`, since `decidePair` advances the cursor and a status filter
+  drops the decided row, so a leaned-on `Y` marched down the queue POSTing
+  once per autorepeat; and a pending `Shift+Y`/`Shift+N` disarms on
+  `focusout`, because once Escape stopped reaching the page the old
+  "any other key clears `armed`" side effect disappeared with it.
+- **The page chord is CTRL on macOS and ALT elsewhere, from one constant.**
+  Option is the insert-special-character modifier on macOS — `Option+1` types
+  `¡`, `Option+[` types `“` — so `Alt+1`..`Alt+6` were not shortcuts on a
+  Mac, they were typos. `NAVMOD`/`NAVLABEL` in `core/keys.js` is the single
+  source for the modifier *and* its label, read by the nav hint, the keys
+  strip, every page footer, `help.js` and `system.js`; a hand-edited "ALT+"
+  in a footer is how the strip and the docs drift apart. Alt stays live as an
+  alias everywhere (inert where the browser claims it) but is never *labelled*
+  on a Mac. **The platform test is case-insensitive on purpose**, and this was
+  a real bug caught in testing: `navigator.userAgentData.platform` reports
+  `"macOS"` with a lower-case m and short-circuits `navigator.platform`
+  (`"MacIntel"`), so the obvious `/Mac/` test mislabelled every Chromium
+  browser on a Mac as non-Mac — it would have shipped the exact bug it was
+  written to fix. The test is `/mac|iphone|ipad|ipod/i`.
+- **The four history bindings were deleted, not re-mapped.** `Alt+←`/`Alt+→`
+  collided with the new chord's modifier, and the tempting fix was to move
+  them somewhere free. They went away entirely instead: `⌘[`/`⌘]` on macOS
+  and `Alt+←`/`Alt+→` elsewhere are *already* the browser's own history
+  controls, and re-implementing a binding the platform provides buys nothing
+  and costs a chord plus a line in every key table. `chordHeld()` explicitly
+  refuses `metaKey` so the app can never shadow them. Spare digits past the
+  nav count return `false` rather than `preventDefault`, so an unbound
+  `CTRL+9` belongs to the browser, not to a dead binding.
+- **Escape is one global ladder; pages no longer implement it.** Five rungs,
+  first match wins: a `TEXT` field with a value clears and stays → an empty
+  field goes to `ARB>` → `LIST` disarms and goes to `ARB>` → a non-empty
+  command buffer clears → anything that is not the monitor navigates to `/`.
+  M18 had already moved Escape into the core; what M19 adds is that rung 3
+  must disarm *before* it blurs, which is only expressible in one place.
+  Correspondingly, `Enter` with a non-empty buffer runs the command in every
+  scope: a typed command always wins over a page's `Enter` action, because
+  the buffer is on screen and the page's intent is not.
+- **Two focus-trap fixes fell out of the same model.** `/pairs` cycled its
+  status filter on `TAB` — `TAB` is how a keyboard user *leaves* a region, so
+  a page that eats it is a page you cannot get out of. The filter moved to
+  `←`/`→`, which are non-printable and shadow nothing typeable. `/help`'s `/`
+  binding is gone for the same family of reason (`/` at `ARB>` is now just a
+  character) and `TAB` focuses its filter box instead. `↑`/`↓` from `COMMAND`
+  focuses the list *without* moving the cursor, so row 0 is the next
+  candidate and you can see where the keyboard went before anything acts.
+- **The model was chosen by a judged three-way panel, 3-0.** Three
+  interaction models were written up and scored by user-experience,
+  implementation and safety judges; "REGION FOCUS — `ARB>` is home" was
+  unanimous, and the winning spec was frozen as
+  [`.context/keyboard-model.md`](../.context/keyboard-model.md) and
+  implemented verbatim so that parallel agents coded against the same names.
+  Same procedure as M9's design panel, and for the same reason: an
+  interaction model is a taste question with safety consequences, and one
+  author's taste is not evidence.
+- **Still no JS test harness, so this is guarded by a manual browser pass.**
+  M18's open item is unchanged and now carries more weight: the fix lives
+  entirely in browser code, and `node --check` cannot see a resolution order.
+  The acceptance pass is written down as a re-runnable checklist in
+  [`PROGRESS.md`](../PROGRESS.md) rather than left in a commit message.
+
 ## M18 — the terminal becomes a multi-page app
 
 - **Routing is client side over the History API, not one HTML document per
@@ -69,8 +199,9 @@ Design choices and why. Newest first.
   also controlled its own visibility could leave itself on screen while
   "closed". The concrete bug this forecloses is the PAPER page's 3 s
   `/api/paper` poll outliving navigation. Registration order in `main.js`'s
-  `PAGES` *is* nav order, so the nav strip, the `Alt+N` numbering and the
-  page table on `/help` all read from one list.
+  `PAGES` *is* nav order, so the nav strip, the nav-chord numbering and the
+  page table on `/help` all read from one list. *(M19 made the modifier
+  itself a constant too — `NAVLABEL`, `CTRL` on macOS and `ALT` elsewhere.)*
 - **The rAF batch drops dirty keys nobody claimed, so ported pages
   re-register their old key.** `core/state.js` sweeps `schedule()` keys with
   no renderer rather than leaking them. The router auto-registers a page's
@@ -104,7 +235,9 @@ Design choices and why. Newest first.
   first; otherwise anything that is not the monitor navigates to `/`. The
   keys strip has advertised `ESC CLOSE` since M9, and seven pages each
   implementing it is seven chances for one of them to disagree. Pages are
-  forbidden from claiming Escape in `onKey`.
+  forbidden from claiming Escape in `onKey`. *(Superseded in part by M19: the
+  two rungs became five once TEXT and LIST scopes existed, and the strip now
+  reads `ESC CLEAR` / `ESC ARB>` / `ESC MONITOR` depending on the scope.)*
 - **This was a port, not a rewrite.** Each moved function was diffed against
   the pre-multipage `static/app.js` (now only in git history) and most are
   byte-identical modulo indentation and an `export` keyword; where one did
@@ -114,8 +247,8 @@ Design choices and why. Newest first.
   re-opened every one of those questions simultaneously and left no way to
   tell a restructure bug from an intended behaviour change.
 - **`/help` derives itself from live sources rather than restating them.**
-  The page list, paths and `ALT+N` numbers come from the router's
-  `navPages()`; each page's key table is parsed out of that page's own
+  The page list, paths and nav-chord numbers come from the router's
+  `navPages()` (and the chord's label from `NAVLABEL`, M19); each page's key table is parsed out of that page's own
   `.des-foot` strip on every mount. A hardcoded help page is a second source
   of truth that decays with no test to catch it, and a help page that lies
   is worse than no help page. What remains hand-written — the global keys,

@@ -165,6 +165,16 @@
 .pl-used { color: var(--ink2); }
 .pl-used.pos { color: var(--bid); }
 
+/* ---------- LIST scope: the ledger cursor, while the ledger has the keys ----------
+   Same cue as ARB, same reason: core/keys.js rings the focused region, and
+   the selected row inside it goes from "what the detail pane describes" to
+   "what ↑↓, ENTER and R are about to act on". */
+.ptr-rows:focus .ptr-row.sel,
+.ptr-rows:focus-visible .ptr-row.sel {
+  background: rgba(255, 176, 46, 0.10);
+  box-shadow: inset 3px 0 0 var(--amber);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pl-fill { transition: none; }
 }

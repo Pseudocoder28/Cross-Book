@@ -130,7 +130,7 @@
   color: var(--amber);
   font-size: 10px;
   letter-spacing: 0.06em;
-  white-space: normal;           /* a key list like ALT+1 - ALT+6 may wrap */
+  white-space: normal;           /* a key list like CTRL+1 - CTRL+6 may wrap */
   word-break: break-word;
 }
 #help-page .kv.help-row .v {

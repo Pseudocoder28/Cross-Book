@@ -102,3 +102,15 @@
 .arb-row.act.sel { background: var(--raised); box-shadow: inset 2px 0 0 var(--amber); }
 
 .arb-none { padding: 4px 12px; }
+
+/* ---------- LIST scope: the cursor reads as a cursor only while keys act ----------
+   core/keys.js rings the whole list when it has the keyboard; this is the
+   other half of the same cue. With focus on the ARB> line the selection is a
+   quiet marker of what the detail pane is describing, and with focus in the
+   list it is the thing ↑↓ and ENTER are about to move. Weight and a wider
+   thread, not a new hue: the one amber still means "selection". */
+.arb-rows:focus .arb-row.sel,
+.arb-rows:focus-visible .arb-row.sel {
+  background: rgba(255, 176, 46, 0.10);
+  box-shadow: inset 3px 0 0 var(--amber);
+}

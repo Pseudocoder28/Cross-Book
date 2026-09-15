@@ -4,12 +4,20 @@
    The monitor list is filterable and sortable. Rows are never rebuilt for a
    data tick: cells are updated in place (so flash-on-change survives) and the
    order is re-applied by moving the existing nodes, so a sort by a live price
-   cannot cost the selection, the flash state or a drag in progress. */
+   cannot cost the selection, the flash state or a drag in progress.
 
-import { $, el, flash, setVal, isReducedMotion } from "../core/dom.js";
+   Keyboard model (see .context/keyboard-model.md): the focused region owns
+   every key. This page's only action keys are 1-9 quick-select, and they fire
+   ONLY in LIST scope — with the row list focused. At the ARB> line a digit is
+   typing, always. The old `cmd.buffer() === ""` guard is gone: the buffer is
+   empty exactly when you start typing, so it could never protect the first
+   character. Rows stay non-focusable; #mon-rows is the focusable region and
+   the selection rides on aria-activedescendant. */
+
+import { $, el, flash, setVal, setText, isReducedMotion } from "../core/dom.js";
 import { state, schedule, registerRenderer, select, isSelecting } from "../core/state.js";
 import { navigate } from "../core/router.js";
-import * as cmd from "../core/cmd.js";
+import { SCOPE, focusCommand } from "../core/keys.js";
 import {
   nf, fmtCents, fmtMid, fmtQty, fmtSignedQty, fmtMs, fmtAge, fmtTapeTime, percentile,
 } from "../core/format.js";
@@ -27,6 +35,14 @@ const SKEW_WARN_MS = 25;        // |median - rtt/2| beyond this: clocks disagree
 const CANVAS_FONT = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
 const QUICK_KEYS = 9;           // rows 1-9 have a keyboard shortcut
 const VIEW_KEY = "arb.monitor.v1";
+
+/* MONITOR's key contract. index.html paints #mon-foot before this module
+   runs, but this constant is the source: it is written into the element at
+   module scope below, and help.js reads that element back to build the HELP
+   table. Every item is live — UP/DOWN focuses the list from ARB> and then
+   moves the selection, TAB opens the filter, 1-9 quick-selects inside the
+   list, ENTER opens DES and ESC returns to the ARB> line. */
+const MON_FOOT = "\u2191\u2193 LIST \u00b7 TAB FILTER \u00b7 1-9 QUICK (IN LIST) \u00b7 \u23ce DES \u00b7 ESC ARB>";
 
 const NUMERIC_SORTS = new Set(["bid", "ask", "mid", "spr"]);
 
@@ -153,7 +169,7 @@ function setIdx(refs, i) {
   if (refs.idx.textContent !== txt) refs.idx.textContent = txt;
   const quick = i < QUICK_KEYS;
   refs.idx.classList.toggle("qs", quick);
-  if (quick) refs.idx.title = "QUICK SELECT " + txt;
+  if (quick) refs.idx.title = "QUICK SELECT " + txt + " \u2014 WITH THE LIST FOCUSED";
   else refs.idx.removeAttribute("title");
 }
 
@@ -691,21 +707,16 @@ function bindControls() {
     view.q = q.value;
     applyView(true);
   });
-  q.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      if (q.value) { q.value = ""; view.q = ""; applyView(true); } else q.blur();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      q.blur();                 // hand the keyboard back to the ARB> line
-    }
-  });
+  // No keydown handler: a text field owns every key it is sent, and the core
+  // resolves the three that leave it. ENTER / ARROWDOWN move focus to the row
+  // list (keys.js step 3) and ESCAPE runs the global ladder — clear the value
+  // (which fires "input" above, so the view follows), then back to ARB>.
   for (const b of document.querySelectorAll("#mon-venue .vbtn")) {
     b.addEventListener("click", (e) => {
       view.venue = b.dataset.venue;
       syncControls();
       applyView(true);
-      if (e.detail > 0) b.blur();
+      if (e.detail > 0) focusCommand();   // a pointer click must not park the keyboard on a button
     });
   }
   for (const b of document.querySelectorAll(".mon-cols .mon-h")) {
@@ -718,7 +729,7 @@ function bindControls() {
       }
       syncControls();
       applyView(true);
-      if (e.detail > 0) b.blur();
+      if (e.detail > 0) focusCommand();
     });
   }
 }
@@ -730,6 +741,10 @@ setupCanvas();
 loadView();
 bindControls();
 syncControls();
+// At module scope, not in mount(): help.js reads this footer straight out of
+// the DOM and builds its key table once, so the text has to be right even on
+// a deep link to /help where MONITOR never mounted.
+setText("mon-foot", MON_FOOT);
 
 spark.addEventListener("mousemove", (e) => {
   const r = spark.getBoundingClientRect();
@@ -760,6 +775,8 @@ export default {
   title: "MONITOR",
   nav: true,
   root: "monitor-page",
+  regions: ["mon-q", "mon-rows"],         // TAB order from ARB>; [0] is also the "/" target
+  listRegion: "mon-rows",                 // UP/DOWN from ARB> focuses this
 
   mount() {
     mounted = true;
@@ -781,17 +798,42 @@ export default {
     renderMonitor();
   },
 
-  onKey(e) {
+  onKey(e, scope) {
     const k = e.key;
+    // Moving the selection is a G0 view action: free in whatever scope the
+    // core hands us. In practice that is LIST — from ARB> an arrow focuses
+    // the list first (keys.js step 8) without moving the cursor, so row 0 is
+    // the next candidate. This walks the VISIBLE order, which is why the page
+    // claims arrows at all rather than leaving them to selectRelative().
     if (k === "ArrowUp" || k === "ArrowDown") {
       moveSel(k === "ArrowUp" ? -1 : 1);
       return true;
     }
-    // 1-9 quick-select, only with an empty command buffer
-    if (k.length === 1 && /^[1-9]$/.test(k) && cmd.buffer() === "") {
+    // 1-9 quick-select: LIST scope only. At the ARB> line a digit is typing
+    // (the core never even asks us), and a held key must not walk the list.
+    if (scope !== SCOPE.LIST) return false;
+    if (e.repeat) return false;
+    if (/^[1-9]$/.test(k)) {
       quickSelect(Number(k) - 1);
       return true;
     }
     return false;
+  },
+
+  /** What the keys strip and the reversed-video ARB> band say, per scope.
+      Same source as the footer's list-scope items, so they cannot disagree. */
+  keyHints(scope) {
+    if (scope === SCOPE.LIST) {
+      return [
+        { k: "\u2191\u2193", d: "SELECT" },
+        { k: "1-9", d: "QUICK" },
+        { k: "\u23ce", d: "DES" },
+        { k: "/", d: "FILTER" },
+      ];
+    }
+    // In the filter box the core already says "ENTER DONE"; the useful extra
+    // is that DOWN drops straight into the rows.
+    if (scope === SCOPE.TEXT) return [{ k: "\u2193", d: "LIST" }];
+    return [];
   },
 };

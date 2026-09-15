@@ -220,7 +220,9 @@ function installCopy() {
   });
   window.addEventListener("blur", endSelecting);
   // Select-all is a keyboard gesture, and it also carries activation. Inside a
-  // text field it means select-this-field, so the filter boxes keep it.
+  // text field it means select-this-field, so the filter boxes keep it: the
+  // TEXT-scope bail below is load-bearing, not a nicety. It is deliberately
+  // the same test core/keys.js scopeOf() uses for SCOPE.TEXT.
   document.addEventListener("keyup", (e) => {
     if (!(e.metaKey || e.ctrlKey) || (e.key !== "a" && e.key !== "A")) return;
     const t = e.target;
@@ -254,6 +256,13 @@ function placeholder(meta) {
       node = null;
     },
     render() {},
+    // A stub has no list and no text regions, so core/keys.js must find its
+    // optional fields absent-but-answered rather than undefined: arrows fall
+    // through to the global selection, Tab is left to the browser and the
+    // keys strip shows the global bindings only.
+    regions: [],
+    listRegion: null,
+    keyHints() { return []; },
     onKey() { return false; },
   };
 }
