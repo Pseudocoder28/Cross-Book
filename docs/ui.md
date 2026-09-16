@@ -4,48 +4,71 @@ Code: backend [`src/arb/ui/server.py`](../src/arb/ui/server.py), frontend
 [`src/arb/ui/static/`](../src/arb/ui/static/). Served by `arb ui` at
 `http://127.0.0.1:8080` by default (see [`cli.md`](cli.md#arb-ui)).
 
-The terminal is a multi-page app: seven routes, a visible nav strip, real
-bookmarkable URLs, and **one** WebSocket for the whole session. It was a single
-page whose screens were hidden modal overlays until the restructure; the
-1886-line `static/app.js` IIFE that held all of it is deleted. Where this file
-says *the pre-multipage source*, it means that file in git history — it is
-still the reference for anything that was ported verbatim, and several page
-modules name the functions they came from.
+The terminal is a multi-page app: eight routes (seven in the nav, plus DES), a
+visible nav strip, real bookmarkable URLs, and **one** WebSocket for the whole
+session. It was a single page whose screens were hidden modal overlays until
+the restructure; the 1886-line `static/app.js` IIFE that held all of it is
+deleted. Where this file says *the pre-multipage source*, it means that file in
+git history — it is still the reference for anything that was ported verbatim,
+and several page modules name the functions they came from.
 
 ## Design intent
 
 A black/amber Bloomberg-terminal-style desk for the whole system: live market
 monitor, a depth ladder per market, a tape of changes, a latency panel, pair
-review, the ARB screen, the paper-trading ledger, a diagnostics screen and a
-reference card — keyboard-driven, no mouse required (though clicks, drags and
-selections all work). The aesthetic was chosen by a judged three-way design
-panel (a Bloomberg purist, a modern-desk take, and a density-maximalist take);
-the black/amber/tabular-nums look won.
+review, the ARB screen, the paper-trading ledger, a diagnostics screen, the
+control plane and a reference card — keyboard-driven, no mouse required (though
+clicks, drags and selections all work). The aesthetic was chosen by a judged
+three-way design panel (a Bloomberg purist, a modern-desk take, and a
+density-maximalist take); the black/amber/tabular-nums look won.
+
+CONTROL is the one deliberate exception to "no mouse required": it binds no
+letter at all, in any scope, because every control on it changes the running
+process and a bare letter must never reach one. Buttons and `TAB` are the way
+in there.
 
 Two rules survived the restructure unchanged and explain most of what follows:
 a Python repo does not grow an npm toolchain for one page, and a slow browser
 never stalls ingest.
 
-## `arb ui` does everything `arb record` does, plus rendering
+## `arb ui` is the process, and its flags are only the starting values
 
-`run_ui()` mirrors `record.run_record()`'s wiring — recorder-first ingest
+There used to be a headless `arb record` next to this; it is deleted, and the
+ingest wiring it owned lives here. `run_ui()` is recorder-first ingest
 (`record_raw()` enqueues before any parsing, the same hard rule as everywhere
 else), every long-running loop under `supervise()` in its own task, one venue's
 failure never stopping another. On top of that it:
 
 - Parses every frame through the venue adapters into a shared `BookManager`.
-- Optionally loads confirmed pairs into an `ArbMonitor` (`--pairs-top`, default
-  10; `pairs/tracked.py` — see [`pairs.md`](pairs.md)) and optionally a
-  `PaperTrader` on top of that (`--paper`). Both are built **once at startup**,
-  so a pair confirmed mid-run reaches the ARB screen only after a restart.
+- Loads confirmed pairs into an `ArbMonitor` (`--pairs-top`, default 10;
+  `pairs/tracked.py` — see [`pairs.md`](pairs.md)) and always builds **one**
+  `PaperTrader`, started suspended unless `--paper` was passed.
 - Pushes JSON frames to every connected browser over a WebSocket.
-- Serves `GET /metrics` itself — `arb ui` does **not** start the separate
-  Prometheus HTTP server that `arb record` does; there's one HTTP server, one
-  port, and the browser's own SYSTEM page links to it.
+- Serves `GET /metrics` itself. There is one HTTP server and one port; nothing
+  binds `:9000` any more, so `infra/prometheus.yml` has a single `arb-ui`
+  scrape target and the browser's own SYSTEM page links to it.
+- Wires a [`ControlPlane`](../src/arb/ui/control.py) onto everything mutable it
+  just built, and wraps the whole ASGI app in the
+  [origin guard](#every-request-passes-the-origin-guard).
 
-`--no-record` disables the Postgres write path entirely (useful for a DB-less
-demo) without touching anything else — books, the ARB screen and paper trading
-(over live quotes) still work.
+Every flag is a *starting* value, not a setting: `/control` changes the market
+universe, the tracked pairs, the paper limits and recording at runtime, and
+`docker-compose.yml` launches the container with `arb ui --top 20 --host
+0.0.0.0`. Two consequences worth stating plainly, because the old wording said
+the opposite:
+
+- **`--no-record` starts with recording off; it does not disable the write
+  path.** The `Recorder` and its supervised writer are built either way and
+  `record_raw()` is gated on a flag read per message, because a toggle that has
+  to construct a recorder and start a writer mid-flight is a toggle that can
+  fail halfway. `/control` turns it back on, and the gap it left is visible
+  only in the audit trail — replay reads straight across it.
+- **The `ArbMonitor` and the `PaperTrader` are no longer "built once at
+  startup".** `pairs.top` rebuilds the monitor live (and the flush loop rebinds
+  `state.arbmon`/`state.trader` once per tick precisely so a swap mid-tick
+  cannot be half-applied), and the trader is suspended and resumed rather than
+  rebuilt — reconstructing it would silently reopen the whole `max_notional`
+  budget and throw the ledger away.
 
 ## Frontend layout: ES modules, no build step
 
@@ -57,7 +80,8 @@ src/arb/ui/static/
   css/<page>.css      styles for exactly one page, loaded after style.css
   js/main.js          entry point: shell, page registration, select-to-copy
   js/core/            state.js format.js dom.js ws.js router.js keys.js cmd.js
-  js/pages/           monitor.js market.js arb.js pairs.js paper.js system.js help.js
+  js/pages/           monitor.js market.js arb.js pairs.js paper.js system.js
+                      control.js help.js
 ```
 
 There is no bundler, no transpiler, no `package.json` and no `node_modules`:
@@ -70,11 +94,10 @@ before is the reason it is two dozen plain files now.
 
 Stylesheets are split the same way the JS is: `style.css` owns the shell and
 every class more than one page uses, and `css/<page>.css` owns only that page's
-additions. `index.html` links all seven page stylesheets up front (they are
-small and the page count is fixed), and every page module except the monitor's
-*also* injects its own `<link>`, guarded by a `document.querySelector` check —
-idempotent either way, and the reason a page is never served unstyled if its
-module lands before the shell learns about it.
+additions. `index.html` links all eight page stylesheets up front (they are
+small and the page count is fixed), which is also why a page is never served
+unstyled if its module lands before the shell learns about it: the stylesheet is
+in the document before any module runs.
 
 ## Routes, and why routing is client side
 
@@ -85,7 +108,8 @@ module lands before the shell learns about it.
 | `/pairs` | `pairs` | `3` PAIRS | `pages/pairs.js` | `#pairs` |
 | `/paper` | `paper` | `4` PAPER | `pages/paper.js` | `#paperpage` |
 | `/system` | `system` | `5` SYSTEM | `pages/system.js` | `#system-page` |
-| `/help` | `help` | `6` HELP | `pages/help.js` | `#help-page` |
+| `/control` | `control` | `6` CONTROL | `pages/control.js` | `#control-page` |
+| `/help` | `help` | `7` HELP | `pages/help.js` | `#help-page` |
 | `/market/<market_id>` | `market` | not in the nav | `pages/market.js` | `#des` |
 
 Navigation is client side over the History API, not one HTML document per page,
@@ -96,8 +120,8 @@ design would tear that socket down on every click: each page change would cost a
 reconnect, a fresh `hello`, a re-send of every book, and a tape that starts from
 zero. So `core/router.js` swaps the `hidden` attribute on page roots and
 `core/ws.js` is never told that anything happened. Verified live: the tape kept
-counting (5 → 10 MSGS) across a full six-page round trip and the connection pill
-never left LIVE.
+counting (5 → 10 MSGS) across a full round trip of the nav (six pages at the
+time) and the connection pill never left LIVE.
 
 The server side of that bargain is in `create_app()`. Each parameterless route is
 registered explicitly from `SPA_ROUTES`, and `/market/{market_id:path}` gets its
@@ -163,8 +187,9 @@ Rules that are load-bearing rather than stylistic:
   what `ws.js` and `state.select()` schedule — never `"market"`), and
   `pages/system.js` registers `"poly"` alongside its own `"system"`.
 - **Frames a page cares about are subscribed at module load, not in `mount`.**
-  `onMessage("arb", …)` and `onMessage("paper", …)` run whether or not their page
-  is showing, so arriving on ARB or PAPER shows current data instead of a stale
+  `onMessage("arb", …)`, `onMessage("paper", …)` and CONTROL's
+  `onMessage("control"|"job", …)` run whether or not their page is showing, so
+  arriving on ARB, PAPER or CONTROL shows current data instead of a stale
   table. State updates always go through `schedule()`; nothing renders straight
   out of a socket handler.
 - **Tabular rows need one of `.ladder-row .mon-row .tape-row .mid-row .kv`** or
@@ -271,6 +296,11 @@ deliberately *not* a key region, so `R` does not fire from it; `#cmd` carries
 `data-keyregion="command"` for the same kind of honesty, though `scopeOf()`
 reaches `COMMAND` by falling through rather than by reading it.
 
+CONTROL declares no list region at all. Its `regions` are its five single-line
+fields, so `TAB` walks those and `LIST` scope is never entered on that page —
+which is the same statement as "no letter there does anything", made
+structurally rather than by a guard the page has to remember.
+
 ### The resolution order
 
 `onKey(e)` returns immediately for an IME composition (`isComposing`, a `Dead`
@@ -374,7 +404,7 @@ Option is the insert-special-character modifier on macOS — `Option+1` types `�
 
 | Binding | Action |
 | --- | --- |
-| `CTRL+1`…`CTRL+6` (macOS) / `ALT+1`…`ALT+6` (elsewhere) | jump to the *n*th nav page |
+| `CTRL+1`…`CTRL+7` (macOS) / `ALT+1`…`ALT+7` (elsewhere) | jump to the *n*th nav page |
 | `CTRL+[` `CTRL+]` / `ALT+[` `ALT+]` | previous / next page, wrapping |
 | `⌘[` `⌘]` (macOS) / `ALT+←` `ALT+→` (elsewhere) | history back/forward — **the browser's own**, deliberately left unbound here |
 
@@ -417,6 +447,15 @@ It is written up in [`decisions.md`](decisions.md).
 | G3 | many-row write: `⇧Y` `⇧N` | arm, then confirm; the exact count is stated |
 | G4 | irreversible / money (day 3: live orders) | **never a hotkey** — a typed command plus a typed confirmation |
 
+The grades stopped being a UI convention when the control plane arrived: every
+`ActionSpec` in [`control.py`](../src/arb/ui/control.py) carries one, the server
+ships it in each action descriptor, and `/control` renders it on the button's
+tooltip. So the price of an action is set once, on the server, by the code that
+performs it — not by the screen that offers it. Today the control plane runs 1
+G0 action (`jobs.doctor`, the only one that does not mutate and so the only one
+a read-only server still runs), 9 G2 and 3 G3; nothing is G4 yet, because
+nothing places an order yet.
+
 ### The on-screen cue
 
 A scope model is only safe if the scope is visible, so `renderKeys()` repaints
@@ -458,7 +497,7 @@ through to the global bindings instead of throwing at the resolver:
 | --- | --- |
 | `onKey(e, scope)` | page-scoped keys; return `true` to claim one. The second argument is the scope — guard every letter with `if (scope !== SCOPE.LIST) return false` |
 | `regions: ["pair-q", "pair-rows"]` | the `TAB` order from `ARB>`; `[0]` is also where `/` lands (the first `<input>` among them) |
-| `listRegion: "pair-rows"` | the region `↑`/`↓` from `ARB>` focuses. A page with no row list — MARKET, SYSTEM, HELP — declares none, and the arrows reach its `onKey` in `COMMAND` scope instead |
+| `listRegion: "pair-rows"` | the region `↑`/`↓` from `ARB>` focuses. A page with no row list — MARKET, SYSTEM, CONTROL, HELP — declares none, and the arrows reach its `onKey` in `COMMAND` scope instead |
 | `keyHints(scope)` | what the strip and the `ARB>` band print in that scope; `{k, d}` objects or `"K LABEL"` strings. A page that throws here loses its hints, not the strip |
 
 Nothing about any individual page is hardcoded in `core/keys.js`, and the router
@@ -484,6 +523,13 @@ so a fresh page always starts in `COMMAND`.
 
 Every command navigates; none of them opens an overlay any more. A miss leaves
 the screen alone and flashes `NO MATCH · <what you typed>` beside the prompt.
+
+CONTROL is the one nav page with **no** command word: `core/cmd.js` has no
+`CTL`/`CONTROL` branch, so typing it at `ARB>` falls through to the ticker
+search and misses. The chord (`CTRL+6`/`ALT+6`) and the nav tab are the way
+there. That is a gap rather than a decision — every other page answers to a
+word — but it errs on the safe side: the page that can stop recording is not
+reachable by a word someone might be halfway through typing.
 
 ## Screens
 
@@ -606,13 +652,21 @@ The threshold is read from `GET /api/paper`, and the label distinguishes
 with no trader running, so the number alone never means it is being enforced. The
 screen assumes it is not until the payload's `enabled` says otherwise — claiming
 enforcement that does not exist is the one error this screen must not make, and
-the summary says `MARKED n (…, NO PAPER TRADER RUNNING)` in that case.
+the summary says `MARKED n (…, NO PAPER TRADER RUNNING)` in that case. Since the
+control plane landed, `enabled: false` under `arb ui` means *suspended* rather
+than *absent* — the conclusion holds either way (nothing is being taken), but
+the wording is a generation behind: RESUME on `/control` is what changes it.
 
 The cursor follows the top of the ranking until you pick a row; from then on it
 stays pinned to that pair as the ranking reshuffles beneath it. The two empty
 states are distinguished, because they mean completely different things: no
-confirmed pairs tracked at all (confirm pairs, then restart `arb ui`) versus no
-pair clearing the current filter.
+confirmed pairs tracked at all versus no pair clearing the current filter.
+
+The first of those two states used to require a restart, and the page still says
+so — `NO CONFIRMED PAIRS TRACKED — CONFIRM PAIRS, THEN RESTART arb ui` in
+`pages/arb.js`. It is stale copy: `/control`'s RELOAD PAIRS (`pairs.top`)
+rebuilds the `ArbMonitor` in place, so confirming on `/pairs` and reloading from
+`/control` populates this screen without touching the process.
 
 Keys: `↑`/`↓` at the `ARB>` line enters `#arb-rows` and then moves the cursor,
 `⏎` opens the Kalshi leg, `TAB` (or `/` from the list) lands in the `MIN NET/CT`
@@ -627,6 +681,11 @@ whole cross product above the cut — twelve thousand rows is normal — so the
 screen is a review queue, not a table: one keystroke per decision, the cursor
 landing on the next candidate, and both legs' full resolution rules beside the
 row so the judgement can be made without leaving.
+
+The rows come from the PROPOSE PAIRS job on [`/control`](#control--control)
+(`jobs.propose`) — there is no `arb pairs` command any more, and the page's own
+`NO PROPOSALS — RUN: arb pairs propose` empty state in `pages/pairs.js` names a
+command that no longer exists. `/control` is where it should point.
 
 The list is fetched **once, unfiltered** (`GET /api/pairs`, 60 s TTL, `R` forces
 a refresh) and filtered in the client, so switching status is instant and the
@@ -684,11 +743,23 @@ region, so the arrows and `R` do not act from it.
 Limits are rendered as capacity *used*, not as three constants: `MAX NOTIONAL
 $1000.00` says nothing on its own, while `$12.40 · 1% OF $1000.00` says whether
 the run is anywhere near its ceiling (amber from 70%, red from 95%). That
-reading only exists while the trader is on. With it off the server returns
-`PaperLimits()` defaults that nothing enforces, and totals summed over stored
-trades from *every* run, so the page drops the percentages and labels both
-facts — `DEFAULTS — NOT IN FORCE · TRADER OFF` and `CUMULATIVE EXPECTED NET ·
-HISTORY, ALL RUNS` — rather than inventing a ceiling.
+reading only exists while the trader is on. With no trader in the process at all
+the server returns `PaperLimits()` defaults that nothing enforces, and totals
+summed over stored trades from *every* run, so the page drops the percentages and
+labels both facts — `DEFAULTS — NOT IN FORCE · TRADER OFF` and `CUMULATIVE
+EXPECTED NET · HISTORY, ALL RUNS` — rather than inventing a ceiling.
+
+This page is a **view of** the trader; the switches are on
+[`/control`](#control--control): SUSPEND, RESUME and the three limits, applied
+live to the same instance. That changes what `enabled: false` means here, and
+the copy has not caught up. Under `arb ui` a `PaperTrader` now always exists
+(suspended until `--paper` or RESUME), so `GET /api/paper` serves *that trader's*
+limits and *this run's* ledger with `enabled: false` — while the page still
+labels it `DEFAULTS — NOT IN FORCE` and `HISTORY, ALL RUNS`, and still shows
+`PAPER TRADING DISABLED — START WITH: arb ui --paper` where it should say
+RESUME on `/control`. The history fallback those labels describe is real, but it
+is now only reachable in a process that attaches no trader at all — which,
+since `run_ui()` always builds one, means the stub `UIState` the tests drive.
 
 ### SYSTEM — `/system`
 
@@ -702,8 +773,8 @@ restored here, against markup this module builds inside an empty root.
 | Card | Contents |
 | --- | --- |
 | ENGINE | message total and 1 s rate, parse errors, sequence gaps, WS clients, uptime. Errors and gaps go amber past zero — they are counted, never fatal |
-| RECORDER | on/off, enqueued and dropped counts. `OFF` means `--no-record`: displayed, not persisted, not replayable |
-| DATABASE | connection, total raw rows, and rows per run id newest first, with the current run tagged `LIVE` — those ids are what `arb replay` takes |
+| RECORDER | on/off, enqueued and dropped counts. `OFF` means recording is off — started that way with `--no-record`, or switched off from `/control`: displayed, not persisted, not replayable |
+| DATABASE | connection, total raw rows, and rows per run id newest first, with the current run tagged `LIVE` — those ids are what a replay takes, whether you paste one into `/control`'s RUN field or pass it to `arb replay` |
 | CLOCK & LATENCY | one-way last/median/p95, sample count, keepalive RTT, RTT/2 and the skew estimate, with a banner and the fix written on the page |
 | KALSHI · WEBSOCKET | transport state, detail, and how long ago the status was checked |
 | POLYMARKET US | the polled venue: REST reachability, polls, 429s, errors, poll targets, configured rate, age of the last successful book |
@@ -715,6 +786,85 @@ so it reads `true_transit + (local − venue)` and goes negative when the local
 clock is behind; skew is `median − RTT/2`; RTT only ever touches the local clock,
 so it survives skew; and the fix is `arb doctor`'s `ntp clock` check followed by
 an `sntp`/`timedatectl` sync.
+
+The card's own note still reads `arb replay RUN_ID REPLAYS ANY ROW ABOVE THROUGH
+THE IDENTICAL PIPELINE`, and that is still true: `arb replay` survives as a
+command *because* it is the worker `/control`'s REPLAY spawns as a subprocess
+(see [`cli.md`](cli.md#arb-replay)). Same argv, same pipeline, two ways in.
+
+This page stays **read-only on purpose** even now that a control page exists. It
+is what you read when something is wrong, and a screen you are diagnosing from
+should not also be a screen you can change things from by accident.
+
+### CONTROL — `/control`
+
+Every runtime switch in one place: recording, paper trading, the Kalshi
+subscription, the Polymarket US poll targets, the tracked pairs, and the four
+jobs (doctor, propose, backfill, replay). It replaced the CLI surface it grew
+out of — `arb record` and the whole `arb pairs` subtree are deleted — so this
+page is not a convenience wrapper over a command, it is the interface.
+Backend: [`ui/control.py`](../src/arb/ui/control.py); the HTTP shape is
+[below](#the-control-plane-http-surface).
+
+| Card | What it drives | Actions |
+| --- | --- | --- |
+| RECORDER | the flag `record_raw()` reads per message | `recording.start` `recording.stop` |
+| PAPER TRADING | the one `PaperTrader` instance: state, spend, and the three limits as editable fields | `paper.suspend` `paper.resume` `paper.limits` |
+| UNIVERSE | subscribed Kalshi tickers, polled Polymarket US slugs, poll cycle, tracked-pair count, and a textarea per venue | `pairs.top` `universe.kalshi` `universe.polymarket` |
+| JOBS | the long actions, plus a RUN field for replay | `jobs.doctor` `jobs.propose` `jobs.backfill` `jobs.replay` |
+| JOBS THIS RUN | every job newest first: phase, step/total, elapsed, error, and CANCEL while it runs | `jobs.cancel` |
+| AUDIT TRAIL | the last 40 rows of `control_actions`, newest first: how long ago, the outcome, the action and the **sentence the operator was shown** | — |
+
+Three rules govern this page, and they are one rule wearing three hats: **a
+screen must not assert something that is not true of the server.**
+
+1. **The action list is the server's, not the page's.** Every button reads its
+   `summary`, its consequence grade and whether it confirms out of the
+   descriptors in `GET /api/control` — nothing about an action is hardcoded in
+   `pages/control.js`. An action the server does not expose renders as a
+   disabled button whose tooltip reads `NOT AVAILABLE IN THIS PROCESS`, rather
+   than a live button that 404s, and a grade changed in `control.py` changes
+   what the tooltip says without a frontend edit. A hardcoded copy is a button
+   that lies the moment the server moves.
+2. **No optimistic state.** A toggle never flips because you clicked it; it
+   flips when a `control` frame says the server flipped it. The cost is a
+   round trip of latency on every switch, and the thing bought is that two open
+   tabs, or a tab and a `curl`, can never disagree about whether paper trading
+   is on — the frame is broadcast to *every* client after every mutating
+   action.
+3. **The server owns the confirm copy.** An action that asks for confirmation
+   answers the first POST with `428` and a sentence; the band prints it verbatim
+   beside a countdown. It is not a UI string: the same text is what went into
+   the audit row when the action was armed. Writing our own wording here would
+   mean the screen and the permanent record disagree about what was agreed to,
+   which is precisely what an audit trail exists to prevent.
+
+The band also disarms itself: on the TTL running out (the countdown is the
+server's `expires_in_s`), on CANCEL, and on `unmount` — an armed action must not
+survive leaving the page, because a token in a tab you have navigated away from
+is a click on a button you are no longer looking at.
+
+Two banners sit above the cards when they apply. `READ-ONLY` when the server was
+started with `--read-only` (or `UI_READ_ONLY`): every mutating button is
+disabled and the server would refuse them anyway — the disable is a courtesy,
+the refusal is the control. And a red one when the process is bound to a
+non-loopback host: *anyone who can reach this port can drive this process*. Both
+are facts the server reports in its own payload (`read_only`, `bind`), not
+guesses the page makes.
+
+Keys: none. `regions` lists the five single-line fields (the three limits, the
+pairs count, the run id) so `TAB` from `ARB>` walks them; the two textareas are
+not in the walk and are reached by click or by the browser's own `TAB` order
+from inside a field. `onKey()` claims nothing in any scope, and a pointer click
+on a button blurs it so the next bare letter is typing at `ARB>` again. The
+footer says it: `TAB FIELDS · ESC MONITOR · EVERY ACTION IS AUDITED · NO ORDERS
+ARE EVER PLACED`.
+
+One thing the page cannot yet do, and it shows: a universe change updates the
+server's market list, but the browser's copy of that list arrives only in the
+`hello` frame, which is only sent on connect. Books for evicted markets stop
+arriving (so their rows go QUIET and then stale), and new markets do not appear
+on MONITOR until the socket reconnects or the tab is reloaded.
 
 ### HELP — `/help`
 
@@ -728,7 +878,7 @@ it is a character like any other. Everything the page does own — `↑↓`,
 
 A help page that lies is worse than none, so most of it is **derived** rather
 than typed. The page list and paths come from the router's `navPages()`; the
-chord numbering is `NAVLABEL` plus that count, so the page says `CTRL+1 - CTRL+6`
+chord numbering is `NAVLABEL` plus that count, so the page says `CTRL+1 - CTRL+7`
 on a Mac and `ALT+…` elsewhere without sniffing the platform a second time (it
 asks `NAVLABEL === "CTRL"`); and the per-page key tables are read out of each
 page's own `.des-foot` strip in the DOM on every mount, verbatim, so they cannot
@@ -758,18 +908,66 @@ queues, and the rolling counters behind the stats frame.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /` `/arb` `/pairs` `/paper` `/system` `/help` | the app shell (`SPA_ROUTES`), one entry per client-side route |
+| `GET /` `/arb` `/pairs` `/paper` `/system` `/control` `/help` | the app shell (`SPA_ROUTES`), one entry per client-side route |
 | `GET /market/{market_id:path}` | the app shell; the id is opaque and deliberately unvalidated |
 | `GET /static/*` | `index.html`, `style.css`, `css/*.css`, `js/**/*.js`, served as-is |
-| `GET /api/status` | run id, uptime, per-venue connection state, recording flag, database status (raw-message totals, per-run counts) |
+| `GET /api/status` | run id, uptime, per-venue connection state, recording flag, database status (raw-message totals, per-run counts), and the whole `control` payload |
 | `GET /api/markets/{market_id}` | DES payload for one market (404 if unknown) |
 | `GET /api/pairs?status=...` | pair review listing (see [`pairs.md`](pairs.md)) |
 | `POST /api/pairs/{id}/decide` | confirm/reject one pair, body `{"status": "confirmed"\|"rejected"\|"proposed"}` |
 | `POST /api/pairs/decide` | batch decide, body `{"ids": [...], "status": "..."}` |
 | `GET /api/arb` | current `ArbMonitor.snapshot()` — every tracked pair's best quote |
 | `GET /api/paper` | paper-trading ledger: `enabled`, limits, totals, positions, recent trades |
+| `GET /api/control` | control-plane state: read-only flag, bind info, recording, paper, universe, tracked pairs, jobs, and the **action descriptors** |
+| `POST /api/control/{action}` | run one action, body `{"params": {...}, "confirm": "<token>"}` — the only write entry point |
+| `GET /api/control/log?limit=N` | the audit trail, newest first (`limit` clamped to 1…500, default 50) |
+| `GET /api/control/jobs/{job_id}` | one job with its output lines; a finished job stays readable |
 | `GET /metrics` | Prometheus exposition |
 | `WS /ws` | the live push feed, below |
+
+### The control-plane HTTP surface
+
+Thirteen actions could have been thirteen routes. They are one, with the action
+in the path, because the read-only refusal, the arm-then-confirm handshake, the
+audit row and the metric are exactly the things that get re-forgotten once per
+route: `POST /api/control/{action}` does nothing but unpack the body and call
+`ControlPlane.execute()`, which owns all four. The route layer cannot skip a
+step because it does not implement any of them. See
+[`architecture.md`](architecture.md#the-control-plane) for the executor itself.
+
+The status code is the message, and the control page renders against it rather
+than parsing prose:
+
+| Status | Means | What the page does |
+| --- | --- | --- |
+| `200` | done; body is `{action, effect, changed, audit_id, ...}` | flashes the effect, reloads the audit trail |
+| `400` | a parameter failed validation, before anything happened | flashes the reason |
+| `403` | read-only server; the refusal itself is audited | flashes the reason (the buttons were already disabled) |
+| `404` | unknown action, or a cancel for an unknown job | flashes the reason |
+| `409` | busy (a job of that group is running), the runtime piece is not attached, or the confirm token was wrong/expired | flashes the reason |
+| `428` | **armed, not failed** — body carries `confirm_token`, `effect` and `expires_in_s` | shows the confirm band with the server's sentence |
+| `503` | the audit row could not be written, so a G3 action was **not** performed | flashes the reason |
+
+`428` is the one worth dwelling on. The token is single-use, short-lived
+(`CONFIRM_TTL_S`, 90 s) and bound to a SHA-256 of `(action, params)`, so the
+parameters cannot change between arming and confirming — arming `jobs.propose`
+at `min_score 0.75` and confirming it at `0.10` is refused with *"the parameters
+changed since this action was armed"*, and a failed attempt burns the token
+rather than letting the caller keep guessing. Confirmation is server-side for
+the same reason the effect sentence is: a confirm implemented in the browser is
+invisible to the audit log and to `curl`.
+
+### Every request passes the origin guard
+
+Before FastAPI sees anything, an ASGI middleware checks the `Host` header
+against a loopback allowlist and, on every non-`GET` *and* on the WebSocket
+handshake, checks `Origin`/`Sec-Fetch-Site`. A page on another origin can no
+longer POST a control or open `/ws`. It is pure ASGI rather than Starlette
+middleware precisely so it also sees the WebSocket scope, which is the hole that
+matters once the socket is the thing carrying control state. The reasoning, the
+threat model and the deliberate absence of CSRF tokens are in
+[`architecture.md`](architecture.md#the-network-security-floor) and
+[`security.py`](../src/arb/ui/security.py).
 
 ## WebSocket wire protocol
 
@@ -777,13 +975,18 @@ Server → client, JSON text frames, tagged by `"t"`:
 
 - **`hello`** — sent once, immediately on connect: `run_id` and the full market
   list (id, ticker, title, 24h volume, venue), sorted by volume descending.
-  Followed, in the same burst before any other broadcast can interleave, by a
-  `book` frame for every market that already has book state, and (if an
-  `ArbMonitor` is active) one `arb` frame — this ordering guarantee is
-  deliberate: `queue.put_nowait()` is called for all of these with no `await` in
-  between, so a freshly connected client's queue always has `hello` → all current
-  `book`s → `arb` ahead of anything a concurrent broadcast could add, and never
-  sees a `delta` for a market it hasn't been told exists yet.
+  Followed, in the same burst before any other broadcast can interleave, by one
+  `control` frame, then a `book` frame for every market that already has book
+  state, and (if an `ArbMonitor` is active) one `arb` frame — this ordering
+  guarantee is deliberate: `queue.put_nowait()` is called for all of these with
+  no `await` in between, so a freshly connected client's queue always has
+  `hello` → `control` → all current `book`s → `arb` ahead of anything a
+  concurrent broadcast could add, and never sees a `delta` for a market it
+  hasn't been told exists yet. `control` goes **before** the books because a tab
+  that connects mid-run must not render "paper: on" for even one frame if the
+  trader is suspended. The market list is only ever sent here, which is why a
+  universe change made from `/control` does not reshape an open tab's MONITOR
+  list until that tab reconnects.
 - **`book`** — full YES-book state for one market: bid/ask ladders (`[price,
   qty]` pairs), validity (`valid`, `reason`), book age in ms, timestamp.
   Coalesced server-side to at most one push per market per
@@ -813,6 +1016,28 @@ Server → client, JSON text frames, tagged by `"t"`:
   were just taken this tick. It is a delta, not a ledger: the PAPER page folds
   the trades into its snapshot (deduplicating by id) and `GET /api/paper` remains
   authoritative.
+- **`control`** — `{"t": "control", "control": {...}}`, the *whole*
+  control-plane state (the same body `GET /api/control` serves: read-only flag,
+  bind info, recording, paper, universe, tracked pairs, jobs, action
+  descriptors). Sent on connect and broadcast after every mutating action. It is
+  a full snapshot rather than a patch on purpose: this frame is how a second tab
+  learns that the first one suspended paper trading, and a patch stream that
+  dropped one frame would leave that tab confidently wrong.
+- **`job`** — `{"t": "job", "job": {...}, "tail": [...]}`, one long action's
+  progress: status, phase, `step`/`total`, elapsed, error, result, plus the last
+  20 output lines. Coalesced to `JOB_BROADCAST_INTERVAL_S` (0.25 s), except that
+  a phase change and the finish always broadcast, so the terminal state is never
+  the frame that got dropped. A broadcast that raises is logged and swallowed —
+  a job must not fail because nobody was listening.
+
+Neither frame is handled by the core. The `switch` in `core/ws.js` covers
+`hello book delta stats`; `arb`, `paper`, `control` and `job` fall straight
+through to the `onMessage()` registry, and `pages/control.js` subscribes to the
+last two **at module load** like every other page does with its own frames. So
+the control snapshot is current whether or not the page is showing, and arriving
+on `/control` after a job started shows that job rather than an empty table.
+Mounting also re-fetches `GET /api/control` and `GET /api/control/log`, because
+the audit trail has no frame of its own.
 
 Inbound client messages are ignored by contract — this is a push-only feed; the
 WS endpoint's receive loop exists purely to detect disconnects. The client side

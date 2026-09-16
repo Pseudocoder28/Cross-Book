@@ -106,6 +106,11 @@ export function exec() {
     message("SYSTEM", "ok");
     return;
   }
+  if (q === "CTL" || q === "CONTROL") {
+    navigate("/control");
+    message("CONTROL", "ok");
+    return;
+  }
   if (q === "HELP" || q === "?") {
     navigate("/help");
     message("HELP", "ok");

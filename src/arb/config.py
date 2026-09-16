@@ -10,11 +10,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AppConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     run_id: str | None = None
 
@@ -60,3 +66,27 @@ class AppConfig(BaseSettings):
     # the host port mapping stays 127.0.0.1-only) ---
     ui_host: str = "127.0.0.1"
     ui_port: int = 8_080
+
+    # --- Terminal UI security (enforced in src/arb/ui/security.py) ---
+    # Binding anywhere but loopback exposes controls that start a trading
+    # process to anything that can route here, so it is an explicit opt-in.
+    # Compose needs 0.0.0.0 *inside* its network (the published port stays
+    # 127.0.0.1-only), so the hatch has to be settable from the environment —
+    # ARB_ALLOW_REMOTE_BIND is the documented name, UI_ALLOW_REMOTE_BIND is
+    # accepted too so it matches the UI_* prefix of the settings beside it.
+    ui_allow_remote_bind: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "ARB_ALLOW_REMOTE_BIND",
+            "UI_ALLOW_REMOTE_BIND",
+            "ui_allow_remote_bind",
+        ),
+    )
+    # Read-only serves every view and refuses every control, so a tunnelled
+    # port can be shown to someone without handing them the controls.
+    ui_read_only: bool = False
+    # Comma-separated allowlists layered on top of "loopback is always fine"
+    # (empty by default). Strings rather than lists because pydantic-settings
+    # decodes complex env values as JSON; arb.ui.security.parse_csv splits them.
+    ui_allowed_hosts: str = ""
+    ui_allowed_origins: str = ""

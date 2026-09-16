@@ -62,6 +62,50 @@ class KalshiWSSource:
     def venue(self) -> str:
         return VENUE
 
+    @property
+    def tickers(self) -> list[str]:
+        """The ticker set the next (re)connect will subscribe to."""
+        return list(self._tickers)
+
+    def set_tickers(self, market_tickers: Sequence[str]) -> bool:
+        """Replace the subscribed ticker set. Returns True if it changed.
+
+        The new set does not take effect until the socket reconnects;
+        :meth:`force_resync` is how a caller makes that happen now. Kalshi has
+        no unsubscribe-and-add flow we rely on — ``_resubscribe`` reads
+        ``self._tickers`` fresh on every connect, so a reconnect *is* the
+        apply mechanism.
+
+        What a change COSTS, every time:
+
+        - a full reconnect: the live socket is closed and redialled, so the
+          stream stops for the dial plus one backoff sleep (``WSConfig``
+          defaults, seconds), and the one-way latency clock restarts;
+        - every delta in flight is lost — the books for markets that stay in
+          the set are invalidated on the seq gap and are only correct again
+          once their fresh snapshot lands;
+        - a snapshot burst: Kalshi answers the resubscribe with one full
+          ``orderbook_snapshot`` per market in the *whole* set, not just the
+          added ones, so the recorder and the parse path see |tickers| big
+          frames at once;
+        - books for dropped tickers stop updating and age into permanent
+          staleness unless the caller also evicts them from the
+          :class:`~arb.books.BookManager`.
+
+        Cheap enough to do on a UI click, far too expensive to do per tick.
+
+        This is a plain attribute swap (never an in-place mutation), so a
+        concurrently running ``_resubscribe`` sees either the old list or the
+        new one, never a half-built one, and nothing blocks the ingest loop.
+        """
+        tickers = list(market_tickers)
+        if not tickers:
+            raise ValueError("market_tickers must not be empty")
+        if tickers == self._tickers:
+            return False
+        self._tickers = tickers
+        return True
+
     async def _resubscribe(self, conn: WSConnection) -> None:
         self._cmd_id += 1
         await conn.send(subscribe_orderbook_cmd(self._cmd_id, self._tickers))

@@ -1,5 +1,23 @@
 """arb command-line entry point.
 
+Three commands, and only three, because the UI control plane
+(:mod:`arb.ui.control`) is how this system is operated: recording, paper
+trading, the market universe, pair proposal/backfill/review and replay are all
+buttons now. What is left is what a button cannot be.
+
+- ``arb ui`` starts the server the buttons live in. Its flags are *starting*
+  values for things the UI then changes at runtime; ``docker-compose.yml``
+  launches the container with ``arb ui --top 20 --host 0.0.0.0``.
+- ``arb doctor`` is what you run when the UI will **not** start. A button
+  inside a dead server diagnoses nothing.
+- ``arb replay`` is a **machine interface**: the UI's ``jobs.replay`` action
+  spawns it as a subprocess (``python -m arb.cli replay [RUN_ID] --pairs-top N
+  [--paper] [--persist]``, built in ``ControlPlane._apply_replay``) because
+  replay's per-row loop has no ``await`` and would stall the event loop past
+  the WS ping timeout. Its argv is a contract — changing a flag name, a
+  default or the positional's optionality breaks the UI silently, so
+  ``tests/test_cli.py`` pins it. It stays a human debugging tool on the VM too.
+
 Every command works both locally (``uv run arb ...``) and on the VM
 (``docker compose exec app arb ...``).
 """
@@ -21,34 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="check env, keys, clock skew, database, venue reachability and disk",
     )
-    record = subparsers.add_parser(
-        "record",
-        help="stream raw venue market data into Postgres (read-only)",
-    )
-    record.add_argument(
-        "--venue", choices=["kalshi"], default="kalshi", help="venue to record (default: kalshi)"
-    )
-    record.add_argument(
-        "--tickers",
-        default=None,
-        help="comma-separated market tickers; omit to auto-discover the most liquid",
-    )
-    record.add_argument(
-        "--top",
-        type=int,
-        default=10,
-        help="number of liquid markets to auto-discover (default: 10)",
-    )
-    record.add_argument(
-        "--duration",
-        type=float,
-        default=None,
-        help="seconds to run; omit to run until interrupted",
-    )
-    _add_poly_args(record)
     ui = subparsers.add_parser(
         "ui",
-        help="serve the live market-data terminal UI (read-only)",
+        help="serve the terminal UI; every flag below is a starting value the UI can change",
     )
     ui.add_argument(
         "--tickers",
@@ -66,7 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument(
         "--no-record",
         action="store_true",
-        help="don't write raw messages to Postgres while serving the UI",
+        help="start with recording off (the UI can turn it back on)",
+    )
+    ui.add_argument(
+        "--read-only",
+        action="store_true",
+        help="serve every view but refuse every control (also settable with UI_READ_ONLY)",
     )
     _add_poly_args(ui)
     ui.add_argument(
@@ -77,7 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_paper_args(ui)
 
-    replay = subparsers.add_parser("replay", help="replay a recorded run through the pipeline")
+    # argv contract: the UI spawns this as a subprocess. See the module
+    # docstring; tests/test_cli.py pins the flags ControlPlane passes.
+    replay = subparsers.add_parser(
+        "replay",
+        help="replay a recorded run through the pipeline (also the worker the UI's REPLAY spawns)",
+    )
     replay.add_argument("run_id", nargs="?", default=None, help="run id (default: latest)")
     replay.add_argument(
         "--pairs-top", type=int, default=10, help="confirmed pairs to quote (0 = none)"
@@ -86,32 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument(
         "--persist", action="store_true", help="store paper trades as replay:<run_id>"
     )
-
-    pairs = subparsers.add_parser("pairs", help="cross-venue pair matching (propose / review)")
-    pairs_sub = pairs.add_subparsers(dest="pairs_command")
-    propose = pairs_sub.add_parser("propose", help="fetch both universes and propose pairs")
-    propose.add_argument("--min-score", type=float, default=0.75)
-    propose.add_argument("--no-record", action="store_true")
-    listing = pairs_sub.add_parser("list", help="list stored pairs")
-    listing.add_argument("--status", choices=["proposed", "confirmed", "rejected"], default=None)
-    listing.add_argument(
-        "--limit",
-        type=int,
-        default=50,
-        help="max rows to print, best score first (0 = all; default: 50)",
-    )
-    backfill = pairs_sub.add_parser(
-        "backfill",
-        help="record event slugs on pairs proposed before they were captured",
-    )
-    backfill.add_argument("--no-record", action="store_true")
-    show = pairs_sub.add_parser(
-        "show", help="full detail for one pair (untruncated ids, title, url)"
-    )
-    show.add_argument("pair_id", type=int)
-    for name in ("confirm", "reject"):
-        sub = pairs_sub.add_parser(name, help=f"{name} a proposed pair by id")
-        sub.add_argument("pair_id", type=int)
     return parser
 
 
@@ -164,40 +141,21 @@ def _run_doctor() -> int:
     return exit_code(results)
 
 
-def _run_record(args: argparse.Namespace) -> int:
-    from arb.config import AppConfig
-    from arb.record import run_record
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    tickers = [t.strip() for t in args.tickers.split(",") if t.strip()] if args.tickers else None
-    try:
-        uvloop.run(
-            run_record(
-                AppConfig(),
-                tickers=tickers,
-                top_n=args.top,
-                duration_s=args.duration,
-                poly_top=args.poly_top,
-                poly_slugs=_split(args.poly_slugs),
-            )
-        )
-    except KeyboardInterrupt:
-        return 130
-    return 0
-
-
 def _run_ui(args: argparse.Namespace) -> int:
     from arb.config import AppConfig
     from arb.ui.server import run_ui
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     config = AppConfig()
-    tickers = [t.strip() for t in args.tickers.split(",") if t.strip()] if args.tickers else None
+    # The flag only ever turns read-only *on*: UI_READ_ONLY in the environment
+    # stays in force when it isn't passed.
+    if args.read_only:
+        config = config.model_copy(update={"ui_read_only": True})
     try:
         uvloop.run(
             run_ui(
                 config,
-                tickers=tickers,
+                tickers=_split(args.tickers),
                 top_n=args.top,
                 record=not args.no_record,
                 host=args.host if args.host is not None else config.ui_host,
@@ -233,69 +191,16 @@ def _run_replay(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_pairs(args: argparse.Namespace) -> int:
-    from arb.config import AppConfig
-    from arb.pairs import run as pairs_run
-    from arb.pairs.store import decide, get_pair, list_pairs
-    from arb.storage.db import make_engine
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    config = AppConfig()
-    if args.pairs_command == "propose":
-        candidates = uvloop.run(
-            pairs_run.propose(config, min_score=args.min_score, record=not args.no_record)
-        )
-        print(pairs_run.format_candidates(candidates))
-        return 0
-
-    async def with_engine(coro_fn):  # type: ignore[no-untyped-def]
-        engine = make_engine(config.database_url)
-        try:
-            return await coro_fn(engine)
-        finally:
-            await engine.dispose()
-
-    if args.pairs_command == "list":
-        limit = args.limit if args.limit > 0 else None
-        rows = uvloop.run(with_engine(lambda e: list_pairs(e, status=args.status, limit=limit)))
-        print(pairs_run.format_rows(rows))
-        if limit is not None and len(rows) == limit:
-            # Hint on stderr so it never pollutes a pipe.
-            print(f"(first {limit}; use --limit 0 for all)", file=sys.stderr)
-        return 0
-    if args.pairs_command == "backfill":
-        updated = uvloop.run(pairs_run.backfill(config, record=not args.no_record))
-        print(f"backfilled event slugs on {updated} pairs")
-        return 0
-    if args.pairs_command == "show":
-        row = uvloop.run(with_engine(lambda e: get_pair(e, args.pair_id)))
-        if row is None:
-            print(f"pair {args.pair_id} not found", file=sys.stderr)
-            return 1
-        print(pairs_run.format_pair_detail(row))
-        return 0
-    if args.pairs_command in ("confirm", "reject"):
-        status = "confirmed" if args.pairs_command == "confirm" else "rejected"
-        row = uvloop.run(with_engine(lambda e: decide(e, args.pair_id, status)))
-        if row is None:
-            print(f"pair {args.pair_id} not found", file=sys.stderr)
-            return 1
-        print(pairs_run.format_rows([row]))
-        return 0
-    print("usage: arb pairs {propose|backfill|list|show|confirm|reject}", file=sys.stderr)
-    return 2
-
-
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Translates a closed stdout pipe into a quiet exit.
 
-    Piping a listing into ``head``/``less`` closes the pipe early; without
-    this, Python raises BrokenPipeError mid-print and again while flushing
-    stdout at exit, dumping a traceback over an otherwise fine result.
-    Handled here rather than by restoring the default SIGPIPE disposition,
-    because the same entry point launches the long-running servers (``arb
-    ui``, ``arb record``) where a broken client socket must never kill the
-    process.
+    Piping output into ``head``/``less`` closes the pipe early; without this,
+    Python raises BrokenPipeError mid-print and again while flushing stdout at
+    exit, dumping a traceback over an otherwise fine result. Handled here
+    rather than by restoring the default SIGPIPE disposition, because the same
+    entry point launches the long-running server (``arb ui``) where a broken
+    client socket must never kill the process — and because ``arb replay``'s
+    stdout is a pipe the UI reads, which it closes when a job is cancelled.
     """
     try:
         return _dispatch(argv)
@@ -313,12 +218,8 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
     if args.command == "doctor":
         return _run_doctor()
-    if args.command == "record":
-        return _run_record(args)
     if args.command == "ui":
         return _run_ui(args)
-    if args.command == "pairs":
-        return _run_pairs(args)
     if args.command == "replay":
         return _run_replay(args)
     print(f"arb: command {args.command!r} is not implemented yet", file=sys.stderr)

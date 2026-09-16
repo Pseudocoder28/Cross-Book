@@ -113,3 +113,52 @@ async def test_recorder_drain_waits_for_durable_writes() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await writer
+
+
+async def test_set_tickers_applies_on_the_next_connect() -> None:
+    connections: list[FakeConnection] = []
+
+    async def connector() -> WSConnection:
+        conn = FakeConnection(['{"type":"subscribed"}'])
+        connections.append(conn)
+        return conn
+
+    source = KalshiWSSource(
+        config=config(),
+        run=RunContext(run_id="testrun"),
+        market_tickers=["AAA"],
+        ws_config=WSConfig(backoff_initial_s=0.001, backoff_max_s=0.002, backoff_jitter_frac=0),
+        connector=connector,
+    )
+    assert source.tickers == ["AAA"]
+
+    received = []
+    async with aclosing(source.stream()) as messages:
+        async for message in messages:
+            received.append(message)
+            if len(received) == 1:
+                # Mid-stream universe change: the live socket keeps its old
+                # subscription until it drops, then resubscribes to the new set.
+                assert source.set_tickers(["BBB", "CCC"]) is True
+            if len(received) >= 2:
+                break
+
+    subscribed = [json.loads(c.sent[0])["params"]["market_tickers"] for c in connections]
+    assert subscribed == [["AAA"], ["BBB", "CCC"]]
+    assert source.tickers == ["BBB", "CCC"]
+
+
+async def test_set_tickers_rejects_empty_and_reports_no_op() -> None:
+    import pytest
+
+    async def connector() -> WSConnection:
+        return FakeConnection([])
+
+    source = KalshiWSSource(
+        config=config(), run=RunContext(), market_tickers=["AAA"], connector=connector
+    )
+    with pytest.raises(ValueError):
+        source.set_tickers([])
+    assert source.tickers == ["AAA"]  # rejected outright, not applied then undone
+    assert source.set_tickers(["AAA"]) is False  # no change → caller can skip the reconnect
+    assert source.set_tickers(("AAA", "BBB")) is True

@@ -25,6 +25,7 @@ const PAGES = [
   { id: "pairs", path: "/pairs", title: "PAIRS", nav: true, root: "pairs", module: "./pages/pairs.js" },
   { id: "paper", path: "/paper", title: "PAPER", nav: true, root: "paperpage", module: "./pages/paper.js" },
   { id: "system", path: "/system", title: "SYSTEM", nav: true, root: "system-page", module: "./pages/system.js" },
+  { id: "control", path: "/control", title: "CONTROL", nav: true, root: "control-page", module: "./pages/control.js" },
   { id: "help", path: "/help", title: "HELP", nav: true, root: "help-page", module: "./pages/help.js" },
   { id: "market", path: "/market/:id", title: "DES", nav: false, root: "des", module: "./pages/market.js" },
 ];

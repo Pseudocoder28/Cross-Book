@@ -63,3 +63,62 @@ def test_notional_cap_across_pairs() -> None:
     assert trader.consider(other, quote(2, 100), ts_ms=2) is None  # budget exhausted
     payload = trader.payload()
     assert payload["totals"]["trades"] == 1 and payload["trades"][0]["pair_id"] == 1
+
+
+def test_suspend_keeps_the_spend_budget_and_the_ledger() -> None:
+    # The bug this guards: toggling paper off and on by rebuilding the trader
+    # re-opens max_notional from zero and wipes the ledger — the simulator
+    # then reports profits on money it already spent.
+    trader = PaperTrader(
+        PaperLimits(min_net_ticks=50, max_qty_per_pair=100 * C, max_notional_ticks=98 * 10_000)
+    )
+    first = trader.consider(pair(), quote(2, 100), ts_ms=1)
+    assert first is not None and first.qty == 100 * C
+    assert trader.notional_ticks == 100 * 9800  # the whole $98 budget
+
+    assert trader.suspend() is True
+    assert trader.suspended and not trader.enabled
+    other = TrackedPair(2, 1.0, "kalshi:K2", "polymarket_us:p2", zero_fee, zero_fee, "BTC — 30k")
+    assert trader.consider(other, quote(5, 100), ts_ms=2) is None  # declines everything
+    assert trader.skipped_suspended == 1
+    assert trader.suspend() is False  # idempotent
+
+    assert trader.resume() is True
+    assert trader.enabled and trader.resume() is False
+    # Budget and ledger survived the toggle: still exhausted, still one trade.
+    assert trader.notional_ticks == 100 * 9800
+    assert trader.consider(other, quote(5, 100), ts_ms=3) is None
+    assert len(trader.trades) == 1 and trader.trades[0] is first
+    assert trader.positions[1].qty == 100 * C
+
+
+def test_payload_reports_the_live_suspend_state() -> None:
+    trader = PaperTrader(PaperLimits(min_net_ticks=50))
+    assert trader.payload()["enabled"] is True
+    trader.suspend()
+    payload = trader.payload()
+    assert payload["enabled"] is False and payload["suspended"] is True
+    assert payload["skipped_suspended"] == 0
+    assert trader.payload(enabled=True)["enabled"] is True  # explicit override still wins
+
+
+def test_limits_retune_live_and_tightening_is_a_hard_stop() -> None:
+    trader = PaperTrader(PaperLimits(min_net_ticks=50, max_notional_ticks=200 * 10_000))
+    first = trader.consider(pair(), quote(2, 100), ts_ms=1)
+    assert first is not None and trader.notional_ticks == 100 * 9800  # $98 spent
+
+    previous = trader.set_limits(PaperLimits(min_net_ticks=50, max_notional_ticks=50 * 10_000))
+    assert previous.max_notional_ticks == 200 * 10_000
+    assert trader.limits.max_notional_ticks == 50 * 10_000
+    # Tightening below what is already committed blocks new trades; it does
+    # not unwind the position, because there is no un-filling a fill.
+    other = TrackedPair(2, 1.0, "kalshi:K2", "polymarket_us:p2", zero_fee, zero_fee, "BTC — 30k")
+    assert trader.consider(other, quote(5, 100), ts_ms=2) is None
+    assert trader.positions[1].qty == 100 * C and trader.notional_ticks == 100 * 9800
+
+    # Raising the floor is felt on the very next quote, both ways.
+    trader.set_limits(PaperLimits(min_net_ticks=400, max_notional_ticks=400 * 10_000))
+    assert trader.consider(other, quote(2, 100), ts_ms=3) is None  # 2¢ < 4¢ floor
+    trader.set_limits(PaperLimits(min_net_ticks=50, max_notional_ticks=400 * 10_000))
+    resumed = trader.consider(other, quote(2, 100), ts_ms=4)
+    assert resumed is not None and resumed.qty == 100 * C

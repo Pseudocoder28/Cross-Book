@@ -38,6 +38,22 @@ log = logging.getLogger(__name__)
 BATCH = 2000
 
 
+class ReplayError(Exception):
+    """A replay could not be run as asked (bad or missing run id).
+
+    Deliberately a plain ``Exception`` and not ``SystemExit``: this is raised
+    from a coroutine that an HTTP handler or a supervised job may await, and
+    ``SystemExit`` is a ``BaseException`` — Starlette's error middleware does
+    not catch it, ``asyncio``/``anyio`` task groups propagate it as a shutdown
+    request, and "no recorded runs yet" would take the server down instead of
+    returning a 4xx. Callers that are a CLI turn it into an exit status.
+    """
+
+
+class NoRecordedRuns(ReplayError):
+    """``raw_messages`` holds no run to replay."""
+
+
 @dataclass
 class PairStats:
     label: str
@@ -207,14 +223,19 @@ async def run_replay(
     limits: PaperLimits | None = None,
     persist: bool = False,
 ) -> ReplayReport:
-    """CLI entry: rebuild books for a recorded run; optionally quote confirmed
-    pairs (fee parameters fetched live, not recorded) and paper-trade them."""
+    """Rebuild books for a recorded run; optionally quote confirmed pairs
+    (fee parameters fetched live, not recorded) and paper-trade them.
+
+    Raises :class:`ReplayError` when the run cannot be identified. Safe to
+    await from a request handler or a job: nothing here raises a
+    ``BaseException`` of its own.
+    """
     engine = make_engine(config.database_url)
     try:
         if run_id is None:
             run_id = await latest_run_id(engine)
             if run_id is None:
-                raise SystemExit("no recorded runs in raw_messages")
+                raise NoRecordedRuns("no recorded runs in raw_messages")
         books = BookManager(staleness_limit_ns=config.book_staleness_limit_ms * 1_000_000)
         books.set_venue_staleness("polymarket_us", 120 * 1_000_000_000)
         arbmon: ArbMonitor | None = None

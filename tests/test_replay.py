@@ -81,3 +81,31 @@ async def test_replay_rebuilds_books_from_recorded_run() -> None:
     assert len(kalshi) == 5 and all(books.get(m) is not None for m in kalshi)
     assert not report.invalid_books  # everything valid at the end of the run
     assert "replay r1" in report.summary()
+
+
+async def test_missing_run_raises_a_catchable_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # This used to be SystemExit — a BaseException that Starlette's error
+    # middleware does not catch and that anyio treats as "shut down".
+    from arb import replay
+    from arb.config import AppConfig
+    from arb.replay import NoRecordedRuns, ReplayError, latest_run_id, run_replay
+
+    assert issubclass(ReplayError, Exception)
+    assert not issubclass(ReplayError, SystemExit)
+
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    assert await latest_run_id(engine) is None
+    monkeypatch.setattr(replay, "make_engine", lambda url: engine)
+
+    config = AppConfig(_env_file=None)  # pyright: ignore[reportCallIssue]
+    # A plain `except Exception` handler — all an HTTP route or a job has —
+    # sees it, and it carries the same message the CLI used to print.
+    try:
+        await run_replay(config, None, pairs_top=0)
+    except Exception as exc:
+        assert isinstance(exc, NoRecordedRuns)
+        assert "no recorded runs" in str(exc)
+    else:  # pragma: no cover - the call above always raises
+        raise AssertionError("expected NoRecordedRuns")

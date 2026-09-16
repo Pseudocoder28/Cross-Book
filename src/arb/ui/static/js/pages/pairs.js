@@ -596,7 +596,7 @@ function buildRow(row, i) {
 function emptyText(p) {
   if (p.q.trim()) return "NO MATCH FOR " + p.q.trim().toUpperCase();
   if (p.all.length) return "NONE " + p.filter.toUpperCase();
-  return p.filter === "proposed" ? "NO PROPOSALS — RUN: arb pairs propose" : "NONE";
+  return p.filter === "proposed" ? "NO PROPOSALS — RUN THE PROPOSE PAIRS JOB ON /control" : "NONE";
 }
 
 function renderList() {
