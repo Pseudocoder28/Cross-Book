@@ -114,11 +114,12 @@ suite — they're verified against a real Postgres instance manually / via
 
 ## UI server tests without a browser or network
 
-The UI splits cleanly into a **tested Python backend** and an **untested
-browser frontend** (see [what isn't automated](#what-isnt-automated-yet)),
-and the split is worth keeping in mind when reading a UI bug report: routes,
-payload shapes and framing are covered; anything that only exists once a DOM
-renders is not.
+The UI is tested in three layers, and which one a bug belongs to is usually
+obvious from how it fails: `test_ui_server.py` covers routes, payload shapes
+and framing; [`tests/js/`](#the-frontend-unit-suite-node---test) covers the
+frontend's pure logic; and
+[`tests/test_browser.py`](#the-acceptance-suite-a-real-browser) covers what
+only exists once a DOM renders.
 
 `test_ui_server.py` (20 tests) builds the FastAPI app via `create_app(state)`
 against a stub implementing the `UIState` protocol (see
@@ -175,6 +176,87 @@ automated suite.
   behavior against a small recorded-run fixture built from the same real
   captures.
 
+## The frontend unit suite: `node --test`
+
+```sh
+node --test "tests/js/**/*.test.mjs"      # 109 tests
+```
+
+Node 22's built-in test runner, so there is **no `package.json`, no
+`node_modules` and no npm dependency** — it is the same `node` binary the repo
+already uses for `node --check`. That matters: the standing rule is that a
+Python project should not grow a node toolchain for one page, and vitest or
+jest would have breached it.
+
+[`tests/js/shim.mjs`](../tests/js/shim.mjs) installs the few globals the core
+modules touch at import time (`document`, `window`, a `navigator` defined with
+`Object.defineProperty` because it is getter-only in node, `requestAnimationFrame`
+as a queue a test drains explicitly). The suites import the **real** modules
+unmocked, so the command buffer, the router and the render batch under test are
+the production ones.
+
+What it covers, in descending order of how much it matters:
+
+- **`core/keys.js` resolution order** — the safety property. A bare printable in
+  COMMAND scope must never reach a page's `onKey`; that is the whole content of
+  the bug where typing `RUN` on `/pairs` wrote two pair decisions to Postgres.
+  Also the dirty-buffer rule, the LIST fall-through, the five-rung Escape
+  ladder, `e.repeat` rejection, and the nav chord — including that the platform
+  test accepts both `"macOS"` (lower-case, what `userAgentData` reports) and
+  `"MacIntel"`, a case-sensitivity bug that shipped once.
+- `core/format.js` — the tick and `Qty` conversions, including the negative and
+  null paths.
+- `core/router.js` — normalize/match, the `/market/:id` param, percent-encoded
+  ids, trailing slashes.
+- `core/state.js` — the rAF batch, unregistered-key dropping, the pointer-down
+  hold.
+
+It cannot see the `/control` uneditable-field bug, and the suite's own header
+says so rather than faking it: that defect is the browser taking focus away when
+a focused node is removed, and a stub with no real focus model cannot reproduce
+it. That is the next section's job.
+
+## The acceptance suite: a real browser
+
+```sh
+uv run pytest tests/test_browser.py       # 7 tests
+uv run pytest -m "not browser"            # the fast loop, skips them
+```
+
+[`tests/browser.py`](../tests/browser.py) drives real headless Chrome over the
+DevTools protocol using `websockets` (already a dependency) — no playwright, no
+selenium, no driver binary. Two decisions in it are load-bearing:
+
+- **It does not start `arb ui`.** That would open live venue WebSockets and want
+  Postgres on every run. It serves `create_app(<stub state>, static_dir=STATIC_DIR)`
+  wrapped in the same `OriginGuardMiddleware` `run_ui` applies — the real app and
+  the real assets, with deterministic data and no venue traffic.
+- **Keys go through `Input.dispatchKeyEvent`, never a synthetic `KeyboardEvent`.**
+  A `KeyboardEvent` dispatched on `document` has `document` as its target, so
+  `scopeOf(e.target)` reads COMMAND whatever is really focused and every
+  LIST-scope binding becomes untestable — the `RUN` test would pass vacuously.
+
+The action descriptors the `/control` page renders from are built from a **real
+`ControlPlane`**, not a hand-written list, because the page renders entirely from
+them; an earlier hand-written copy had already drifted (9 actions against 13, and
+`pairs.top` published as G3 when it is G2).
+
+Each test maps to a failure mode that shipped or would be silent:
+
+| Test | Guards |
+| --- | --- |
+| typing `RUN` on `/pairs` | three characters, zero writes |
+| a `/control` field across a live re-render | same DOM node, same focus, value reaches the wire |
+| a blurred-but-edited field | the next control frame does not silently revert it |
+| a leaned-on decision key | one write, not one per autorepeat |
+| arrow → list → letter → Escape | the scope ladder, end to end |
+| cross-site POST and WS handshake | the Origin guard, over a real socket |
+| every route cold-loads | no console error, no failed subresource |
+
+Every one was mutation-tested: the defect reintroduced in the real source, the
+test watched to fail, the source restored. A test that cannot fail is not a test
+— two of the originals could not, and both were fixed rather than kept.
+
 ## What isn't automated (yet)
 
 - Real venue connectivity (both WS and REST) is checked live and by hand at
@@ -188,27 +270,9 @@ automated suite.
   History-API router, keyboard shortcuts) has been verified manually over the
   Chrome DevTools protocol at several milestones (see `PROGRESS.md`) but has
   no automated browser test suite.
-- **The browser frontend has no JS tests.** There is no JS harness in the repo
-  — no `package.json`, no vitest/jest — so the only check `src/arb/ui/static/js/`
-  gets is `node --check` per file, which finds syntax errors and nothing else.
-  Reverting either M17 sparkline fix would still pass every check in the repo.
-
-  What the multi-page restructure changed is *reachability*, not coverage.
-  The pre-multipage `static/app.js` (deleted; it lives in git history) was one
-  IIFE with no exports, so a harness had nothing to import. Today the frontend
-  is ES modules that do export: `js/core/*` exports named functions and every
-  `js/pages/*.js` default-exports its page object. The cheap first target is
-  [`js/core/format.js`](../src/arb/ui/static/js/core/format.js) — it imports
-  nothing and touches no DOM, and it is where the numbers come from (tick→cent
-  and fixed-point quantity formatting, `percentile`, the duration/age
-  formatters), exactly the kind of arithmetic that breaks silently and still
-  reads plausibly. `js/core/state.js`'s selection helpers are nearly as easy
-  (one `requestAnimationFrame` and one `document.body` touch away).
-
-  The rest still needs a real browser, and some of it is not even importable
-  in isolation: the sparkline geometry is a closure inside
-  `pages/monitor.js`'s `drawSpark`, the router's path compiler and matcher are
-  module-private and `register()` reaches for `document`, and mount/unmount,
-  key routing and select-to-copy are DOM behavior by definition. Worth a
-  harness — starting with `core/format.js` — if the frontend grows more logic
-  than rendering.
+- **No CI runs any of this.** There is no `.github/workflows`, no Makefile and
+  no hook: every suite below is something a human types. The suites are real
+  and they bite, but nothing stops a red commit from landing.
+- The browser acceptance suite needs Chrome and **skips** where there is none,
+  so on a machine without a browser the frontend's integration behaviour is
+  unguarded and the run is still green. `-rs` shows the skips.

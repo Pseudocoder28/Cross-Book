@@ -2,9 +2,52 @@
 
 ## Current milestone
 
-**M20 — the CLI collapses to three commands and the UI becomes the control plane.**
+**M21 — the frontend gets tested, in two layers.**
 
 ## What works
+
+- **A frontend unit suite on `node --test`** — 109 tests, and no
+  `package.json`, no `node_modules`, no npm dependency: node 22 ships the
+  runner, so the standing "no node toolchain for one page" rule holds. A
+  ~12-line shim installs the globals the core modules touch at import
+  (`navigator` needs `Object.defineProperty`; it is getter-only in node), and
+  the suites import the REAL modules unmocked. Heaviest coverage is
+  `core/keys.js`'s resolution order — a bare printable in COMMAND scope must
+  never reach a page's `onKey`, which is the whole content of the `RUN` bug —
+  plus the Escape ladder, `e.repeat`, the nav chord including the `"macOS"`
+  lower-case trap, and the tick/`Qty` formatters.
+- **A browser acceptance suite** — 7 tests driving real headless Chrome over
+  CDP with `websockets` (already a dependency); no playwright, no selenium, no
+  driver binary. It serves `create_app(<stub>, static_dir=STATIC_DIR)` rather
+  than `arb ui`, so a run makes zero venue calls and needs no Postgres
+  (verified by running it green with `DATABASE_URL` and both venue bases
+  pointed at a dead port). Keys go through `Input.dispatchKeyEvent`, never a
+  synthetic `KeyboardEvent`, because the latter targets `document` and would
+  make every LIST-scope assertion vacuous.
+- **The manual checklist is now executable.** Typing `RUN` on `/pairs` types
+  and writes nothing; a `/control` field survives a live re-render as the same
+  DOM node with focus and value intact and reaches the wire; a blurred-but-
+  edited field is not reverted by the next frame; a leaned-on decision key
+  writes once, not once per autorepeat; the scope ladder end to end; the
+  cross-site POST and WebSocket refusals over a real socket; every route
+  cold-loads with no console error or failed subresource.
+- **Every test was mutation-tested** — defect reintroduced in the real source,
+  test watched to fail, source restored and re-verified. Two of the originals
+  could NOT fail and were rewritten rather than kept: one waited on the wall
+  clock for a 1 s tick (deleting the tick left it green), one never consumed
+  `Log.entryAdded` (a 404'd stylesheet left the page unstyled and invisible).
+  The browser suite's action descriptors now come from a real `ControlPlane`,
+  because the hand-written copy had already drifted — 9 actions against 13,
+  with `pairs.top` published G3 when it is G2.
+- 307 Python tests (7 browser) + 109 node tests; ruff, pyright and
+  `node --check` clean. `uv run pytest -m "not browser"` is the fast loop at
+  300 tests in ~1.3 s.
+- **Open**: there is still no CI, so both suites are things a human types —
+  that is the remaining hole and `docs/testing.md` records it as one. The
+  browser suite also skips (green) where there is no Chrome, so a machine
+  without a browser leaves the frontend's integration behaviour unguarded.
+
+### From M20 — the CLI collapses to three commands and the UI becomes the control plane
 
 - **Everything is operated from the browser.** A new `/control` page (the 7th
   nav page; the `CTRL+1`–`CTRL+N` chord label is derived from the nav count, so

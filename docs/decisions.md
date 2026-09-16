@@ -38,6 +38,42 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M21 — the frontend gets tested, in two layers
+
+- **Two suites, because the two shipped bugs failed in different layers.**
+  Typing `RUN` on `/pairs` writing to Postgres was pure resolution-order logic
+  in `onKey` — a unit test catches it. `/control`'s fields being uneditable was
+  the browser dropping focus when a rendered-over `<input>` was removed — no
+  unit test can see that. One harness would have caught one bug.
+- **`node --test`, not vitest or jest.** The standing rule is that a Python
+  project should not grow a node toolchain for one page, and node 22 ships a
+  test runner, so the suite has no `package.json`, no `node_modules` and no
+  dependency. It is the same binary already used for `node --check`.
+- **The unit shim is a stub and says so.** It installs the handful of globals
+  the core modules touch at import and nothing more. It deliberately cannot
+  reproduce focus-stealing, and that was demonstrated rather than asserted: the
+  pre-fix `control.js` was restored and the suite stayed green. Faking that
+  behaviour would have produced a test that passes for the wrong reason.
+- **The acceptance suite does not run `arb ui`.** It serves `create_app` with a
+  stub state and the real static assets, wrapped in the same Origin guard
+  `run_ui` applies. Real app, real JS, no venue traffic, no Postgres — a test
+  suite that hits production venues on every run is a suite people stop running.
+- **Keys go through CDP, never a synthetic `KeyboardEvent`.** A `KeyboardEvent`
+  dispatched on `document` has `document` as its target, so `scopeOf(e.target)`
+  reads COMMAND no matter what is focused. The `RUN` test would have passed
+  against a completely broken key path.
+- **The browser suite reads its action descriptors from a real `ControlPlane`.**
+  The `/control` page renders entirely from them, so a hand-written copy is a
+  suite driving a fiction — and the first one had already drifted (9 actions
+  against 13, `pairs.top` published G3 when it is G2).
+- **Every test was mutation-tested, and two were rewritten because they could
+  not fail.** One waited on the wall clock for a 1 s tick, so deleting the tick
+  left it green; one never consumed `Log.entryAdded`, so a 404'd stylesheet that
+  left the page unstyled was invisible. A test that cannot fail buys false
+  confidence, which is worse than an acknowledged gap.
+- **Still no CI.** Both suites are things a human types. That is the remaining
+  hole and it is recorded as one in `docs/testing.md` rather than implied away.
+
 ## M20 — the CLI collapses to three commands and the UI becomes the control plane
 
 - **Three CLI commands survive, and each one survives for a reason a button

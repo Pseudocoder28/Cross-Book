@@ -54,7 +54,7 @@ inside a dead process diagnoses nothing); `arb replay` is the worker the UI's
 `/control` — recording, paper trading, the market universe, tracked pairs and
 pair proposal/backfill are runtime state, not argv.
 
-- `uv run pytest`, `uv run ruff check .` and `uv run pyright`
+- `uv run pytest`, `uv run ruff check .` and `uv run pyright`; `node --test "tests/js/**/*.test.mjs"` runs the frontend unit suite (node's built-in runner — no package.json, no npm). `uv run pytest -m "not browser"` skips the headless-Chrome acceptance tests for a fast loop; they skip themselves where there is no Chrome.
 - `uv run alembic upgrade head` migrates the database (URL from `.env` via `AppConfig`). Run it before using the UI's controls: every action writes an audit row to `control_actions` (migration `0004`), and a G3 action refuses to arm if that write fails.
 - `docker compose up -d` starts Postgres with pgvector, Prometheus, Grafana and the app
 - `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk (also a `/control` job, `jobs.doctor`)
