@@ -1,6 +1,14 @@
 # All host ports bind to 127.0.0.1 only. On the VM these are reached over an
 # SSH tunnel — never exposed publicly.
 
+# Pinned on purpose. Without it Compose names the project after the directory,
+# so every git worktree of this repo gets its OWN stack — and since the host
+# ports here are fixed, the second one dies on "Bind for 127.0.0.1:5432 failed:
+# port is already allocated" after having already built an image and created
+# four containers. One name means `docker compose` targets the same stack from
+# any checkout.
+name: arb
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
