@@ -1168,3 +1168,27 @@ async def test_a_zero_row_write_still_repairs_a_drifted_watch_set(
     assert reloads == [[3], []], "the reload actually ran and resolved to nothing"
     assert host.arbmon is None or [p.pair_id for p in host.arbmon.pairs] == []
     await engine.dispose()
+
+
+async def test_a_venue_settlement_is_remembered_by_the_next_selection(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """What the venue said last time must not be forgotten on the next press.
+
+    The chooser filters on ``close_time`` recorded at proposal, which misses a
+    market that closed early — so the load-time check catches it, but only
+    after it has taken a watch slot. Live, six settled esports maps took six
+    of twelve slots on every single bulk set, and re-pressing never helped.
+    """
+    engine = await events_engine()
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    # The venue reports that the whole Bitcoin ladder has settled.
+    control._settled_pairs = set(range(1, 11))
+
+    await control.execute("pairs.top", {"n": 3})
+
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {11, 12}, "a slot must not go back to a market known to be over"
+    await engine.dispose()

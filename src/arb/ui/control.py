@@ -880,6 +880,13 @@ class ControlPlane:
         self._market_meta: dict[str, dict[str, Any]] = {}
         # Confirmed/tracked row counts for the synchronous payload, plus the
         # background refresh that keeps them honest. See PAIR_COUNTS_TTL_S.
+        # Pairs the venues reported as finished on the last reload. The
+        # stored close_time the chooser filters on is a proposal-time snapshot,
+        # so it lets a market that closed early through; without remembering
+        # what the venue actually said, every bulk set re-picks the same dead
+        # pairs and spends half the watch set on them. Live: six settled
+        # esports maps took six of twelve slots on every press.
+        self._settled_pairs: set[int] = set()
         self._pair_counts: dict[str, int] | None = None
         self._pair_counts_at = 0.0
         self._pair_counts_task: asyncio.Task[None] | None = None
@@ -1662,10 +1669,15 @@ class ControlPlane:
             # unbounded, so N is always filled if the inventory allows it —
             # a hard per-event cap would silently return fewer pairs than asked.
             now = datetime.now(UTC)
-            skipped = [f.id for f in flags if f.is_closed(now)]
+            def over(f: PairFlags) -> bool:
+                # Two nets: the close time recorded at proposal, and whatever
+                # the venue said last time we actually asked.
+                return f.is_closed(now) or f.id in self._settled_pairs
+
+            skipped = [f.id for f in flags if over(f)]
             buckets: dict[str, list[PairFlags]] = {}
             for f in flags:
-                if not f.is_closed(now):
+                if not over(f):
                     buckets.setdefault(f.event_key, []).append(f)
             events = list(buckets.values())  # first seen = best ranked, kept
             picked: list[int] = []
@@ -1851,6 +1863,9 @@ class ControlPlane:
             kalshi=[p.kalshi_ticker for p in load.tracked],
             polymarket=load.polymarket_slugs,
         )
+        # Remember what the venues just said, so the next selection does not
+        # hand a slot back to a market that has finished.
+        self._settled_pairs = {pid for pid, _ in load.expired}
         polymarket = await self._apply_polymarket_universe() if self.polymarket else {}
         # An empty union would be an illegal Kalshi subscription; with no base
         # markets and no watched pairs there is nothing to subscribe to, so the
