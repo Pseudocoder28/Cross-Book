@@ -159,19 +159,31 @@
 
 /* ---------- audit ---------- */
 
-.caud .k { display: flex; gap: 8px; align-items: baseline; }
-.ca-when { color: var(--dim); font-size: 10px; }
+/* The effect sentence IS the audit record — it is what the operator was shown
+   and agreed to, which is why it is stored rather than re-derived from the
+   parameters later. So it wraps and is never clipped: measured at 1600px it
+   was losing 47% of itself to an ellipsis, which left rows reading "…the
+   ledger are kept, so re…" with the outcome cut off. `.kv` pins a 16px row
+   height and `nowrap`, so an audit row has to opt out of both. */
+.caud {
+  height: auto;
+  min-height: 16px;
+  align-items: baseline;
+  padding: 1px 0;
+}
+.caud .k { display: flex; gap: 8px; align-items: baseline; flex: none; }
+.caud .v { white-space: normal; }
+.ca-when { color: var(--dim); font-size: 10px; white-space: nowrap; }
 .ca-res { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; }
-.ca-v { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
-.ca-act { color: var(--amber); font-weight: 700; }
+.ca-v { display: flex; gap: 8px; align-items: baseline; min-width: 0; flex-wrap: wrap; }
+.ca-act { color: var(--amber); font-weight: 700; white-space: nowrap; }
 .ca-eff {
   color: var(--ink2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
-.ca-err { color: var(--ask); margin-left: auto; }
+.ca-err { color: var(--ask); }
 
 @media (prefers-reduced-motion: reduce) {
   .cbtn { transition: none; }

@@ -83,6 +83,24 @@ test("fmtAge / fmtAgo: sub-second in ms, then seconds; ago never goes negative",
   assert.equal(f.fmtAgo(-500), "0s");
 });
 
+test("fmtAgo: escalates to m / h / d — an audit row is not read in seconds", () => {
+  // Seconds only below a minute, and the rounding boundary is the handover.
+  assert.equal(f.fmtAgo(59_000), "59s");
+  assert.equal(f.fmtAgo(59_500), "1m", "59.5s rounds to 60s, which is a minute");
+  assert.equal(f.fmtAgo(60_000), "1m");
+  assert.equal(f.fmtAgo(90_000), "1m", "larger units floor: 90s is not yet two minutes");
+  assert.equal(f.fmtAgo(3_599_000), "59m");
+  assert.equal(f.fmtAgo(3_600_000), "1h");
+  assert.equal(f.fmtAgo(86_399_000), "23h");
+  assert.equal(f.fmtAgo(86_400_000), "1d");
+  // The row that exposed this: 21 hours used to render as "76523s AGO".
+  assert.equal(f.fmtAgo(76_523_000), "21h");
+  // Every output is one number and one unit, so a narrow column can hold it.
+  for (const ms of [0, 5e3, 6e4, 3.6e6, 8.64e7, 9e8]) {
+    assert.match(f.fmtAgo(ms), /^\d+[smhd]$/, `fmtAgo(${ms}) must be N + unit`);
+  }
+});
+
 test("fmtRate: three bands, all suffixed /s", () => {
   assert.equal(f.fmtRate(0), "0.0/s");
   assert.equal(f.fmtRate(9.94), "9.9/s");
