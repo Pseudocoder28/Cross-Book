@@ -178,6 +178,21 @@ def no_control_payload(*, run_id: str, recording: bool) -> dict[str, Any]:
         },
         "pairs_top": 0,
         "tracked_pairs": 0,
+        # Same shape ControlPlane.payload() publishes. None means "not read",
+        # which the UI renders as "—"; a missing key renders as nothing at all.
+        "pairs": {
+            "confirmed": None,
+            "tracked": None,
+            "total": None,
+            "live": 0,
+            "poll": {
+                "attached": False,
+                "targets": 0,
+                "interval_s": None,
+                "cycle_s": None,
+                "per_pair_s": None,
+            },
+        },
         "universe": {
             "kalshi": {"tickers": [], "base": [], "pairs": [], "attached": False},
             "polymarket_us": {
@@ -559,6 +574,23 @@ class ServerState:
 
     def add_markets(self, markets: list[dict[str, Any]]) -> None:
         self._markets = [*self._markets, *markets]
+        self.broadcast_hello()
+
+    def broadcast_hello(self) -> None:
+        """Re-send the market list to every open tab.
+
+        The browser builds MONITOR from the ``hello`` frame, and `onHello` is
+        written to be re-run: it rebuilds the list, keeps the selection if it
+        survived and prunes books for markets that left. Without this, a
+        universe change (confirming a pair, then RELOAD PAIRS) subscribed both
+        legs and streamed their books while MONITOR still showed the list from
+        connect time — the new markets only appeared after a page reload.
+
+        Every startup call site runs before a client exists, so this is a
+        no-op then; it lives here rather than at the one runtime call site so
+        a future one cannot forget it.
+        """
+        self.broadcast({"t": "hello", "run_id": self.run_id, "markets": self.hello_markets()})
 
     # -- pairs ----------------------------------------------------------------
 
@@ -683,6 +715,7 @@ class ServerState:
 
     def set_markets(self, markets: list[dict[str, Any]]) -> None:
         self._markets = markets
+        self.broadcast_hello()
 
     # -- DES (market description) ----------------------------------------------
 
@@ -1004,11 +1037,13 @@ async def run_ui(
         tracked: list[TrackedPair] = []
         pair_pm_slugs: list[str] = []
         pair_pm_markets: dict[str, PolymarketUSMarket] = {}
-        if pairs_top > 0:
+        # The watch set is `pairs.tracked` in the database, not a top-N slice:
+        # a confirmed pair is a judgement about the world, tracking it is an
+        # operational choice bounded by the Polymarket poll budget. `--pairs-top`
+        # is gone as a selector; the set is whatever /control last chose.
+        if True:
             try:
-                load = await load_tracked_pairs(
-                    config, run, engine, top_n=pairs_top, sink=record_raw
-                )
+                load = await load_tracked_pairs(config, run, engine, sink=record_raw)
                 tracked = load.tracked
                 pair_pm_slugs = load.polymarket_slugs
                 pair_pm_markets = load.polymarket_markets
