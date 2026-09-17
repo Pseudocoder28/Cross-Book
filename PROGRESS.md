@@ -499,6 +499,32 @@ exists; the other half is the part with money in it:
 
 ## Open questions
 
+- **The confirmed inventory is exhausted, and that is now the binding
+  constraint.** 64 confirmed pairs span 9 Kalshi events; 6 of the 9 have
+  settled. The 3 that remain — BTC year-end 2026, Musk net worth Dec 2026,
+  SCOTUS 2029 — are all long-dated, so a perfectly spread watch set is still a
+  slow one. Selection cannot fix this: `jobs.propose` against a live universe
+  and confirming across many near-dated events is the only thing that will.
+- **The scorer is effectively a constant.** `score = 1.0 - 0.00015 x days_apart`
+  once titles and outcomes match, so anything resolving within ~3.3 days of its
+  twin displays 1.000 and the column carries no information. Worse,
+  `title_tokens` drops single-character tokens and `name_similarity` returns 1.0
+  on subset containment, so Kalshi "Map 2" matched Polymarket "Map 1" and two
+  false positives were confirmed at 1.000. Re-scoring changes every stored row
+  and only takes effect after a re-propose; deferred, but it is the next real
+  pair-quality fix.
+- **`max_book_age_ms` on the paper trader is designed but not landed.** The
+  gate belongs in `PaperTrader.consider`, comparing monotonic clocks only (the
+  wall-clock skew that made a latency metric read negative would poison a
+  wall-clock comparison). It is deferred because the Polymarket cycle is ~40s
+  per book and every pair has a Polymarket leg, so any honest default refuses
+  every edge and empties /paper. Land it after the cycle is shorter, defaulting
+  to 0 = off.
+- **`/api/pairs` ships ~18.5 MB to render 500 rows,** and `GZipMiddleware` is
+  absent from the app entirely. Lean rows plus gzip is roughly a 94% reduction.
+  Unrelated to anything above; its own PR.
+- **Neither test suite runs automatically.** No CI.
+
 - Credentials not yet provisioned, and **both venues require authenticated WebSockets even for public market data**. Kalshi: Key ID + RSA PEM (demo or production, user's choice). Polymarket US: Key ID + Ed25519 secret from polymarket.us/developer (app signup + KYC; no sandbox). Until then, Polymarket books can be polled over unauthenticated gateway REST at 20 req/s/IP; Kalshi has no unauthenticated fallback.
 - Kalshi: WS gap-recovery procedure unspecified in docs (we chose resubscribe + fresh snapshot); exact WS field names to confirm against asyncapi.yaml; whether `GET /markets`/`GET /events` need auth; market categorization source; fractional contract counts vs integer-quantity assumption.
 - Polymarket US: WS wire format is contradictory in the docs (snake_case + numeric enums vs camelCase + string enums) — settle from captured payloads; no seq numbers on the markets WS, so validity rests on staleness + `transactTime` + periodic REST reconciliation; REST book depth and heartbeat cadence undocumented; rules-text field unclear (`description` vs `rulesDisclaimer`).

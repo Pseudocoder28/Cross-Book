@@ -838,3 +838,67 @@ Design choices and why. Newest first.
   `secrets/` (gitignored); env vars point at them.
 - **Deferred to later prompts:** venue endpoints/auth (must be read from docs
   first), docker-compose infra, and all order placement code (Day 1 is read-only).
+
+## A watch set is chosen per EVENT, not per row (2026-09-17)
+
+`pairs.top` took the first N rows of `ORDER BY score DESC, id`. Every confirmed
+pair scored exactly 1.000 — 64 of 64 on the live table — so that was `ORDER BY
+id`, and ids cluster by event because a proposal run inserts one event's markets
+together. Ten of ten slots went to consecutive strike bands of one Bitcoin
+year-end ladder: ten rows, but one bet, all far out of the money and all still.
+
+The selection now deals round-robin — the best row of every event, then the
+second of every event, until N is full. Considered and rejected:
+
+- **A hard per-event cap.** With three live events and N=10, a cap of one
+  returns three pairs. Silently giving back fewer than asked is the same class
+  of failure, wearing different clothes. Round-robin with unbounded rounds
+  fills N *and* maximises spread.
+- **Fixing the scorer so scores stop tying.** The right long-term answer, and it
+  changes nothing until a re-propose runs. It also would not have untracked the
+  ten Bitcoin strikes already holding the watch set.
+- **Ordering by `decided_at`.** It is the only column with real variance
+  (`created_at` has one distinct value across every confirmed row), but top-10
+  by `decided_at DESC` is just a different single-event clump. It refines
+  ranking *within* a bucket; it does not create buckets.
+
+## Expiry is checked twice, in the order the checks cost (2026-09-17)
+
+Three of thirteen watched pairs were esports maps that had resolved days
+earlier. They held poll budget, showed no movement, and nothing said why.
+
+1. **Selection** filters on the `close_time` recorded at proposal. Free, no
+   I/O, and it runs *before* the operator arms — so the armed sentence can say
+   how many pairs it skipped.
+2. **Load** asks the venues, using the predicates the adapters already use:
+   Kalshi tested positively against `"active"` so an unlisted future value fails
+   closed, Polymarket on `closed` and never on `active`, which stays true after
+   settlement. Both objects are already fetched to resolve fees, so this costs
+   no extra request.
+
+The first misses a market that closed early; the second catches it but only
+after it has taken a slot. So the control plane remembers what the venues
+reported and feeds it back into the next selection. Without that, every bulk
+set re-picked the same dead pairs: asking for 12 produced 6 quoting, forever.
+
+The load-time check SKIPS rather than clearing the `tracked` flag. A read path
+must not mutate operator state; untracking is a control action with an audit
+row.
+
+## A paper fill's cost rounds up, its edge rounds down (2026-09-17)
+
+The trader sat one tick under its notional cap and kept trading. It sized each
+fill at a single Qty unit — 1e-4 contracts, true cost 0.98 ticks — and `int()`
+truncated that to zero, so `notional_ticks` never advanced and the cap was
+never reached. 163 free trades in one minute, spend meter frozen.
+
+Cost and fees round up, net rounds down: every rounding goes against the book
+and none toward it. A simulator is allowed to be wrong in exactly one
+direction.
+
+No notional reset control was added. `notional_ticks` is capital *deployed*,
+not spent, and nothing models settlement — zeroing it would assert capital is
+free while the positions are still open. The honest ways to free room are
+raising the cap through `paper.limits` (audited) or restarting the run; every
+trade already survives in `paper_trades` keyed by `run_id`.
+
