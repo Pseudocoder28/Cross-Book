@@ -16,6 +16,12 @@ BOOK_INVALIDATIONS = Counter(
 
 # Incremented wherever an adapter's parse() raises ParseError. Parse errors
 # are counted and logged, never fatal.
+PAIRS_EXPIRED_SKIPPED = Counter(
+    "arb_pairs_expired_skipped_total",
+    "Tracked pairs skipped at load because a venue says the market is over",
+    labelnames=["venue"],
+)
+
 PARSE_ERRORS = Counter(
     "arb_parse_errors_total",
     "Malformed venue payloads rejected by adapters",

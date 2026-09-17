@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from arb.arbmon import TrackedPair
 from arb.config import AppConfig
 from arb.fees import kalshi_fee_ticks, polymarket_fee_ticks
+from arb.metrics import PAIRS_EXPIRED_SKIPPED
 from arb.pairs import store as pairs_store
 from arb.run import RunContext
 from arb.types import RawMessage
@@ -31,6 +32,32 @@ from arb.venues.polymarket_us.rest import PolymarketUSMarket
 log = logging.getLogger(__name__)
 
 
+def _dead_reason(market: KalshiMarket, pm: PolymarketUSMarket | None) -> str | None:
+    """Why this pair cannot be watched right now, or None to watch it.
+
+    The stored ``close_time`` a selection filters on is a snapshot from
+    proposal time, and it is not the whole truth: a Kalshi market that can
+    close early closes before its published time, and Polymarket rewrites its
+    end date at settlement. This is the second check, and it costs nothing —
+    both objects are already fetched here to resolve fees.
+
+    Both predicates are the ones the venue adapters already use, not new ones:
+    Kalshi's object-level status enum is tested positively (``== "active"``, as
+    in ``kalshi/discovery.py``) so an unlisted future value fails closed, and
+    Polymarket is gated on ``closed``, the same half of the liveness test in
+    ``polymarket_us/discovery.py``. ``active`` is deliberately not used on the
+    Polymarket side: it stays true after settlement.
+
+    A missing Polymarket market means UNKNOWN, not dead. A gateway hiccup must
+    never silently empty the watch set.
+    """
+    if market.status != "active":
+        return f"kalshi {market.status}"
+    if pm is not None and pm.closed:
+        return "polymarket closed"
+    return None
+
+
 @dataclass
 class TrackedLoad:
     tracked: list[TrackedPair] = field(default_factory=list)
@@ -38,6 +65,9 @@ class TrackedLoad:
     polymarket_slugs: list[str] = field(default_factory=list)
     kalshi_details: list[tuple[KalshiMarket, KalshiEvent]] = field(default_factory=list)
     polymarket_markets: dict[str, PolymarketUSMarket] = field(default_factory=dict)
+    # (pair_id, why) for pairs the venues say are over. Defaulted, because
+    # tests construct TrackedLoad() with no arguments.
+    expired: list[tuple[int, str]] = field(default_factory=list)
 
 
 async def load_tracked_pairs(
@@ -99,6 +129,15 @@ async def load_tracked_pairs(
             if pm_market is not None and pm_market.fee_coefficient is not None
             else Decimal("0.06")
         )
+        dead = _dead_reason(k_market, pm_market)
+        if dead is not None:
+            # Skipped, NOT untracked. Clearing the flag here would make loading
+            # data mutate operator state from a read path; if the operator
+            # wants it cleared, that is a control action with an audit row.
+            out.expired.append((int(r["id"]), dead))
+            PAIRS_EXPIRED_SKIPPED.labels(venue=dead.split()[0]).inc()
+            log.info("tracked pairs: pair %s skipped — %s", r["id"], dead)
+            continue
         out.kalshi_details.append((k_market, k_event))
         if pm_market is not None:
             out.polymarket_markets[p_slug] = pm_market
@@ -130,5 +169,7 @@ async def load_tracked_pairs(
             out.kalshi_tickers.append(k_ticker)
         if p_slug not in out.polymarket_slugs:
             out.polymarket_slugs.append(p_slug)
-    log.info("tracked pairs: %d tracked confirmed pairs resolved", len(out.tracked))
+    log.info(
+        "tracked pairs: %d resolved, %d skipped as settled", len(out.tracked), len(out.expired)
+    )
     return out
