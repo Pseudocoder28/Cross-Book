@@ -14,16 +14,19 @@ import asyncio
 from typing import Any
 
 import pytest
+from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from arb.arbmon import ArbMonitor
+from arb.arbmon import ArbMonitor, TrackedPair
 from arb.book import BookSnapshot, Level
 from arb.books import BookManager
 from arb.config import AppConfig
 from arb.edge import Leg
+from arb.pairs import store as pairs_store
+from arb.pairs.tracked import TrackedLoad
 from arb.paper import PaperLimits, PaperTrade, PaperTrader
 from arb.run import RunContext
-from arb.storage.models import Base, list_control_actions
+from arb.storage.models import Base, PairRow, list_control_actions
 from arb.ui.control import (
     CONFIRM_TTL_S,
     JOB_OUTPUT_MAX_LINES,
@@ -761,6 +764,289 @@ async def test_payload_describes_the_whole_control_surface() -> None:
     assert payload["paper"]["attached"] is True
     names = {a["action"] for a in payload["actions"]}
     assert {"recording.stop", "paper.suspend", "jobs.propose", "jobs.doctor"} <= names
+    assert {"pairs.track", "pairs.top"} <= names  # watching is a control, not a flag
+    # The watch set's price rides along even with no database: unknown counts,
+    # a real per-pair poll cost, so /control can show the gap it costs.
+    assert payload["pairs"]["confirmed"] is None and payload["pairs"]["live"] == 0
+    assert payload["pairs"]["poll"] == {
+        "attached": False,
+        "targets": 0,
+        "interval_s": 2.222,
+        "cycle_s": 0.0,
+        "per_pair_s": 2.2,
+    }
     # Grades ride along so the UI can price a click without a second table.
     grades = {a["action"]: a["grade"] for a in payload["actions"]}
     assert grades["jobs.propose"] == "G3" and grades["recording.stop"] == "G2"
+
+
+# ---------------------------------------------------------------------------
+# the watch set: confirming is not tracking
+# ---------------------------------------------------------------------------
+
+
+async def pairs_engine(n: int = 6, *, confirmed: int = 6) -> AsyncEngine:
+    """``n`` pairs, the first ``confirmed`` confirmed, every score 1.000 —
+    the shape of the real table, where the score is not an ordering at all."""
+    engine = await sqlite_engine()
+    async with engine.begin() as conn:
+        await conn.execute(
+            insert(PairRow),
+            [
+                {
+                    "kalshi_market_id": f"kalshi:K{i}",
+                    "polymarket_market_id": f"polymarket_us:p{i}",
+                    "status": "confirmed" if i <= confirmed else "proposed",
+                    "score": 1.0,
+                    "detail": {
+                        "kalshi": {"market_id": f"kalshi:K{i}", "ticker": f"K{i}"},
+                        "polymarket_us": {"market_id": f"polymarket_us:p{i}", "ticker": f"p{i}"},
+                    },
+                }
+                for i in range(1, n + 1)
+            ],
+        )
+    return engine
+
+
+def _no_fee(*_args: Any, **_kwargs: Any) -> int:
+    return 0
+
+
+def stub_tracked_load(monkeypatch: pytest.MonkeyPatch) -> list[list[int]]:
+    """``load_tracked_pairs`` without the venues: same selection (the flag),
+    stub fees. Returns the list of watch sets each reload resolved, so a test
+    can prove a no-op did NOT go near the venues."""
+    reloads: list[list[int]] = []
+
+    async def loader(
+        _config: Any, _run: Any, engine: Any, *, sink: Any = None, top_n: int | None = None
+    ) -> TrackedLoad:
+        rows = await pairs_store.list_pairs(engine, status="confirmed", tracked=True)
+        load = TrackedLoad()
+        for r in rows:
+            load.tracked.append(
+                TrackedPair(
+                    pair_id=int(r["id"]),
+                    score=float(r["score"]),
+                    kalshi_market_id=r["kalshi"]["market_id"],
+                    polymarket_market_id=r["polymarket_us"]["market_id"],
+                    kalshi_fee=_no_fee,
+                    polymarket_fee=_no_fee,
+                    label=f"pair {r['id']}",
+                    kalshi_ticker=r["kalshi"]["ticker"],
+                    polymarket_ticker=r["polymarket_us"]["ticker"],
+                )
+            )
+            load.kalshi_tickers.append(r["kalshi"]["ticker"])
+            load.polymarket_slugs.append(r["polymarket_us"]["ticker"])
+        reloads.append([p.pair_id for p in load.tracked])
+        return load
+
+    monkeypatch.setattr("arb.ui.control.load_tracked_pairs", loader)
+    return reloads
+
+
+def wired(host: FakeHost, engine: AsyncEngine, polymarket_source: Any) -> ControlPlane:
+    control = plane(host, engine=engine)
+    control.attach_kalshi(FakeKalshi(["KEEP"]))
+    control.attach_polymarket(polymarket_source)
+    control.set_base_universe(kalshi=["KEEP"], polymarket=["keep"])
+    # Start coherent: the poller is already polling exactly the base set, as
+    # it is in a running server the moment the universe has been applied once.
+    polymarket_source.set_targets(["keep"])
+    return control
+
+
+async def test_tracking_a_pair_writes_the_flag_and_applies_both_legs(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """A track is a live universe change: the pair's Kalshi leg is subscribed,
+    its Polymarket leg becomes a poll target and the browser gets a new state."""
+    engine = await pairs_engine()
+    reloads = stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+
+    result = await control.execute("pairs.track", {"ids": [3, 5], "tracked": True})
+
+    assert result.changed is True
+    assert result.detail["rows_changed"] == 2
+    assert reloads == [[3, 5]]
+    assert host.arbmon is not None and len(host.arbmon.pairs) == 2
+    assert control.polymarket_slugs == ["keep", "p3", "p5"]
+    assert control.kalshi_tickers == ["KEEP", "K3", "K5"]
+    assert polymarket_source.targets == ["keep", "p3", "p5"]
+    assert host.control_frames()  # a fresh control state reached the tab
+    assert result.detail["pairs"]["tracked"] == 2
+    assert result.detail["pairs"]["confirmed"] == 6
+    await engine.dispose()
+
+
+async def test_a_track_that_changes_no_rows_is_not_reported_as_success(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The afternoon-costing bug: the action ran, the audit row said ok, the
+    toast said success, and the watch set never moved."""
+    engine = await pairs_engine()
+    reloads = stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [3], "tracked": True})
+
+    result = await control.execute("pairs.track", {"ids": [3], "tracked": True})
+
+    assert result.changed is False
+    assert result.detail["rows_changed"] == 0
+    assert "nothing changed" in result.detail["message"]
+    assert "already tracked" in result.detail["message"]
+    assert "watching 1 of 6 confirmed pairs" in result.detail["message"]
+    assert reloads == [[3]]  # no second reload: the venues were left alone
+    # ...and the sentence that was armed and audited said so BEFORE it ran.
+    assert "nothing changes" in result.effect
+    await engine.dispose()
+
+
+async def test_tracking_an_unconfirmed_pair_is_refused_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    engine = await pairs_engine(confirmed=4)
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    with pytest.raises(InvalidParams) as excinfo:
+        await control.execute("pairs.track", {"ids": [2, 5], "tracked": True})
+
+    assert "not confirmed" in str(excinfo.value)
+    assert await pairs_store.list_pairs(engine, tracked=True) == []  # all-or-nothing
+    rows = await list_control_actions(engine)
+    assert [(r["action"], r["result"]) for r in rows] == [("pairs.track", "error")]
+    await engine.dispose()
+
+
+async def test_untracking_frees_the_poll_budget(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [1, 2, 3], "tracked": True})
+    busy = polymarket_source.cycle_s
+
+    result = await control.execute("pairs.track", {"ids": [1, 2], "tracked": False})
+
+    assert result.detail["rows_changed"] == 2
+    assert polymarket_source.cycle_s < busy  # two fewer targets = a faster book
+    assert control.polymarket_slugs == ["keep", "p3"]
+    assert host.arbmon is not None and [p.pair_id for p in host.arbmon.pairs] == [3]
+    await engine.dispose()
+
+
+async def test_pairs_top_is_a_bulk_setter_not_a_selector(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """It writes the flag on N rows and clears it everywhere else. As a live
+    selector it was unusable: every score is 1.000, so it resolved to the
+    lowest ids forever and a newly confirmed pair could never be watched."""
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [5, 6], "tracked": True})
+
+    result = await control.execute("pairs.top", {"n": 2})
+
+    assert (result.detail["added"], result.detail["removed"]) == (2, 2)
+    assert result.detail["rows_changed"] == 4
+    assert {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)} == {1, 2}
+    assert control.pairs_top == 2
+    # Zero is "watch nothing", and it is a real change, not a refusal.
+    cleared = await control.execute("pairs.top", {"n": 0})
+    assert cleared.changed is True and cleared.detail["removed"] == 2
+    assert control.polymarket_slugs == ["keep"]
+    await engine.dispose()
+
+
+async def test_the_effect_sentence_prices_the_change_before_it_happens(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """Row count and resulting poll cycle, in the sentence that gets audited —
+    tracking is paid for in staleness on every other Polymarket book."""
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    result = await control.execute("pairs.track", {"ids": [1, 2], "tracked": True})
+
+    assert "2 rows change" in result.effect
+    assert "watching 2 of 6 confirmed pairs" in result.effect
+    assert "1 → 3 poll targets" in result.effect
+    assert "2.2s → 6.7s per book" in result.effect
+    assert "2.2s of staleness per tracked pair" in result.effect
+    rows = await list_control_actions(engine)
+    assert rows[0]["effect"] == result.effect  # what they were told is what is stored
+    plan = result.detail["plan"]
+    assert (plan["rows"], plan["add"], plan["remove"]) == (2, [1, 2], [])
+    assert (plan["cycle_before_s"], plan["cycle_after_s"]) == (2.2, 6.7)
+    await engine.dispose()
+
+
+async def test_the_payload_shows_the_confirmed_tracked_gap_and_its_cost(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    engine = await pairs_engine(46, confirmed=46)
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    # Cold: unknown, never a confident zero. ``payload()`` is synchronous, so
+    # the first read kicks a background refresh and serves the cache.
+    assert control.payload()["pairs"]["confirmed"] is None
+    refresh = control._pair_counts_task  # ...and that read kicked one off
+    assert refresh is not None
+    await refresh
+    pairs = control.payload()["pairs"]
+    assert (pairs["confirmed"], pairs["tracked"], pairs["total"]) == (46, 0, 46)
+    assert pairs["poll"]["per_pair_s"] == 2.2  # 0.45 req/s, one target per pair
+    assert pairs["poll"]["targets"] == 1 and pairs["poll"]["cycle_s"] == 2.2
+
+    await control.execute("pairs.track", {"ids": [40, 41], "tracked": True})
+    pairs = control.payload()["pairs"]
+    assert (pairs["confirmed"], pairs["tracked"], pairs["live"]) == (46, 2, 2)
+    assert pairs["poll"]["cycle_s"] == 6.7  # three targets at 2.2s each
+    await engine.dispose()
+
+
+async def test_a_zero_row_write_still_repairs_a_drifted_watch_set(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """Rowcount is not state. The database and the live monitor can disagree.
+
+    Rejecting a watched pair on /pairs clears `tracked` in SQL without touching
+    the runtime, so the monitor keeps quoting it — and with a trader attached,
+    keeps paper-trading it. Every watch control then sees zero rows to change
+    and, if it trusted the rowcount, would report "nothing changed" forever.
+    The old RELOAD PAIRS reloaded unconditionally and repaired this silently;
+    losing that left no way back except a restart.
+    """
+    engine = await pairs_engine()
+    reloads = stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [3], "tracked": True})
+    assert reloads == [[3]]
+
+    # /pairs rejects the watched pair: SQL clears the flag, the runtime does not
+    # hear about it. This is the real path, not a contrived one.
+    await pairs_store.decide(engine, 3, "rejected")
+    assert await pairs_store.list_pairs(engine, tracked=True) == []
+    assert host.arbmon is not None
+    assert [p.pair_id for p in host.arbmon.pairs] == [3]  # still quoting it
+
+    # The operator presses UNTRACK. Zero rows change — the flag is already off.
+    result = await control.execute("pairs.track", {"ids": [3], "tracked": False})
+
+    assert result.detail["rows_changed"] == 0
+    assert result.changed is True, "a drifted runtime must still be re-resolved"
+    assert "drifted" in result.detail["message"]
+    assert reloads == [[3], []], "the reload actually ran and resolved to nothing"
+    assert host.arbmon is None or [p.pair_id for p in host.arbmon.pairs] == []
+    await engine.dispose()

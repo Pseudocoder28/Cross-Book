@@ -17,6 +17,7 @@ from arb.pairs import run as pairs_run
 from arb.pairs import store
 from arb.pairs.matcher import EventRef, MarketRef, PairCandidate, propose_pairs
 from arb.pairs.text import name_similarity, name_tokens, title_tokens
+from arb.pairs.tracked import load_tracked_pairs
 from arb.recorder import Recorder
 from arb.run import RunContext
 from arb.storage.models import Base, PairRow
@@ -572,5 +573,145 @@ async def test_backfill_borrows_a_live_engine_and_leaves_it_usable(
         assert [t.phase for t in ticks][-1] == "done"
         rows = await store.list_pairs(engine)  # engine still alive: not disposed
         assert rows[0]["kalshi"]["event_slug"] == "CONTROLH-2026"
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# tracked: "watch this now" is state, not the top of the score order
+# ---------------------------------------------------------------------------
+
+
+async def _tied_engine(n: int, *, confirmed: int) -> AsyncEngine:
+    """``n`` pairs, the first ``confirmed`` of them confirmed, ALL scoring 1.0.
+
+    Tied scores are the real dataset, and they are what broke the old
+    selector: ``ORDER BY score DESC, id`` degenerates to ``id``.
+    """
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            insert(PairRow),
+            [
+                {
+                    "kalshi_market_id": f"kalshi:K{i}",
+                    "polymarket_market_id": f"polymarket_us:p{i}",
+                    "status": "confirmed" if i <= confirmed else "proposed",
+                    "score": 1.0,
+                    "detail": {
+                        "kalshi": {"market_id": f"kalshi:K{i}", "ticker": f"K{i}"},
+                        "polymarket_us": {"market_id": f"polymarket_us:p{i}", "ticker": f"p{i}"},
+                    },
+                }
+                # 1-based so the ids match the row numbers below.
+                for i in range(1, n + 1)
+            ],
+        )
+    return engine
+
+
+async def test_set_tracked_counts_rows_changed_not_rows_matched() -> None:
+    """The distinction the UI needs: tracking three already-tracked pairs is
+    a no-op, and a control that cannot tell reports success for doing nothing."""
+    engine = await _tied_engine(10, confirmed=10)
+    try:
+        assert await store.set_tracked(engine, [3, 4, 5], True) == 3
+        assert await store.set_tracked(engine, [3, 4, 5], True) == 0  # matched 3, changed 0
+        assert await store.set_tracked(engine, [4, 5, 6], True) == 1  # only 6 moves
+        assert await store.set_tracked(engine, [], True) == 0
+        assert await store.set_tracked(engine, [3, 3, 3], False) == 1  # deduped
+        assert {r["id"] for r in await store.list_pairs(engine, tracked=True)} == {4, 5, 6}
+    finally:
+        await engine.dispose()
+
+
+async def test_only_confirmed_pairs_can_be_tracked() -> None:
+    """Confirmed is a precondition enforced in SQL, not a caller convention."""
+    engine = await _tied_engine(10, confirmed=4)
+    try:
+        assert await store.set_tracked(engine, [5, 6], True) == 0  # still proposed
+        assert await store.set_tracked(engine, [1, 5], True) == 1  # only the confirmed one
+        assert [r["id"] for r in await store.list_pairs(engine, tracked=True)] == [1]
+    finally:
+        await engine.dispose()
+
+
+async def test_unconfirming_a_pair_stops_it_being_tracked() -> None:
+    """A rejected pair that stayed tracked would keep spending poll budget on
+    a pair nobody believes in, and nothing on screen would say so."""
+    engine = await _tied_engine(6, confirmed=6)
+    try:
+        assert await store.set_tracked(engine, [1, 2, 3], True) == 3
+        row = await store.decide(engine, 1, "rejected")
+        assert row is not None and row["tracked"] is False
+        assert await store.decide_many(engine, [2, 3], "proposed") == 2
+        assert await store.list_pairs(engine, tracked=True) == []
+        # Re-confirming does NOT re-track: watching is a separate decision.
+        again = await store.decide(engine, 1, "confirmed")
+        assert again is not None and again["tracked"] is False
+    finally:
+        await engine.dispose()
+
+
+async def test_set_tracked_exact_replaces_the_whole_watch_set() -> None:
+    engine = await _tied_engine(10, confirmed=8)
+    try:
+        await store.set_tracked(engine, [1, 2, 3], True)
+        added, removed = await store.set_tracked_exact(engine, [3, 4, 9])
+        # 9 is not confirmed, so it is not tracked; 1 and 2 are dropped.
+        assert (added, removed) == (1, 2)
+        assert {r["id"] for r in await store.list_pairs(engine, tracked=True)} == {3, 4}
+        assert await store.set_tracked_exact(engine, [3, 4]) == (0, 0)  # no-op is visible
+        assert await store.set_tracked_exact(engine, []) == (0, 2)  # empty means watch nothing
+    finally:
+        await engine.dispose()
+
+
+async def test_counts_report_the_gap_between_confirmed_and_tracked() -> None:
+    engine = await _tied_engine(46, confirmed=46)
+    try:
+        await store.set_tracked(engine, list(range(1, 11)), True)
+        assert await store.counts(engine) == {"total": 46, "confirmed": 46, "tracked": 10}
+        flags = await store.pair_flags(engine, status="confirmed", tracked=True)
+        assert len(flags) == 10
+        # The poll target a tracked pair costs, straight off the market id.
+        assert flags[0].polymarket_slug == "p1" and flags[0].kalshi_ticker == "K1"
+    finally:
+        await engine.dispose()
+
+
+async def test_the_watch_set_is_the_flag_not_the_top_of_the_score_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug, reproduced: 46 confirmed pairs all scoring 1.000. A pair
+    confirmed later has a higher id, so the old "top N by score" could never
+    reach it. The flag can."""
+    market = KalshiMarket(ticker="K", event_ticker="E", market_type="binary", status="active")
+    event = KalshiEvent(event_ticker="E", series_ticker="")
+
+    async def fake_market(*_a: object, **_k: object) -> KalshiMarket:
+        return market
+
+    async def fake_event(*_a: object, **_k: object) -> KalshiEvent:
+        return event
+
+    async def fake_pm(*_a: object, **_k: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr("arb.pairs.tracked.fetch_market", fake_market)
+    monkeypatch.setattr("arb.pairs.tracked.fetch_event", fake_event)
+    monkeypatch.setattr("arb.pairs.tracked.fetch_markets_by_slug", fake_pm)
+
+    engine = await _tied_engine(46, confirmed=46)
+    try:
+        await store.set_tracked(engine, [11, 46], True)
+        load = await load_tracked_pairs(AppConfig(), RunContext("r"), engine)
+        assert [p.pair_id for p in load.tracked] == [11, 46]
+        assert load.polymarket_slugs == ["p11", "p46"]  # two poll targets, not ten
+        assert load.kalshi_tickers == ["K11", "K46"]
+        # Nothing tracked is a legal state, and it is not "fall back to top N".
+        await store.set_tracked_exact(engine, [])
+        assert (await load_tracked_pairs(AppConfig(), RunContext("r"), engine)).tracked == []
     finally:
         await engine.dispose()

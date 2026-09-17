@@ -18,7 +18,12 @@
       control frame and on a 1 s tick; an earlier version rebuilt its cards
       each time, which destroyed every <input> mid-keystroke and made the
       fields literally uneditable. So: build() creates the nodes, render()
-      only writes values, and a field you are editing is never written to. */
+      only writes values, and a field you are editing is never written to.
+   5. A NO-OP IS NOT A SUCCESS. Every result carries `changed`, and an action
+      that moved zero rows says so — in the toast and in a band that stays up
+      until the next action. Pressing RELOAD PAIRS ten times and being told
+      ten times that it worked, while the watch set never moved, is the
+      specific failure this page is now built to make impossible. */
 
 import { $, el } from "../core/dom.js";
 import { state, schedule, registerRenderer } from "../core/state.js";
@@ -30,6 +35,10 @@ import * as cmd from "../core/cmd.js";
 const ROOT = "control-page";
 const LOG_LIMIT = 40;
 const TICK_MS = 1000;
+// How long the receipt for an action that DID change something stays up. A
+// no-op has no expiry: it is the message the last milestone was lost for
+// want of, so it holds until the next action replaces it.
+const RESULT_MS = 30000;
 
 // Consequence grades, from docs/decisions.md. The LABEL is ours; the grade
 // itself is the server's and arrives per action.
@@ -47,6 +56,7 @@ let tickTimer = 0;
 let ctl = null;          // last control payload
 let audit = [];
 let armed = null;        // {action, params, token, effect, until}
+let result = null;       // {action, message, changed, at} — the last receipt
 const busy = new Set();  // actions with a POST in flight
 
 // Nodes built once and written to in place.
@@ -98,10 +108,26 @@ async function run(action, params) {
     armed = null;
     // The edit landed, so the fields may take the server's value again.
     clearDirty();
-    cmd.message((res.body.effect || action).toUpperCase().slice(0, 60), "ok");
+    // `changed` is the server's answer to "did any row move", and it is NOT
+    // the same question as "did the request succeed". A control that ran
+    // cleanly and changed nothing is reported as exactly that: the sentence
+    // the server wrote, in the no-change colour, in a band that stays up.
+    const changed = res.body.changed !== false;
+    const said = String(res.body.message || res.body.effect || action);
+    result = { action, changed, message: said, at: Date.now() };
+    cmd.message(
+      (changed ? said : "NO CHANGE · " + said).toUpperCase().slice(0, 60),
+      changed ? "ok" : "warn");
     loadAudit();
   } else {
     armed = null;
+    result = {
+      action,
+      changed: false,
+      failed: true,
+      message: String(res.body.error || "HTTP " + res.status),
+      at: Date.now(),
+    };
     cmd.message("FAILED · " + String(res.body.error || res.status).toUpperCase().slice(0, 52), "err");
   }
   render();
@@ -235,6 +261,21 @@ const limits = () => paper().limits || {};
 const universe = () => (ctl && ctl.universe) || {};
 const kalshi = () => universe().kalshi || {};
 const polymarket = () => universe().polymarket_us || {};
+const pairs = () => (ctl && ctl.pairs) || {};
+const poll = () => pairs().poll || {};
+
+/** A count the server has not read yet is UNKNOWN, not zero.
+
+    `control.pairs.confirmed` is null until the background refresher has
+    answered; rendering that as 0 would say "there is nothing to watch", which
+    is the opposite of what it means. */
+function count(n) {
+  return n == null ? "—" : nf.format(n);
+}
+
+function secs(n) {
+  return n == null ? "—" : Number(n).toFixed(1) + "s";
+}
 
 // ---------- build ----------
 
@@ -291,14 +332,44 @@ function build() {
         { numeric: true, width: "7ch" })),
     applyBtns);
 
+  // --- the watch set ---
+  //
+  // Its own card, above the universe, because the gap it shows is what an
+  // afternoon was lost to: 46 pairs confirmed, 10 watched, and nothing on
+  // screen that named the difference. Three numbers, in this order — how many
+  // of the confirmed pairs are watched, how many are actually being quoted,
+  // and what the next one costs every other Polymarket book.
+  ui.trackGap = el("span", "cbig", "—");
+  ui.live = el("span", "num", "—");
+  ui.watchCycle = el("span", "num", "—");
+  ui.perPair = el("span", "num", "—");
+  ui.gapNote = note("");
+  const ptBtns = el("div", "cbtns");
+  ptBtns.append(
+    actionBtn("pairs.top", "SET WATCH SET",
+      () => ({ n: numOf("ctl-pairstop", (ctl && ctl.pairs_top) || 0) }), "primary"),
+    actionBtn("pairs.top", "WATCH NOTHING", () => ({ n: 0 })));
+  const watchCard = card("WATCH SET",
+    row("TRACKED", ui.trackGap),
+    row("QUOTED RIGHT NOW", ui.live),
+    row("POLYMARKET CYCLE", ui.watchCycle),
+    row("EACH WATCHED PAIR", ui.perPair),
+    ui.gapNote,
+    el("div", "sys-title cs2", "BULK SET: THE TOP N CONFIRMED BY SCORE"),
+    row("N", field("ctl-pairstop", () => (ctl && ctl.pairs_top),
+      { numeric: true, width: "7ch" })),
+    ptBtns,
+    note("THIS SETS THE TRACKED FLAG ON THE TOP N CONFIRMED PAIRS AND CLEARS IT ON "
+      + "EVERY OTHER PAIR. IT IS A SETTER, NOT A FILTER: ANYTHING OUTSIDE THE TOP N "
+      + "STOPS BEING WATCHED. N=0 WATCHES NOTHING."),
+    note("SCORES TIE — A WHOLE RUN CAN SIT AT 1.000 — SO \"TOP N BY SCORE\" IS OFTEN "
+      + "JUST \"THE N OLDEST ROWS\", AND A PAIR CONFIRMED TODAY CAN NEVER WIN THE TIE. "
+      + "PICK PAIRS ONE BY ONE ON /PAIRS (T) WHEN THAT MATTERS, WHICH IS USUALLY."));
+
   // --- universe ---
   ui.kCount = el("span", "num", "—");
   ui.pCount = el("span", "num", "—");
   ui.cycle = el("span", "num", "—");
-  ui.tracked = el("span", "num", "—");
-  const ptBtns = el("div", "cbtns");
-  ptBtns.append(actionBtn("pairs.top", "RELOAD PAIRS",
-    () => ({ n: numOf("ctl-pairstop", (ctl && ctl.pairs_top) || 0) }), "primary"));
   const kBtns = el("div", "cbtns");
   kBtns.append(actionBtn("universe.kalshi", "SUBSCRIBE",
     () => ({ tickers: linesOf("ctl-ktickers") })));
@@ -309,12 +380,8 @@ function build() {
     row("KALSHI SUBSCRIBED", ui.kCount),
     row("POLYMARKET POLLED", ui.pCount),
     row("POLL CYCLE", ui.cycle),
-    row("TRACKED PAIRS", ui.tracked),
-    el("div", "sys-title cs2", "TRACKED PAIRS (TOP N BY SCORE)"),
-    row("PAIRS TOP", field("ctl-pairstop", () => (ctl && ctl.pairs_top),
-      { numeric: true, width: "7ch" })),
-    ptBtns,
-    note("RE-RESOLVES BOTH VENUES' FEE PARAMETERS — A FEW SECONDS OF REST CALLS."),
+    note("THE WATCHED PAIRS' LEGS ARE PART OF BOTH SETS — SEE WATCH SET. THESE TWO "
+      + "BOXES ARE THE BASE UNIVERSE THEY ARE ADDED TO."),
     el("div", "sys-title cs2", "KALSHI SUBSCRIPTION"),
     field("ctl-ktickers", () => (kalshi().tickers || []).join("\n"),
       { multiline: true, rows: 3, cls: "clist" }),
@@ -348,7 +415,7 @@ function build() {
     note("RUNS AS A SUBPROCESS — ITS PER-ROW LOOP WOULD BLOCK THE INGEST LOOP IN-PROCESS."));
 
   const grid = el("div", "cgrid");
-  grid.append(rec, paperCard, uniCard, jobsCard);
+  grid.append(watchCard, rec, paperCard, uniCard, jobsCard);
 
   ui.jobs = el("div", "cjobs");
   ui.audit = el("div", "caudit");
@@ -456,6 +523,26 @@ function renderBanners() {
       Math.max(0, Math.round((armed.until - Date.now()) / 1000)) + "s"));
     out.push(b);
   }
+  if (result) {
+    // The receipt. A success says what moved; a no-op says, in the server's
+    // own sentence, that nothing did — and keeps saying it until the next
+    // action, because that is the message a toast lost for a whole afternoon.
+    const kind = result.failed ? "fail" : result.changed ? "done" : "noop";
+    const b = el("div", "cres cres-" + kind);
+    b.append(el("span", "cres-tag",
+      result.failed ? "FAILED" : result.changed ? "APPLIED" : "NO CHANGE"));
+    b.append(el("span", "cres-act", result.action));
+    b.append(el("span", "cres-msg", result.message));
+    const x = el("button", "cbtn tiny", "DISMISS");
+    x.type = "button";
+    x.addEventListener("click", (e) => {
+      result = null;
+      render();
+      if (e.detail > 0) x.blur();
+    });
+    b.append(x);
+    out.push(b);
+  }
   ui.note.replaceChildren(...out);
 }
 
@@ -486,12 +573,40 @@ function render() {
   ui.paperSkipped.hidden = !p.skipped_suspended;
   ui.paperSkippedVal.textContent = nf.format(p.skipped_suspended || 0);
 
+  // watch set
+  const pr = pairs();
+  const pl = poll();
+  ui.trackGap.textContent = count(pr.tracked) + " OF " + count(pr.confirmed) + " CONFIRMED";
+  // Amber while some confirmed pairs are not watched (the normal, deliberate
+  // state), red when nothing at all is watched with pairs available to watch —
+  // that one is silence where there should be quotes.
+  const idle = pr.tracked === 0 && !!pr.confirmed;
+  ui.trackGap.classList.toggle("warn", idle);
+  // `pairs.live` and the older top-level `tracked_pairs` are the same number
+  // (the pairs the monitor is quoting). A process with no control plane
+  // publishes only the second, so fall back to it rather than show "—" for a
+  // count that is right there.
+  const live = pr.live != null ? pr.live : (ctl ? ctl.tracked_pairs : null);
+  ui.live.textContent = count(live) + (live === 1 ? " PAIR" : " PAIRS");
+  ui.watchCycle.textContent = pl.cycle_s == null
+    ? "—"
+    : secs(pl.cycle_s) + " / BOOK · " + count(pl.targets) + " TARGETS"
+      + (pl.attached ? "" : " (POLLER NOT ATTACHED)");
+  ui.perPair.textContent = pl.per_pair_s == null ? "—" : "+" + secs(pl.per_pair_s) + " / BOOK";
+  const gap = pr.confirmed == null || pr.tracked == null ? null : pr.confirmed - pr.tracked;
+  ui.gapNote.hidden = !gap;
+  if (gap) {
+    ui.gapNote.textContent = nf.format(gap) + " CONFIRMED "
+      + (gap === 1 ? "PAIR IS" : "PAIRS ARE") + " NOT WATCHED. CONFIRMING SAYS THE TWO "
+      + "MARKETS RESOLVE THE SAME; WATCHING SPENDS POLL BUDGET ON THEM. CHOOSE THEM ON "
+      + "/PAIRS WITH T, OR BULK-SET THE TOP N BELOW.";
+  }
+
   // universe
   ui.kCount.textContent = nf.format((kalshi().tickers || []).length);
   ui.pCount.textContent = nf.format((polymarket().slugs || []).length);
   const cyc = polymarket().cycle_s;
   ui.cycle.textContent = cyc == null ? "—" : cyc.toFixed(1) + "s / BOOK";
-  ui.tracked.textContent = nf.format((ctl && ctl.tracked_pairs) || 0);
 
   // Fields take the server's value only when you are not editing them.
   for (const f of fields) syncField(f);
@@ -518,6 +633,9 @@ function render() {
 function tick() {
   if (!mounted) return;
   if (armed && Date.now() > armed.until) armed = null;
+  // A receipt for something that DID change expires; "nothing changed" does
+  // not, because it is the one an operator has to actually read.
+  if (result && result.changed && Date.now() - result.at > RESULT_MS) result = null;
   render();
 }
 
@@ -556,6 +674,7 @@ export default {
     clearInterval(tickTimer);
     tickTimer = 0;
     armed = null;     // an armed action must not survive leaving the page
+    result = null;    // nor the receipt for the last one
     clearDirty();     // nor a half-typed limit
   },
 

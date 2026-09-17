@@ -329,7 +329,8 @@ async function loadPaperMin() {
     detail pane's copy also says how to get the rows back. */
 function emptyText(withHint) {
   const n = state.arb.quotes.length;
-  if (!n) return "NO CONFIRMED PAIRS TRACKED — CONFIRM PAIRS ON /pairs, THEN RELOAD PAIRS ON /control";
+  // Confirming is not watching: T on /pairs is what starts a pair quoting.
+  if (!n) return "NOTHING IS BEING WATCHED — CONFIRM A PAIR ON /pairs, THEN PRESS T TO WATCH IT";
   return "NO PAIR CLEARS " + view.min + " TICKS/CT — " + nf.format(n) + " TRACKED"
     + (withHint ? " · LOWER MIN NET/CT, OR PRESS ALL" : "");
 }

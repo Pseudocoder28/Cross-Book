@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     Index,
@@ -28,6 +29,7 @@ from sqlalchemy import (
     LargeBinary,
     Text,
     UniqueConstraint,
+    false,
     func,
     insert,
     select,
@@ -70,7 +72,15 @@ class RawMessageRow(Base):
 class PairRow(Base):
     """A proposed or human-decided equivalence between one Kalshi market and
     one Polymarket US market. ``detail`` snapshots both legs and the scoring
-    features at proposal time."""
+    features at proposal time.
+
+    ``status`` and ``tracked`` are two different decisions. ``status`` is a
+    judgement about the world ("these resolve to the same thing"): durable.
+    ``tracked`` is "watch this now": operational, reversible, and bounded by
+    the Polymarket poll budget, since every tracked pair is one more poll
+    target. Confirmed is a precondition for tracked (``pairs.store.decide``
+    clears the flag when a pair stops being confirmed), never a synonym.
+    """
 
     __tablename__ = "pairs"
 
@@ -80,6 +90,9 @@ class PairRow(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="proposed")
     score: Mapped[float] = mapped_column(Float, nullable=False)
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    tracked: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -88,6 +101,8 @@ class PairRow(Base):
     __table_args__ = (
         UniqueConstraint("kalshi_market_id", "polymarket_market_id", name="uq_pairs_legs"),
         Index("ix_pairs_status", "status"),
+        # The one hot lookup: the pairs to watch right now.
+        Index("ix_pairs_status_tracked", "status", "tracked"),
     )
 
 

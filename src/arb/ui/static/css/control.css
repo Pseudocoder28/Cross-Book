@@ -103,6 +103,22 @@
   overflow-x: auto;
 }
 
+/* ---------- the watch set ----------
+   TRACKED n OF m CONFIRMED is the headline number of this page: its absence
+   is what let ten pairs own the watch set while forty-six were confirmed. It
+   is set larger than the rows around it because it is the one line that has
+   to be legible from across the desk. */
+
+.cbig {
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+/* Nothing watched while pairs are confirmed: the engine is quoting nothing. */
+.cbig.warn { color: var(--ask); }
+
 /* ---------- banners ---------- */
 
 .cbind, .cro {
@@ -139,6 +155,40 @@
 .carm .cbtn { background: #000; color: var(--amber); border-color: #000; }
 .carm .cbtn:hover { background: var(--bg); }
 .carm-ttl { margin-left: auto; }
+
+/* The receipt band. Three outcomes, three colours on the left edge, and the
+   server's own sentence in full — this is the band that has to be able to say
+   "nothing changed" loudly enough that ten more presses do not happen. It
+   wraps rather than clips for the same reason the audit trail does. */
+.cres {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 10px;
+  background: var(--raised);
+  border-left: 3px solid var(--hair);
+  font: 700 10px/16px var(--mono);
+  letter-spacing: 0.06em;
+}
+.cres-done { border-left-color: var(--bid); }
+.cres-noop { border-left-color: var(--amber); background: #241d05; }
+.cres-fail { border-left-color: var(--ask); }
+.cres-tag { flex: none; letter-spacing: 0.12em; }
+.cres-done .cres-tag { color: var(--bid); }
+.cres-noop .cres-tag { color: var(--amber); }
+.cres-fail .cres-tag { color: var(--ask); }
+.cres-act { flex: none; color: var(--ink2); font-weight: 400; }
+.cres-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.cres .cbtn { flex: none; margin-left: auto; }
 
 /* ---------- jobs ---------- */
 

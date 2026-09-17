@@ -178,6 +178,21 @@ def no_control_payload(*, run_id: str, recording: bool) -> dict[str, Any]:
         },
         "pairs_top": 0,
         "tracked_pairs": 0,
+        # Same shape ControlPlane.payload() publishes. None means "not read",
+        # which the UI renders as "—"; a missing key renders as nothing at all.
+        "pairs": {
+            "confirmed": None,
+            "tracked": None,
+            "total": None,
+            "live": 0,
+            "poll": {
+                "attached": False,
+                "targets": 0,
+                "interval_s": None,
+                "cycle_s": None,
+                "per_pair_s": None,
+            },
+        },
         "universe": {
             "kalshi": {"tickers": [], "base": [], "pairs": [], "attached": False},
             "polymarket_us": {
@@ -1022,11 +1037,13 @@ async def run_ui(
         tracked: list[TrackedPair] = []
         pair_pm_slugs: list[str] = []
         pair_pm_markets: dict[str, PolymarketUSMarket] = {}
-        if pairs_top > 0:
+        # The watch set is `pairs.tracked` in the database, not a top-N slice:
+        # a confirmed pair is a judgement about the world, tracking it is an
+        # operational choice bounded by the Polymarket poll budget. `--pairs-top`
+        # is gone as a selector; the set is whatever /control last chose.
+        if True:
             try:
-                load = await load_tracked_pairs(
-                    config, run, engine, top_n=pairs_top, sink=record_raw
-                )
+                load = await load_tracked_pairs(config, run, engine, sink=record_raw)
                 tracked = load.tracked
                 pair_pm_slugs = load.polymarket_slugs
                 pair_pm_markets = load.polymarket_markets

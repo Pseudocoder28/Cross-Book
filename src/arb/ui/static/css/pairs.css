@@ -4,6 +4,32 @@
    (.pair-cols/.pair-row/.pair-rules/...); everything below is new: the filter
    strip, the status chips, the undo affordance and the review progress bar. */
 
+/* ---------- the WATCH column ----------
+   Confirming and watching are two decisions (see pairs.js), so the row shows
+   both. style.css lays the row out in four columns and index.html's header
+   strip carries four labels; a fifth column is added HERE, to both grids at
+   once, and the header's fifth label comes from ::after — the alternative was
+   an edit to index.html, which this page does not own, and a row that silently
+   overflowed into an implicit column. */
+
+.pair-cols, .pair-row {
+  grid-template-columns: 52px minmax(0, 1fr) minmax(0, 1fr) 84px 78px;
+}
+.pair-cols::after { content: "WATCH"; }
+
+.pair-row .pr-watch {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Amber is this terminal's "live" colour and a watched pair is exactly that:
+   poll budget is being spent on it right now. */
+.pair-row .pr-watch.on { color: var(--amber); }
+
 /* ---------- filter strip: search + status chips + undo ---------- */
 
 .pair-ctl {
@@ -64,6 +90,7 @@
    column uses, so the strip and the rows agree. */
 .pchip.st-confirmed[aria-pressed="false"] .pc-l { color: var(--bid); }
 .pchip.st-rejected[aria-pressed="false"] .pc-l { color: var(--ask); }
+.pchip.st-tracked[aria-pressed="false"] .pc-l { color: var(--amber); }
 
 .pundo { margin-left: 6px; flex: none; }
 .pundo:disabled {
@@ -143,6 +170,48 @@
 .pact:disabled { cursor: default; }
 .pact[aria-pressed="true"] { background: var(--raised); border-color: var(--amber); color: var(--amber); }
 
+/* ---------- the watch strip: the cost sits next to the button ----------
+   A separate strip from .pair-acts, with a rule between them, because the two
+   decisions are not the same decision: CONFIRM says the markets are the same
+   market, WATCH spends Polymarket poll budget on quoting them. The note is
+   the budget, printed where it is about to be spent. */
+
+.pair-watch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: 0 0 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hair);
+}
+.pair-watch .pwatch { height: 18px; padding: 0 9px; letter-spacing: 0.1em; flex: none; }
+.pwatch:not(:disabled) { color: var(--amber); border-color: var(--amber); }
+.pwatch:not(:disabled):hover { background: var(--raised); }
+.pwatch.on:not(:disabled) { background: var(--amber); color: #000; }
+.pwatch:disabled { cursor: default; opacity: 0.55; }
+
+/* The cost wraps rather than clips. Measured in the real pane at 420px it was
+   losing "ONE MORE PAIR +2.2S" to an ellipsis — the marginal cost, which is
+   the one number that makes this a decision rather than a switch. */
+.pw-note {
+  flex: 1 1 100%;
+  min-width: 0;
+  color: var(--dim);
+  font: 700 9px/13px var(--mono);
+  letter-spacing: 0.06em;
+  white-space: normal;
+}
+
 /* .pairs-right zeroes the margin on its first .sys-title; the action strip is
    the first child now, so KALSHI has to lose its top margin here instead. */
-#pair-detail .pair-acts + .sys-title { margin-top: 0; }
+#pair-detail .pair-acts + .sys-title,
+#pair-detail .pair-watch + .sys-title { margin-top: 0; }
+
+/* ---------- the header stat also reports actions ----------
+   It carries the row count until an action borrows it. A write that moved no
+   rows comes back amber, not white: "it succeeded" and "it changed something"
+   are different sentences and this page used to say the first when it meant
+   neither. */
+#pairs-stat.pm-warn { color: var(--amber); }
+#pairs-stat.pm-err { color: var(--ask); }

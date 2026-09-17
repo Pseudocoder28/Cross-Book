@@ -752,7 +752,18 @@ class TerminalState(StubState):
         loop.call_soon_threadsafe(put)
 
     def push_control(self, **overrides: Any) -> None:
-        """Change the control state and broadcast it, as the real plane does."""
+        """Change the control state and broadcast it, as the real plane does.
+
+        `tracked_pairs` and `pairs.live` are the same number — the pairs the
+        monitor is quoting — and the real plane derives both from one source.
+        A stub that moved only one would publish a state the server cannot
+        produce, and the page (which prefers `pairs.live`) would ignore the
+        override, so a test asserting on it would fail for a reason that has
+        nothing to do with what it is testing.
+        """
         self.control = {**self.control, **overrides, "ts_ms": int(time.time() * 1000)}
+        if "tracked_pairs" in overrides and "pairs" not in overrides:
+            pairs = {**self.control.get("pairs", {}), "live": overrides["tracked_pairs"]}
+            self.control["pairs"] = pairs
         self.recording = bool(self.control["recording"])
         self.broadcast({"t": "control", "control": self.control})
