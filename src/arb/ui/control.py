@@ -53,6 +53,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -117,8 +118,8 @@ JOB_CANCELLED = "cancelled"
 
 type Sink = Callable[[RawMessage], object]
 type Broadcast = Callable[[dict[str, Any]], None]
-# Confirmed rows (score desc) -> (the watch set wanted, the ids refused).
-type Chooser = Callable[[list[PairFlags]], tuple[list[int], list[int]]]
+# Confirmed rows (score desc) -> (watch set wanted, ids refused, ids already closed).
+type Chooser = Callable[[list[PairFlags]], tuple[list[int], list[int], list[int]]]
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +612,7 @@ class TrackPlan:
     add: list[int]
     remove: list[int]
     refused: list[int]  # asked to track, not confirmed — the precondition
+    skipped_expired: list[int]  # confirmed, but a leg already closed
     tracked_before: int
     confirmed: int
     targets_before: int
@@ -644,6 +646,7 @@ class TrackPlan:
             return (
                 f"{head}: nothing changes — the watch set is already "
                 f"{self.tracked_after} of {self.confirmed} confirmed pairs{tail}"
+                f"{self._expired_clause()}"
             )
         moves = []
         if self.add:
@@ -660,7 +663,22 @@ class TrackPlan:
         )
         if self.refused:
             text += f"; {len(self.refused)} ids are not confirmed and are refused"
+        text += self._expired_clause()
         return text
+
+    def _expired_clause(self) -> str:
+        """Its own clause, not folded into ``refused``.
+
+        ``refused`` means "you named a pair that is not confirmed" and the
+        sentence says exactly that; an expired pair was never named by anyone.
+        Sharing the slot would put a false sentence in the audit row.
+        """
+        n = len(self.skipped_expired)
+        if not n:
+            return ""
+        plural = "" if n == 1 else "s"
+        verb = "is" if n == 1 else "are"
+        return f"; {n} confirmed pair{plural} already closed and {verb} skipped"
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -668,6 +686,7 @@ class TrackPlan:
             "add": list(self.add),
             "remove": list(self.remove),
             "refused": list(self.refused),
+            "skipped_expired": list(self.skipped_expired),
             "tracked_before": self.tracked_before,
             "tracked_after": self.tracked_after,
             "confirmed": self.confirmed,
@@ -1201,7 +1220,7 @@ class ControlPlane:
             ActionSpec(
                 name="pairs.top",
                 grade="G2",
-                summary="replace the whole watch set with the top N confirmed pairs by score",
+                summary="replace the whole watch set with N confirmed pairs, spread across events",
                 validate=lambda p: {"n": _int_param(p, "n", minimum=0, maximum=200, default=None)},
                 effect=self._effect_pairs_top,
                 apply=self._apply_pairs_top,
@@ -1578,15 +1597,15 @@ class ControlPlane:
         """Price a change to the watch set against the confirmed rows.
 
         ``choose`` maps the confirmed rows (score desc, the display order) to
-        ``(the watch set it wants, the ids it had to refuse)``. One path, so
-        the sentence the operator reads and the write that follows cannot
-        disagree about what is about to happen.
+        ``(the watch set it wants, the ids it refused, the ids it skipped as
+        already closed)``. One path, so the sentence the operator reads and the
+        write that follows cannot disagree about what is about to happen.
         """
         engine = self._require_engine()
         flags = await pairs_store.pair_flags(engine, status="confirmed")
         by_id = {f.id: f for f in flags}
         now = [f.id for f in flags if f.tracked]
-        wanted, refused = choose(flags)
+        wanted, refused, skipped_expired = choose(flags)
         base = set(self._base_polymarket)
         before, after = set(now), set(wanted)
         return TrackPlan(
@@ -1594,6 +1613,7 @@ class ControlPlane:
             add=[i for i in wanted if i not in before],
             remove=[i for i in now if i not in after],
             refused=list(refused),
+            skipped_expired=list(skipped_expired),
             tracked_before=len(now),
             confirmed=len(flags),
             # Before: what the poller is actually polling. After: the base set
@@ -1608,26 +1628,56 @@ class ControlPlane:
         ids: list[int] = params["ids"]
         want: bool = params["tracked"]
 
-        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int]]:
+        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int], list[int]]:
             confirmed = {f.id for f in flags}
             now = [f.id for f in flags if f.tracked]
             asked, tracked_now = set(ids), set(now)
             if not want:
                 # Untracking is never refused: a pair that is not confirmed
                 # cannot be tracked in the first place.
-                return [i for i in now if i not in asked], []
+                return [i for i in now if i not in asked], [], []
             refused = [i for i in ids if i not in confirmed]
             add = [i for i in ids if i in confirmed and i not in tracked_now]
-            return [*now, *add], refused
+            # Deliberately NOT expiry-filtered. Naming a pair by id is an
+            # operator saying "this one", and /pairs is where they can see its
+            # close time. Only the bulk setter guesses, so only it declines.
+            return [*now, *add], refused, []
 
         return await self._plan(choose)
 
     async def _plan_pairs_top(self, params: dict[str, Any]) -> TrackPlan:
         top_n: int = params["n"]
 
-        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int]]:
-            # ``flags`` is already score desc, id — the display order.
-            return [f.id for f in flags[:top_n]], []
+        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int], list[int]]:
+            # ``flags`` arrives score desc, id. That order ranks rows WITHIN an
+            # event, and means nothing across events: a whole proposal run can
+            # sit at score 1.000, which turns "top N by score" into "the N
+            # lowest ids" — and ids cluster by event, because a proposal run
+            # inserts one event's markets together. Observed live: all ten
+            # slots went to consecutive strike bands of one Bitcoin ladder,
+            # which is ten rows but one bet, and /arb sat still for a day.
+            #
+            # So deal round-robin instead: the best row of every event, then
+            # the second-best of every event, until N is full. Rounds are
+            # unbounded, so N is always filled if the inventory allows it —
+            # a hard per-event cap would silently return fewer pairs than asked.
+            now = datetime.now(UTC)
+            skipped = [f.id for f in flags if f.is_closed(now)]
+            buckets: dict[str, list[PairFlags]] = {}
+            for f in flags:
+                if not f.is_closed(now):
+                    buckets.setdefault(f.event_key, []).append(f)
+            events = list(buckets.values())  # first seen = best ranked, kept
+            picked: list[int] = []
+            depth = 0
+            while len(picked) < top_n and any(len(b) > depth for b in events):
+                for bucket in events:
+                    if depth < len(bucket):
+                        picked.append(bucket[depth].id)
+                        if len(picked) == top_n:
+                            break
+                depth += 1
+            return picked, [], skipped
 
         return await self._plan(choose)
 
@@ -1642,7 +1692,10 @@ class ControlPlane:
         head = (
             "watch nothing (clear the whole watch set)"
             if top_n == 0
-            else f"replace the watch set with the top {top_n} confirmed pairs by score"
+            else (
+                f"replace the watch set with {top_n} confirmed pairs, "
+                "dealt one at a time across Kalshi events"
+            )
         )
         return (await self._plan_pairs_top(params)).sentence(head)
 
@@ -1729,6 +1782,11 @@ class ControlPlane:
             "rows_changed": rows,
             "plan": plan.payload(),
             "pairs": self.pairs_payload(),
+            # Lifted out of the plan blob: a pair skipped because its market
+            # already settled is the difference between "you asked for 10 and
+            # got 10" and "you asked for 10 and got 7", and a caller should not
+            # have to go digging to find that out.
+            "skipped_expired": list(plan.skipped_expired),
             **(extra or {}),
         }
         live = sorted(p.pair_id for p in self._host.arbmon.pairs) if self._host.arbmon else []

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from arb.pairs.matcher import PairCandidate
 from arb.storage.models import PairRow
+from arb.venues.kalshi.rest import event_ticker_of
 
 STATUSES = ("proposed", "confirmed", "rejected")
 UPSERT_CHUNK = 2000  # 5 params/row → 10k params, well under the 32,767 cap
@@ -215,6 +216,9 @@ class PairFlags:
     score: float
     kalshi_market_id: str
     polymarket_market_id: str
+    kalshi_event: str = ""
+    kalshi_close: str = ""
+    polymarket_close: str = ""
 
     @property
     def kalshi_ticker(self) -> str:
@@ -224,6 +228,54 @@ class PairFlags:
     def polymarket_slug(self) -> str:
         """The poll target this pair costs (market ids are ``venue:native``)."""
         return self.polymarket_market_id.partition(":")[2]
+
+    @property
+    def event_key(self) -> str:
+        """The Kalshi event this pair belongs to.
+
+        This is the unit a watch set should spread across. Ten strike bands of
+        one price ladder are ten rows but one bet: they move together, they go
+        quiet together, and filling every slot with them buys no diversity at
+        all. Prefer the event ticker the proposer stored; fall back to the
+        ticker rule only when it is missing.
+        """
+        return self.kalshi_event or event_ticker_of(self.kalshi_ticker)
+
+    @property
+    def close_time(self) -> datetime | None:
+        """The EARLIER of the two legs' close times, or None if unknown.
+
+        A pair stops being tradable as a pair the moment either leg closes, so
+        the earlier one governs. This is a snapshot taken at proposal time, not
+        an authority — a market that can close early closes before its
+        published time — which makes it a coarse filter for *selection* and
+        nothing more. Liveness at load time is a separate check.
+        """
+        times = [
+            t
+            for t in (_parse_close(self.kalshi_close), _parse_close(self.polymarket_close))
+            if t is not None
+        ]
+        return min(times) if times else None
+
+    def is_closed(self, now: datetime) -> bool:
+        closes = self.close_time
+        return closes is not None and closes <= now
+
+
+def _parse_close(raw: str) -> datetime | None:
+    """Parse a stored ISO close time. Unknown and unparseable both mean "open".
+
+    Failing open is deliberate: a pair whose close time was never recorded must
+    stay selectable, or a missing field silently empties the watch set.
+    """
+    if not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
 async def pair_flags(
@@ -243,6 +295,14 @@ async def pair_flags(
         PairRow.score,
         PairRow.kalshi_market_id,
         PairRow.polymarket_market_id,
+        # Three scalars out of the detail blob, never the blob itself: these
+        # are what let the caller spread a watch set across events and skip
+        # pairs that have already settled. ``.as_string()`` (not ``.astext``,
+        # which is JSONB-only) compiles on both Postgres and the SQLite engines
+        # the tests build, and yields NULL where the key is absent.
+        PairRow.detail["kalshi"]["event_slug"].as_string().label("kalshi_event"),
+        PairRow.detail["kalshi"]["close_time"].as_string().label("kalshi_close"),
+        PairRow.detail["polymarket_us"]["close_time"].as_string().label("polymarket_close"),
     ).order_by(PairRow.score.desc(), PairRow.id)
     if pair_ids is not None:
         stmt = stmt.where(PairRow.id.in_(list(dict.fromkeys(pair_ids))))
@@ -260,6 +320,9 @@ async def pair_flags(
             score=float(r.score),
             kalshi_market_id=str(r.kalshi_market_id),
             polymarket_market_id=str(r.polymarket_market_id),
+            kalshi_event=str(r.kalshi_event or ""),
+            kalshi_close=str(r.kalshi_close or ""),
+            polymarket_close=str(r.polymarket_close or ""),
         )
         for r in rows
     ]

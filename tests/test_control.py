@@ -966,6 +966,124 @@ async def test_pairs_top_is_a_bulk_setter_not_a_selector(
     await engine.dispose()
 
 
+async def events_engine() -> AsyncEngine:
+    """The shape that broke the live system: one huge event and two small ones.
+
+    Ten pairs on the Bitcoin ladder, one on each of two other events, every
+    score exactly 1.000. Ordered by (score desc, id) — the old selection — the
+    first ten rows are all Bitcoin, so any top-N under 11 was one bet.
+    """
+    engine = await sqlite_engine()
+    rows = [(i, "KXBTCY-27JAN0100", f"KXBTCY-27JAN0100-B{i}") for i in range(1, 11)]
+    rows.append((11, "KXSCOURT-29", "KXSCOURT-29-AT"))
+    rows.append((12, "KXMUSKNW-26DEC31", "KXMUSKNW-26DEC31-T600"))
+    async with engine.begin() as conn:
+        await conn.execute(
+            insert(PairRow),
+            [
+                {
+                    "kalshi_market_id": f"kalshi:{ticker}",
+                    "polymarket_market_id": f"polymarket_us:p{i}",
+                    "status": "confirmed",
+                    "score": 1.0,
+                    "detail": {
+                        "kalshi": {
+                            "market_id": f"kalshi:{ticker}",
+                            "ticker": ticker,
+                            "event_slug": event,
+                        },
+                        "polymarket_us": {
+                            "market_id": f"polymarket_us:p{i}",
+                            "ticker": f"p{i}",
+                        },
+                    },
+                }
+                for i, event, ticker in rows
+            ],
+        )
+    return engine
+
+
+async def test_pairs_top_spreads_across_kalshi_events(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The regression test for the all-Bitcoin watch set.
+
+    Every score is 1.000, so the old ``flags[:n]`` was ``ORDER BY id``, and ids
+    cluster by event because a proposal run inserts one event's markets
+    together. Ten of ten slots went to consecutive strike bands of one Bitcoin
+    ladder — ten rows, one bet — and /arb sat still. Selection now deals one
+    pair per event before it deals a second from any.
+    """
+    engine = await events_engine()
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    await control.execute("pairs.top", {"n": 3})
+
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {1, 11, 12}, "one per event, not the first three Bitcoin strikes"
+
+    # Asking for more than there are events keeps filling: round two takes the
+    # second-best row of each event, so N is still honoured.
+    await control.execute("pairs.top", {"n": 5})
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {1, 2, 3, 11, 12}, "rounds are unbounded; N is never silently shrunk"
+    await engine.dispose()
+
+
+async def test_pairs_top_skips_a_pair_whose_leg_has_already_closed(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """A settled market must not win a watch slot, and must be said out loud.
+
+    Three of the live watch set were esports maps that had resolved days
+    earlier; nothing filtered them, so they burned poll budget and showed no
+    movement. The skip is counted in the sentence that goes to the audit row —
+    a selection quietly returning fewer pairs than asked is how this started.
+    """
+    engine = await sqlite_engine()
+    async with engine.begin() as conn:
+        await conn.execute(
+            insert(PairRow),
+            [
+                {
+                    "kalshi_market_id": f"kalshi:K{i}",
+                    "polymarket_market_id": f"polymarket_us:p{i}",
+                    "status": "confirmed",
+                    "score": 1.0,
+                    "detail": {
+                        "kalshi": {
+                            "market_id": f"kalshi:K{i}",
+                            "ticker": f"K{i}",
+                            "event_slug": f"EV{i}",
+                            "close_time": close,
+                        },
+                        "polymarket_us": {"market_id": f"polymarket_us:p{i}", "ticker": f"p{i}"},
+                    },
+                }
+                for i, close in (
+                    (1, "2020-01-01T00:00:00+00:00"),  # long settled
+                    (2, "2099-01-01T00:00:00+00:00"),  # far future
+                    (3, None),  # unknown: must fail OPEN, not closed
+                )
+            ],
+        )
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    result = await control.execute("pairs.top", {"n": 3})
+
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {2, 3}, "the settled pair is skipped; an unknown close time is not"
+    assert "1 confirmed pair already closed and is skipped" in result.effect
+    assert result.detail["skipped_expired"] == [1]
+    # And the operator's own record says so, not just the screen.
+    rows = await list_control_actions(engine)
+    assert "already closed" in rows[-1]["effect"]
+    await engine.dispose()
+
+
 async def test_the_effect_sentence_prices_the_change_before_it_happens(
     monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
 ) -> None:
