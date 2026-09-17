@@ -1,5 +1,6 @@
-"""Load confirmed pairs as :class:`TrackedPair`s with both venues' fee
-parameters resolved from the documented endpoints (recorded before parsing).
+"""Load the WATCHED pairs — ``status='confirmed' AND tracked`` — as
+:class:`TrackedPair`s, with both venues' fee parameters resolved from the
+documented endpoints (recorded before parsing).
 
 Shared by ``arb ui`` (live ARB screen) and ``arb replay`` so both quote with
 identical fee models.
@@ -44,12 +45,30 @@ async def load_tracked_pairs(
     run: RunContext,
     engine: AsyncEngine,
     *,
-    top_n: int,
     sink: Callable[[RawMessage], object] | None = None,
+    top_n: int | None = None,
 ) -> TrackedLoad:
-    """Top ``top_n`` confirmed pairs by score, fee parameters resolved."""
+    """Every ``confirmed`` pair whose ``tracked`` flag is set, fee parameters
+    resolved. Ordered by score for display stability, NOT sliced by it.
+
+    The slice is gone on purpose. It used to be "top N confirmed by score",
+    which with tied scores is ``ORDER BY score DESC, id`` — so the lowest ids
+    won forever and a pair confirmed today could never be watched, however
+    many times the operator reloaded. What to watch is now state
+    (``pairs.tracked``), set deliberately because each tracked pair costs one
+    Polymarket poll target on a fixed global budget.
+
+    ``top_n`` is accepted and IGNORED for one milestone so the two callers
+    outside this change (``arb.ui.server`` and ``arb.replay``) keep type
+    checking; it warns when passed and must be deleted from both.
+    """
+    if top_n is not None:
+        log.warning(
+            "load_tracked_pairs: top_n=%s ignored — the tracked flag selects the watch set",
+            top_n,
+        )
     out = TrackedLoad()
-    rows = (await pairs_store.list_pairs(engine, status="confirmed"))[:top_n]
+    rows = await pairs_store.list_pairs(engine, status="confirmed", tracked=True)
     if not rows:
         return out
     pm_by_slug = {
@@ -111,5 +130,5 @@ async def load_tracked_pairs(
             out.kalshi_tickers.append(k_ticker)
         if p_slug not in out.polymarket_slugs:
             out.polymarket_slugs.append(p_slug)
-    log.info("tracked pairs: %d confirmed pairs resolved", len(out.tracked))
+    log.info("tracked pairs: %d tracked confirmed pairs resolved", len(out.tracked))
     return out

@@ -27,14 +27,34 @@
        you could not TAB out of /pairs) onto ← →, which are not printable and
        so shadow nothing;
      - CONFIRM / REJECT / UNDECIDE also exist as buttons, because a decision
-       that only a letter can make is unreachable with a mouse. */
+       that only a letter can make is unreachable with a mouse.
+
+   CONFIRMING IS NOT WATCHING (M21). Two decisions used to be one:
+     - CONFIRMED means these two markets resolve to the same thing. It is a
+       judgement about the world, durable, and made right here from the rules
+       text on the other half of this screen.
+     - TRACKED means watch this pair now. It is operational and it is PAID
+       FOR: Polymarket US is polled on one global rate budget, so every
+       watched pair is one more poll target and ~2.2s more staleness on every
+       other Polymarket book. Watching all 46 confirmed pairs would mean two
+       minutes per book, which is not a quote.
+   Inferring the watch set from "top N by score" is what broke: every pair
+   scores 1.000, so the tie fell through to `id` and the ten oldest rows owned
+   the watch set forever. So tracking is its own state, set per pair, with T
+   (and the TRACK button) — and the cost of the next one is printed next to
+   the button that spends it. */
 
 import { $, el, titled, setText } from "../core/dom.js";
 import { state, schedule } from "../core/state.js";
 import { nf, fmtWhen } from "../core/format.js";
+import { onMessage } from "../core/ws.js";
 import { SCOPE, focusRegion } from "../core/keys.js";
 
-const PAIR_FILTERS = ["proposed", "confirmed", "rejected", "all"];
+// "tracked" is not a status — it is the watch flag, and it cuts across all
+// three. It sits in the same list because the question it answers ("which of
+// these am I actually watching?") is asked in the same breath as the others,
+// and because the filter strip is the only place this page can ask it.
+const PAIR_FILTERS = ["proposed", "confirmed", "rejected", "tracked", "all"];
 // A full universe proposal is ~12k rows. Building them all costs ~100k DOM
 // nodes on every keystroke; the list is score-ordered, so the top slice IS the
 // review queue and the rest is reachable by deciding or searching. The banner
@@ -63,15 +83,71 @@ const ARM_MS = 8000;
 const MSG_MS = 6000;
 
 // This page owns state.pairs; it gains a few fields the overlay never needed.
-Object.assign(state.pairs, { all: [], q: "", matchCount: 0, loadedAt: 0, undo: null });
+Object.assign(state.pairs, { all: [], q: "", matchCount: 0, loadedAt: 0, undo: null, msgKind: "" });
+
+// ---------- the watch set and what it costs ----------
+
+/* The last {"t":"control"} frame. The server sends one the moment a socket
+   opens and again after every action that changes anything, so this page does
+   not poll and does not fetch: it reads the same truth /control reads.
+   Registered at module scope, like control.js does, because the frame that
+   matters most is the one that arrives while this page is NOT mounted (a
+   watch change made from /control has to be true here when you come back). */
+let control = null;
+
+onMessage("control", (m) => {
+  if (!m || !m.control) return;
+  control = m.control;
+  if (state.pairs.open) schedule("pairs");
+});
+
+const watchInfo = () => (control && control.pairs) || {};
+const pollInfo = () => watchInfo().poll || {};
+const readOnly = () => !!(control && control.read_only);
+
+/** The budget sentence: where the watch set stands and what one more costs.
+
+    This is the number whose absence cost an afternoon — "the action said it
+    worked" is only readable as a lie next to "watching 10 of 46". */
+function watchCost() {
+  const w = watchInfo();
+  const poll = pollInfo();
+  if (w.confirmed == null || w.tracked == null) {
+    return control ? "WATCH SET UNKNOWN" : "AWAITING CONTROL STATE";
+  }
+  const head = "WATCHING " + nf.format(w.tracked) + " OF " + nf.format(w.confirmed) + " CONFIRMED";
+  if (poll.cycle_s == null || poll.per_pair_s == null) return head;
+  return head + " · POLYMARKET " + Number(poll.cycle_s).toFixed(1) + "S / BOOK"
+    + " · ONE MORE PAIR +" + Number(poll.per_pair_s).toFixed(1) + "S";
+}
+
+/** True when the server is watching a different number of pairs than this
+    page's loaded rows say. The control frame carries a count, not the flags,
+    so a bulk set from /control (or another tab) cannot patch the rows — but
+    it CAN be noticed, which is the difference between a stale screen and a
+    lying one. The list is 17MB on a full run, so it is reloaded on mount and
+    on R, never automatically underneath the operator. */
+function watchDrift() {
+  const w = watchInfo();
+  const rows = state.pairs.all;
+  if (!rows.length || w.tracked == null) return false;
+  let n = 0;
+  for (const r of rows) if (r.tracked) n += 1;
+  return n !== w.tracked;
+}
 
 // ---------- the header message ----------
 
-function setMsg(text, ms) {
+function setMsg(text, ms, kind) {
   // ms = 0 is a failure: it is the only place the error is reported, so it
   // holds until the operator does something that makes it stale.
+  // `kind` colours it: "" is neutral feedback, "warn" is "this did nothing"
+  // and "err" is a failure. A write that moved no rows must not read like one
+  // that did, which is the whole reason this page reports the server's own
+  // sentence rather than the fact that the request returned 200.
   if (msgTimer) { clearTimeout(msgTimer); msgTimer = null; }
   state.pairs.msg = text;
+  state.pairs.msgKind = kind || "";
   const ttl = ms === undefined ? MSG_MS : ms;
   if (ttl > 0) msgTimer = setTimeout(clearMsg, ttl);
 }
@@ -81,6 +157,7 @@ function clearMsg() {
   armed = null;
   if (!state.pairs.msg) return;
   state.pairs.msg = "";
+  state.pairs.msgKind = "";
   schedule("pairs");
 }
 
@@ -101,6 +178,7 @@ function disarm() {
   armed = null;
   if (msgTimer) { clearTimeout(msgTimer); msgTimer = null; }
   state.pairs.msg = "";
+  state.pairs.msgKind = "";
   schedule("pairs");
 }
 
@@ -123,12 +201,23 @@ function matchesQuery(row, terms) {
 // ---------- filter / counts (client side: the list is loaded whole) ----------
 
 function counts() {
-  const c = { proposed: 0, confirmed: 0, rejected: 0, all: 0 };
+  const c = { proposed: 0, confirmed: 0, rejected: 0, tracked: 0, all: 0 };
   for (const row of state.pairs.all) {
     if (c[row.status] != null) c[row.status] += 1;
+    if (row.tracked) c.tracked += 1;
     c.all += 1;
   }
   return c;
+}
+
+/** Does this row belong under `f`? Three of the filters are statuses and one
+    is the watch flag, so every place that asked `row.status !== p.filter` has
+    to ask this instead — otherwise the TRACKED filter would quietly match
+    nothing and a decision would never drop a row out of it. */
+function inFilter(row, f) {
+  if (f === "all") return true;
+  if (f === "tracked") return !!row.tracked;
+  return row.status === f;
 }
 
 function applyFilter() {
@@ -141,7 +230,7 @@ function applyFilter() {
   const terms = q ? q.split(/\s+/) : [];
   const out = [];
   for (const row of p.all) {
-    if (p.filter !== "all" && row.status !== p.filter) continue;
+    if (!inFilter(row, p.filter)) continue;
     if (terms.length && !matchesQuery(row, terms)) continue;
     out.push(row);
   }
@@ -178,7 +267,7 @@ async function loadPairs() {
     p.rows = [];
     p.matchCount = 0;
     p.loadedAt = 0;
-    setMsg("LOAD FAILED · " + String(err.message || err).toUpperCase(), 0);
+    setMsg("LOAD FAILED · " + String(err.message || err).toUpperCase(), 0, "err");
     listDirty = true;
   }
   p.loading = false;
@@ -214,16 +303,86 @@ async function decidePair(status) {
     if (!r.ok) throw new Error("HTTP " + r.status);
     const updated = await r.json();
     rememberUndo([row], "#" + row.id);
+    // The payload carries `tracked` too, and the server clears it on any
+    // decision that is not "confirmed" — confirmed is a precondition for
+    // watching. Taking the whole row back keeps that rule in one place.
     patch(row, updated);
-    setMsg("#" + row.id + " " + status.toUpperCase());
-    // Under a status filter the decided row no longer belongs; drop it and
-    // keep the cursor on the next candidate — review flows top to bottom.
-    if (p.filter !== "all" && updated.status !== p.filter) applyFilter();
+    setMsg("#" + row.id + " " + status.toUpperCase()
+      + (updated.tracked ? " · WATCHED" : ""));
+    // Under a filter the decided row may no longer belong; drop it and keep
+    // the cursor on the next candidate — review flows top to bottom.
+    if (!inFilter(row, p.filter)) applyFilter();
     else listDirty = true;
   } catch (err) {
-    setMsg("DECIDE FAILED · " + String(err.message || err).toUpperCase(), 0);
+    setMsg("DECIDE FAILED · " + String(err.message || err).toUpperCase(), 0, "err");
   }
   schedule("pairs");
+}
+
+// ---------- watch (the tracked flag) ----------
+
+// Ids with a pairs.track POST in flight, so a second T on the same row cannot
+// race the first. Keyed by id, not a single flag: watching one pair while
+// another is still landing is legitimate.
+const tracking = new Set();
+
+/** Track / untrack ONE pair, through the control plane.
+
+    Not /api/pairs: the watch set is a live universe change (both legs
+    subscribe or unsubscribe, books evict, the Polymarket staleness budget
+    retunes and a fresh hello reaches every tab), and every one of those is
+    already owned by POST /api/control/pairs.track — which also audits the
+    action and prices it. A second route to the same write would be a second
+    place to forget one of those.
+
+    The server's own sentence is what gets reported, because it is the one
+    that says "nothing changed" when nothing changed. */
+async function setTracked(row, want) {
+  const p = state.pairs;
+  if (!row || tracking.has(row.id)) return;
+  // Only a confirmed pair can be watched. The server refuses this too (400,
+  // all-or-nothing), but a control that fires and then apologises is not a
+  // control: say it before the write, in the same words.
+  if (want && row.status !== "confirmed") {
+    setMsg("#" + row.id + " IS " + String(row.status).toUpperCase()
+      + " — CONFIRM IT (Y) BEFORE WATCHING IT", MSG_MS, "warn");
+    schedule("pairs");
+    return;
+  }
+  tracking.add(row.id);
+  listDirty = true;
+  schedule("pairs");
+  try {
+    const r = await fetch("/api/control/pairs.track", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ params: { ids: [row.id], tracked: !!want } }),
+      cache: "no-store",
+    });
+    let body = null;
+    try { body = await r.json(); } catch (err) { body = null; }
+    body = body || {};
+    if (!r.ok) throw new Error(body.error || "HTTP " + r.status);
+    // The write is all-or-nothing and the flag is now `want` either way — a
+    // no-op means it already was. `changed` is about rows moved, not truth.
+    patch(row, { tracked: !!want });
+    const changed = body.changed !== false;
+    setMsg(String(body.message || (want ? "WATCHED" : "UNWATCHED")).toUpperCase(),
+      MSG_MS, changed ? "" : "warn");
+    if (!inFilter(row, p.filter)) applyFilter();
+    else listDirty = true;
+  } catch (err) {
+    setMsg("WATCH FAILED · " + String(err.message || err).toUpperCase(), 0, "err");
+    listDirty = true;
+  }
+  tracking.delete(row.id);
+  schedule("pairs");
+}
+
+function toggleTracked() {
+  const p = state.pairs;
+  const row = p.rows[p.idx];
+  if (row) setTracked(row, !row.tracked);
 }
 
 function eventKey(r) {
@@ -241,7 +400,7 @@ function hiddenInEvent(key, visible) {
   const p = state.pairs;
   let n = 0;
   for (const r of p.all) {
-    if (p.filter !== "all" && r.status !== p.filter) continue;
+    if (!inFilter(r, p.filter)) continue;
     if (eventKey(r) === key) n += 1;
   }
   return Math.max(0, n - visible);
@@ -297,10 +456,16 @@ async function decideEventGroup(status) {
       return;
     }
     rememberUndo(group, nf.format(res.updated) + (res.updated === 1 ? " ROW" : " ROWS"));
-    for (const g of group) g.status = status;
+    // The bulk route answers with a count, not rows, so the local copy is
+    // patched by the same rule the server applies: anything that is not
+    // confirmed cannot be watched, so the flag comes off with the status.
+    for (const g of group) {
+      g.status = status;
+      if (status !== "confirmed") g.tracked = false;
+    }
     applyFilter();
   } catch (err) {
-    setMsg("DECIDE FAILED · " + String(err.message || err).toUpperCase(), 0);
+    setMsg("DECIDE FAILED · " + String(err.message || err).toUpperCase(), 0, "err");
   }
   schedule("pairs");
 }
@@ -331,12 +496,17 @@ async function undoLast() {
     }
     for (const row of p.all) {
       const was = prev.get(row.id);
-      if (was) row.status = was;
+      if (!was) continue;
+      row.status = was;
+      // Undo restores the STATUS. It cannot restore the watch flag: rejecting
+      // a pair cleared it server-side and re-confirming does not bring it
+      // back, so the local copy must not pretend otherwise.
+      if (was !== "confirmed") row.tracked = false;
     }
     setMsg("UNDONE · " + u.label);
     applyFilter();
   } catch (err) {
-    setMsg("UNDO FAILED · " + String(err.message || err).toUpperCase(), 0);
+    setMsg("UNDO FAILED · " + String(err.message || err).toUpperCase(), 0, "err");
     await loadPairs();
     return;
   }
@@ -403,7 +573,9 @@ function buildControls() {
     b.type = "button";
     b.dataset.status = s;
     b.append(el("span", "pc-l", s.toUpperCase()), el("span", "pc-n num", "—"));
-    b.title = (s === "all" ? "SHOW EVERY PAIR" : "SHOW " + s.toUpperCase() + " PAIRS") + " (← →)";
+    b.title = (s === "all" ? "SHOW EVERY PAIR"
+      : s === "tracked" ? "SHOW THE PAIRS BEING WATCHED RIGHT NOW"
+      : "SHOW " + s.toUpperCase() + " PAIRS") + " (← →)";
     b.addEventListener("click", (e) => {
       setFilter(s);
       if (e.detail > 0) b.blur();   // pointer click: hand typing back to ARB>
@@ -471,6 +643,7 @@ function buildFoot() {
     "LIST KEYS — ↑↓ AT THE ARB> LINE ENTERS THE LIST"
     + " · ↑↓ SELECT · PGUP/PGDN ±10 · Y / N DECIDE"
     + " · SHIFT+Y / SHIFT+N TWICE = VISIBLE ROWS OF THIS EVENT · U UNDECIDE"
+    + " · T WATCH / STOP WATCHING (CONFIRMED ONLY)"
     + " · ←→ FILTER · / SEARCH · R REFRESH · ESC ARB>"));
 }
 
@@ -508,6 +681,52 @@ function buildActions() {
     acts.append(b);
   }
   detail.insertBefore(acts, detail.firstChild);
+  buildWatch(detail, acts);
+}
+
+// The watch control, deliberately its own strip UNDER the decide strip and
+// visually apart from it: confirming and watching are two different decisions
+// and the screen has to stop implying they are one. The cost line lives right
+// beside the button because the budget is what makes this a choice at all.
+let watchBtn = null;
+let watchNote = null;
+
+function buildWatch(detail, acts) {
+  const wrap = el("div", "pair-watch");
+  watchBtn = el("button", "pchip pact pwatch");
+  watchBtn.type = "button";
+  watchBtn.textContent = "WATCH";
+  watchBtn.addEventListener("click", (e) => {
+    if (e.detail > 0) watchBtn.blur();   // pointer click: typing goes to ARB>
+    toggleTracked();
+  });
+  watchNote = el("span", "pw-note", "—");
+  wrap.append(watchBtn, watchNote);
+  detail.insertBefore(wrap, acts.nextSibling);
+}
+
+function renderWatch(row) {
+  if (!watchBtn) return;
+  const on = !!row.tracked;
+  const busy = tracking.has(row.id);
+  const confirmed = row.status === "confirmed";
+  const ro = readOnly();
+  watchBtn.textContent = busy ? "…" : on ? "STOP WATCHING" : "WATCH";
+  watchBtn.classList.toggle("on", on);
+  watchBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  // A pair that is not confirmed cannot be watched — so the button that would
+  // spend poll budget on it is not offered, rather than offered and refused.
+  // Untracking is never blocked: a stale flag must always be removable.
+  watchBtn.disabled = busy || ro || (!on && !confirmed);
+  watchBtn.title = ro
+    ? "READ-ONLY: THIS SERVER REFUSES EVERY CONTROL"
+    : !on && !confirmed
+      ? "ONLY A CONFIRMED PAIR CAN BE WATCHED — CONFIRM IT FIRST (Y)"
+      : on
+        ? "STOP WATCHING #" + row.id + " — FREES ONE POLYMARKET POLL TARGET (T IN THE LIST)"
+        : "WATCH #" + row.id + " — COSTS ONE POLYMARKET POLL TARGET (T IN THE LIST)";
+  const txt = watchCost();
+  if (watchNote.textContent !== txt) watchNote.textContent = txt;
 }
 
 function renderActions(row) {
@@ -533,10 +752,10 @@ function focusSearch() {
 // ---------- render ----------
 
 function statLine(p) {
-  if (p.matchCount > p.rows.length) {
-    return nf.format(p.rows.length) + " OF " + nf.format(p.matchCount) + " PAIRS";
-  }
-  return nf.format(p.rows.length) + " PAIRS";
+  const n = p.matchCount > p.rows.length
+    ? nf.format(p.rows.length) + " OF " + nf.format(p.matchCount) + " PAIRS"
+    : nf.format(p.rows.length) + " PAIRS";
+  return watchDrift() ? n + " · WATCH SET CHANGED ELSEWHERE — R TO REFRESH" : n;
 }
 
 function renderChips(c) {
@@ -559,9 +778,12 @@ function renderProgress(c) {
   const total = c.all;
   const decided = c.confirmed + c.rejected;
   const pct = total ? Math.round((decided / total) * 100) : 0;
+  // WATCHED sits next to CONFIRMED because the gap between the two is the
+  // thing this page exists to make visible: confirming does not start a quote.
   const txt = total
     ? nf.format(c.proposed) + " PROPOSED · " + nf.format(c.confirmed) + " CONFIRMED · "
-      + nf.format(c.rejected) + " REJECTED · " + pct + "% REVIEWED"
+      + nf.format(c.rejected) + " REJECTED · " + pct + "% REVIEWED · "
+      + nf.format(c.tracked) + " WATCHED"
     : "NO PAIRS STORED";
   if (progTxt.textContent !== txt) progTxt.textContent = txt;
   barC.style.width = total ? ((c.confirmed / total) * 100).toFixed(2) + "%" : "0%";
@@ -581,10 +803,18 @@ function buildRow(row, i) {
   // resolves to nothing on either venue.
   k.append(titled(el("span", "pr-id", kk.ticker || "")), el("span", "pr-out", kk.outcome || ""));
   q.append(titled(el("span", "pr-id", pp.ticker || "")), el("span", "pr-out", pp.outcome || ""));
+  // WATCH is its own column, not a decoration on STATUS: a confirmed pair
+  // that is not watched is the normal case now, and the row has to say which
+  // of the two it is. `tracked` may be absent on an older payload — treat a
+  // missing flag as "not watched" rather than as unknown.
+  const w = el("span", "pr-watch" + (row.tracked ? " on" : ""),
+    tracking.has(row.id) ? "…" : row.tracked ? "● WATCHING" : "—");
+  if (row.tracked) w.title = "WATCHED: ONE POLYMARKET POLL TARGET IS SPENT ON THIS PAIR";
   r.append(
     el("span", "pr-score num", Number(row.score).toFixed(2)),
     k, q,
     el("span", "pr-status st-" + row.status, String(row.status).toUpperCase()),
+    w,
   );
   r.addEventListener("click", () => {
     state.pairs.idx = i;
@@ -595,6 +825,11 @@ function buildRow(row, i) {
 
 function emptyText(p) {
   if (p.q.trim()) return "NO MATCH FOR " + p.q.trim().toUpperCase();
+  if (p.filter === "tracked") {
+    return p.all.length
+      ? "NOTHING IS BEING WATCHED — SELECT A CONFIRMED PAIR AND PRESS T"
+      : "NOTHING IS BEING WATCHED";
+  }
   if (p.all.length) return "NONE " + p.filter.toUpperCase();
   return p.filter === "proposed" ? "NO PROPOSALS — RUN THE PROPOSE PAIRS JOB ON /control" : "NONE";
 }
@@ -669,6 +904,7 @@ function renderDetail() {
   st.textContent = String(row.status).toUpperCase();
   st.className = "v " + (row.status === "confirmed" ? "st-live" : row.status === "rejected" ? "st-off" : "");
   renderActions(row);
+  renderWatch(row);
 }
 
 function renderPairs() {
@@ -676,6 +912,10 @@ function renderPairs() {
   if (!p.open) return;
   setText("pairs-filter", p.filter.toUpperCase());
   setText("pairs-stat", p.loading ? "LOADING" : (p.msg || statLine(p)));
+  // The header stat doubles as the action report, so it has to be able to say
+  // "that did nothing" in a colour that is not the colour of success.
+  const stat = $("pairs-stat");
+  if (stat) stat.className = "head-stat" + (p.msg && p.msgKind ? " pm-" + p.msgKind : "");
   const c = counts();
   renderChips(c);
   renderProgress(c);
@@ -724,6 +964,11 @@ function onPairsKey(e, scope) {
   if (up === "Y") { (e.shiftKey ? decideEventGroup : decidePair)("confirmed"); return true; }
   if (up === "N") { (e.shiftKey ? decideEventGroup : decidePair)("rejected"); return true; }
   if (up === "U") { decidePair("proposed"); return true; }
+  // T is a G2 one-row write like Y/N/U — one key, LIST scope only, no
+  // autorepeat (the guard above covers it). It toggles, because "watch" and
+  // "stop watching" are the same decision seen from either side and the row
+  // and the button both say which side you are on.
+  if (up === "T" && !e.shiftKey) { toggleTracked(); return true; }
   if (up === "R") { loadPairs(); return true; }
   return false;
 }
@@ -737,7 +982,7 @@ function pairsKeyHints(scope) {
   return [
     { k: "Y / N", d: "DECIDE" },
     { k: "SHIFT+Y/N", d: "EVENT" },
-    { k: "U", d: "UNDECIDE" },
+    { k: "T", d: "WATCH" },
     { k: "/", d: "SEARCH" },
   ];
 }
@@ -767,7 +1012,10 @@ export default {
     if (qInput) qInput.value = p.q;
     listDirty = true;
     lastSel = -1;
-    if (!p.all.length || Date.now() - p.loadedAt > TTL_MS) loadPairs();
+    // A stale watch flag is worse than a slow mount: if the server is watching
+    // a different number of pairs than these rows claim, the cached list is
+    // wrong about the one column this page is here to show.
+    if (!p.all.length || Date.now() - p.loadedAt > TTL_MS || watchDrift()) loadPairs();
     else schedule("pairs");
   },
 

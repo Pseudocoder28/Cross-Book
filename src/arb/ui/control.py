@@ -43,6 +43,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -69,6 +70,8 @@ from arb.metrics import (
     CONTROL_JOBS,
 )
 from arb.pairs import run as pairs_run
+from arb.pairs import store as pairs_store
+from arb.pairs.store import PairFlags
 from arb.pairs.tracked import load_tracked_pairs
 from arb.paper import PaperLimits, PaperTrader
 from arb.run import RunContext
@@ -100,6 +103,12 @@ JOB_TERMINATE_GRACE_S = 5.0
 # Polled books are only as fresh as their poll cycle; allow three cycles (one
 # 429 cooldown) before calling them stale. Same rule as ``run_ui``'s startup.
 PM_STALENESS_CYCLES = 3
+# How long the confirmed/tracked row counts are reused before a background
+# refresh. ``payload()`` is synchronous (``GET /api/control`` calls it straight
+# through), so the counts are cached and refreshed off to the side: a few
+# seconds of lag on a number the operator reads is fine, blocking a render on
+# Postgres is not.
+PAIR_COUNTS_TTL_S = 5.0
 
 JOB_RUNNING = "running"
 JOB_OK = "ok"
@@ -108,6 +117,8 @@ JOB_CANCELLED = "cancelled"
 
 type Sink = Callable[[RawMessage], object]
 type Broadcast = Callable[[dict[str, Any]], None]
+# Confirmed rows (score desc) -> (the watch set wanted, the ids refused).
+type Chooser = Callable[[list[PairFlags]], tuple[list[int], list[int]]]
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +556,11 @@ class ControlHost(Protocol):
 
 
 type Validate = Callable[[Mapping[str, Any]], dict[str, Any]]
-type Effect = Callable[[dict[str, Any]], str]
+# An effect sentence may need the database to be true ("5 rows change, the
+# cycle becomes 44.4 s"), so it may be async. ``execute`` awaits it BEFORE the
+# action runs, which is the whole point: the operator is told the row count
+# and the resulting poll cycle by a query, not by an estimate.
+type Effect = Callable[[dict[str, Any]], str | Awaitable[str]]
 type Apply = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 type NeedsConfirm = Callable[[dict[str, Any]], bool]
 
@@ -566,6 +581,11 @@ class ActionSpec:
     def needs_confirm(self, params: dict[str, Any]) -> bool:
         return self.confirm is not None and self.confirm(params)
 
+    async def sentence(self, params: dict[str, Any]) -> str:
+        """The effect sentence, awaiting it when the spec needs a query."""
+        effect = self.effect(params)
+        return await effect if inspect.isawaitable(effect) else effect
+
     def payload(self) -> dict[str, Any]:
         return {
             "action": self.name,
@@ -573,6 +593,89 @@ class ActionSpec:
             "summary": self.summary,
             "mutates": self.mutates,
             "confirm": self.confirm is not None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TrackPlan:
+    """What a change to the watch set would do — priced BEFORE it is done.
+
+    Tracking is not free: Polymarket US is polled on one global rate budget,
+    so every tracked pair is one more poll target and ``interval_s`` more
+    staleness on every other Polymarket book. The operator gets told the row
+    count and the resulting cycle in the effect sentence, and the same numbers
+    come back in the result, because "it succeeded" told them nothing.
+    """
+
+    wanted: list[int]  # the watch set this change produces
+    add: list[int]
+    remove: list[int]
+    refused: list[int]  # asked to track, not confirmed — the precondition
+    tracked_before: int
+    confirmed: int
+    targets_before: int
+    targets_after: int
+    interval_s: float
+
+    @property
+    def rows(self) -> int:
+        """Rows the write will actually change. Zero means a no-op."""
+        return len(self.add) + len(self.remove)
+
+    @property
+    def tracked_after(self) -> int:
+        return len(self.wanted)
+
+    @property
+    def cycle_before_s(self) -> float:
+        return self.interval_s * self.targets_before
+
+    @property
+    def cycle_after_s(self) -> float:
+        return self.interval_s * self.targets_after
+
+    def sentence(self, head: str) -> str:
+        if not self.rows:
+            tail = (
+                f"; {len(self.refused)} of them are not confirmed, so they are refused"
+                if self.refused
+                else ""
+            )
+            return (
+                f"{head}: nothing changes — the watch set is already "
+                f"{self.tracked_after} of {self.confirmed} confirmed pairs{tail}"
+            )
+        moves = []
+        if self.add:
+            moves.append(f"{len(self.add)} tracked")
+        if self.remove:
+            moves.append(f"{len(self.remove)} untracked")
+        changes = f"{self.rows} row changes" if self.rows == 1 else f"{self.rows} rows change"
+        text = (
+            f"{head}: {changes} ({', '.join(moves)}), watching "
+            f"{self.tracked_after} of {self.confirmed} confirmed pairs; Polymarket US "
+            f"{self.targets_before} → {self.targets_after} poll targets, "
+            f"{self.cycle_before_s:.1f}s → {self.cycle_after_s:.1f}s per book "
+            f"(~{self.interval_s:.1f}s of staleness per tracked pair)"
+        )
+        if self.refused:
+            text += f"; {len(self.refused)} ids are not confirmed and are refused"
+        return text
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "rows": self.rows,
+            "add": list(self.add),
+            "remove": list(self.remove),
+            "refused": list(self.refused),
+            "tracked_before": self.tracked_before,
+            "tracked_after": self.tracked_after,
+            "confirmed": self.confirmed,
+            "targets_before": self.targets_before,
+            "targets_after": self.targets_after,
+            "cycle_before_s": round(self.cycle_before_s, 1),
+            "cycle_after_s": round(self.cycle_after_s, 1),
+            "per_pair_s": round(self.interval_s, 1),
         }
 
 
@@ -643,6 +746,38 @@ def _bool_param(params: Mapping[str, Any], key: str, *, default: bool = False) -
     if isinstance(raw, str):
         return raw.strip().lower() in ("1", "true", "yes", "on")
     raise InvalidParams(f"{key} must be a boolean")
+
+
+def _int_list_param(params: Mapping[str, Any], key: str, *, max_items: int) -> list[int]:
+    """A list of row ids: ``[1, 2]``, ``"1,2"`` or a bare ``1``."""
+    raw = params.get(key)
+    if raw is None:
+        raise InvalidParams(f"{key} is required")
+    if isinstance(raw, str):
+        items: list[Any] = [part.strip() for part in raw.split(",") if part.strip()]
+    elif isinstance(raw, int) and not isinstance(raw, bool):
+        items = [raw]
+    elif isinstance(raw, Sequence):
+        items = list(raw)
+    else:
+        raise InvalidParams(f"{key} must be a list of pair ids")
+    values: list[int] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, int | float | str):
+            raise InvalidParams(f"{key} must be a list of pair ids")
+        try:
+            value = int(item)
+        except (TypeError, ValueError) as exc:
+            raise InvalidParams(f"{key} must be a list of pair ids") from exc
+        if value <= 0:
+            raise InvalidParams(f"{key} must be positive pair ids")
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise InvalidParams(f"{key} must not be empty")
+    if len(values) > max_items:
+        raise InvalidParams(f"{key} takes at most {max_items} ids")
+    return values
 
 
 def _str_list_param(
@@ -724,6 +859,11 @@ class ControlPlane:
         # market_id -> the hello-frame dict, so a universe change can keep the
         # client's market list in step without re-running discovery.
         self._market_meta: dict[str, dict[str, Any]] = {}
+        # Confirmed/tracked row counts for the synchronous payload, plus the
+        # background refresh that keeps them honest. See PAIR_COUNTS_TTL_S.
+        self._pair_counts: dict[str, int] | None = None
+        self._pair_counts_at = 0.0
+        self._pair_counts_task: asyncio.Task[None] | None = None
         self._actions: dict[str, ActionSpec] = {}
         self._register_actions()
 
@@ -794,6 +934,7 @@ class ControlPlane:
             },
             "pairs_top": self.pairs_top,
             "tracked_pairs": len(self._host.arbmon.pairs) if self._host.arbmon else 0,
+            "pairs": self.pairs_payload(),
             "universe": {
                 "kalshi": {
                     "tickers": self.kalshi_tickers,
@@ -861,7 +1002,17 @@ class ControlPlane:
             CONTROL_ACTIONS.labels(action=action, result="unknown").inc()
             raise UnknownAction(f"unknown control action {action!r}")
         clean = spec.validate(params or {})
-        effect = spec.effect(clean)
+        try:
+            effect = await spec.sentence(clean)
+        except ControlError:
+            raise
+        except Exception as exc:
+            # An effect sentence that needs a query is the operator's only
+            # preview of the change. If it cannot be produced, the action is
+            # refused rather than performed against an unstated effect.
+            CONTROL_ACTIONS.labels(action=action, result="error").inc()
+            log.warning("control %s could not be priced", action, exc_info=True)
+            raise ControlError(f"{action}: its effect could not be stated ({exc})") from exc
         if self.read_only and spec.mutates:
             CONTROL_ACTIONS.labels(action=action, result="read_only").inc()
             await self._audit(
@@ -1035,14 +1186,24 @@ class ControlPlane:
         )
         self._register(
             ActionSpec(
+                name="pairs.track",
+                grade="G2",
+                summary="watch (or stop watching) specific confirmed pairs",
+                validate=lambda p: {
+                    "ids": _int_list_param(p, "ids", max_items=200),
+                    "tracked": _bool_param(p, "tracked", default=True),
+                },
+                effect=self._effect_pairs_track,
+                apply=self._apply_pairs_track,
+            )
+        )
+        self._register(
+            ActionSpec(
                 name="pairs.top",
                 grade="G2",
-                summary="reload the tracked confirmed pairs (top N by score)",
+                summary="replace the whole watch set with the top N confirmed pairs by score",
                 validate=lambda p: {"n": _int_param(p, "n", minimum=0, maximum=200, default=None)},
-                effect=lambda p: (
-                    f"track the top {p['n']} confirmed pairs: re-fetches both venues' fee "
-                    "parameters and resubscribes Kalshi (a reconnect, so a brief gap)"
-                ),
+                effect=self._effect_pairs_top,
                 apply=self._apply_pairs_top,
             )
         )
@@ -1309,45 +1470,328 @@ class ControlPlane:
         return await self._apply_polymarket_universe()
 
     # -- tracked pairs -----------------------------------------------------
+    #
+    # Two decisions, kept apart: ``status='confirmed'`` says two markets
+    # resolve to the same thing (durable), ``tracked`` says watch this now
+    # (operational, and paid for in Polymarket poll budget). Both controls
+    # here write ``tracked`` and then go through the SAME universe-apply path
+    # as any other universe change, so both legs subscribe/unsubscribe, books
+    # evict, the staleness budget retunes and a fresh hello reaches the tab.
+
+    def _require_engine(self) -> AsyncEngine:
+        if self._engine is None:
+            raise NotAvailable("the watch set cannot be changed without a database engine")
+        return self._engine
+
+    def _poll_targets_now(self) -> int:
+        """Poll targets the poller is actually working through right now.
+
+        The live poller, not the plane's intended set: the operator is being
+        told what a book waits today, and the two are equal the moment any
+        universe change has been applied.
+        """
+        pm = self.polymarket
+        return len(pm.targets) if pm is not None else len(self.polymarket_slugs)
+
+    def _poll_interval_s(self) -> float:
+        """Seconds one Polymarket poll target costs the cycle.
+
+        From the live poller when there is one, otherwise from the configured
+        rate, so /control can price a change before the poller is attached.
+        """
+        pm = self.polymarket
+        if pm is not None:
+            return pm.interval_s
+        rate = self._config.polymarket_us_poll_rate
+        return 1.0 / rate if rate > 0 else 0.0
+
+    # -- counts for the browser -------------------------------------------
+
+    def pairs_payload(self) -> dict[str, Any]:
+        """The confirmed/tracked gap and what the watch set costs to poll.
+
+        ``confirmed``/``tracked`` are cached (this is called from the sync
+        ``payload()``) and refreshed in the background; ``None`` means "not
+        read yet", which the UI must render as unknown, never as zero.
+        """
+        counts = self._pair_counts
+        self._kick_pair_counts()
+        pm = self.polymarket
+        interval = self._poll_interval_s()
+        targets = self._poll_targets_now()
+        cycle = pm.cycle_s if pm is not None else interval * targets
+        return {
+            "confirmed": counts["confirmed"] if counts else None,
+            "tracked": counts["tracked"] if counts else None,
+            "total": counts["total"] if counts else None,
+            "live": len(self._host.arbmon.pairs) if self._host.arbmon else 0,
+            "poll": {
+                "attached": pm is not None,
+                "targets": targets,
+                "interval_s": round(interval, 3),
+                "cycle_s": round(cycle, 1),
+                "per_pair_s": round(interval, 1),
+            },
+        }
+
+    async def refresh_pair_counts(self) -> dict[str, int] | None:
+        """Re-read the confirmed/tracked totals. Never raises."""
+        if self._engine is None:
+            return None
+        try:
+            self._pair_counts = await pairs_store.counts(self._engine)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("pair counts could not be read", exc_info=True)
+        finally:
+            # Stamped even on failure: a database that is down must not turn
+            # into a refresh attempt per rendered frame.
+            self._pair_counts_at = time.monotonic()
+        return self._pair_counts
+
+    def _kick_pair_counts(self) -> None:
+        """Refresh the cached counts off to the side, at most one at a time."""
+        if self._engine is None:
+            return
+        if self._pair_counts is not None and time.monotonic() - self._pair_counts_at < (
+            PAIR_COUNTS_TTL_S
+        ):
+            return
+        if self._pair_counts_task is not None and not self._pair_counts_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # called outside a loop (a test, a script): stay cached
+        self._pair_counts_task = loop.create_task(
+            self._refresh_pair_counts_quiet(), name="control-pair-counts"
+        )
+
+    async def _refresh_pair_counts_quiet(self) -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await self.refresh_pair_counts()
+
+    # -- planning ----------------------------------------------------------
+
+    async def _plan(self, choose: Chooser) -> TrackPlan:
+        """Price a change to the watch set against the confirmed rows.
+
+        ``choose`` maps the confirmed rows (score desc, the display order) to
+        ``(the watch set it wants, the ids it had to refuse)``. One path, so
+        the sentence the operator reads and the write that follows cannot
+        disagree about what is about to happen.
+        """
+        engine = self._require_engine()
+        flags = await pairs_store.pair_flags(engine, status="confirmed")
+        by_id = {f.id: f for f in flags}
+        now = [f.id for f in flags if f.tracked]
+        wanted, refused = choose(flags)
+        base = set(self._base_polymarket)
+        before, after = set(now), set(wanted)
+        return TrackPlan(
+            wanted=wanted,
+            add=[i for i in wanted if i not in before],
+            remove=[i for i in now if i not in after],
+            refused=list(refused),
+            tracked_before=len(now),
+            confirmed=len(flags),
+            # Before: what the poller is actually polling. After: the base set
+            # plus the legs the new watch set needs (a pair whose leg is
+            # already a base target adds nothing, so this is exact).
+            targets_before=self._poll_targets_now(),
+            targets_after=len(base | {by_id[i].polymarket_slug for i in wanted if i in by_id}),
+            interval_s=self._poll_interval_s(),
+        )
+
+    async def _plan_pairs_track(self, params: dict[str, Any]) -> TrackPlan:
+        ids: list[int] = params["ids"]
+        want: bool = params["tracked"]
+
+        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int]]:
+            confirmed = {f.id for f in flags}
+            now = [f.id for f in flags if f.tracked]
+            asked, tracked_now = set(ids), set(now)
+            if not want:
+                # Untracking is never refused: a pair that is not confirmed
+                # cannot be tracked in the first place.
+                return [i for i in now if i not in asked], []
+            refused = [i for i in ids if i not in confirmed]
+            add = [i for i in ids if i in confirmed and i not in tracked_now]
+            return [*now, *add], refused
+
+        return await self._plan(choose)
+
+    async def _plan_pairs_top(self, params: dict[str, Any]) -> TrackPlan:
+        top_n: int = params["n"]
+
+        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int]]:
+            # ``flags`` is already score desc, id — the display order.
+            return [f.id for f in flags[:top_n]], []
+
+        return await self._plan(choose)
+
+    async def _effect_pairs_track(self, params: dict[str, Any]) -> str:
+        ids: list[int] = params["ids"]
+        verb = "watch" if params["tracked"] else "stop watching"
+        plan = await self._plan_pairs_track(params)
+        return plan.sentence(f"{verb} {len(ids)} pair{'' if len(ids) == 1 else 's'}")
+
+    async def _effect_pairs_top(self, params: dict[str, Any]) -> str:
+        top_n: int = params["n"]
+        head = (
+            "watch nothing (clear the whole watch set)"
+            if top_n == 0
+            else f"replace the watch set with the top {top_n} confirmed pairs by score"
+        )
+        return (await self._plan_pairs_top(params)).sentence(head)
+
+    # -- applying ----------------------------------------------------------
+
+    async def _apply_pairs_track(self, params: dict[str, Any]) -> dict[str, Any]:
+        engine = self._require_engine()
+        ids: list[int] = params["ids"]
+        want: bool = params["tracked"]
+        plan = await self._plan_pairs_track(params)
+        if plan.refused:
+            # Confirmed is a precondition, and saying so is the whole point:
+            # silently tracking nothing is the failure this milestone exists
+            # to kill.
+            listed = ", ".join(str(i) for i in plan.refused[:10])
+            raise InvalidParams(
+                f"{len(plan.refused)} of {len(ids)} pairs are not confirmed and cannot be "
+                f"tracked ({listed}) — confirm them on /pairs first"
+            )
+        rows = await pairs_store.set_tracked(engine, ids, want)
+        state = "tracked" if want else "untracked"
+        return await self._finish_track(
+            rows,
+            plan,
+            no_op=(
+                f"nothing changed: {len(ids)} pair{'' if len(ids) == 1 else 's'} "
+                f"{'was' if len(ids) == 1 else 'were'} already {state}"
+            ),
+            done=f"{rows} pair{'' if rows == 1 else 's'} {state}",
+        )
 
     async def _apply_pairs_top(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._engine is None:
-            raise NotAvailable("pairs cannot be reloaded without a database engine")
-        top_n = params["n"]
-        previous = self.pairs_top
-        if top_n == 0:
-            self._host.arbmon = None
-            self.pairs_top = 0
-            self.set_pair_universe(kalshi=[], polymarket=[])
-        else:
-            load = await load_tracked_pairs(
-                self._config, self._run, self._engine, top_n=top_n, sink=self._sink
+        """The bulk setter: the watch set BECOMES the top N confirmed by score.
+
+        It is a setter, not a live selector — that conflation is what let ten
+        tied-score rows own the watch set forever. It writes the flag on the N
+        rows it names and clears it everywhere else, in one transaction.
+        """
+        engine = self._require_engine()
+        top_n: int = params["n"]
+        plan = await self._plan_pairs_top(params)
+        added, removed = await pairs_store.set_tracked_exact(engine, plan.wanted)
+        self.pairs_top = top_n
+        rows = added + removed
+        return await self._finish_track(
+            rows,
+            plan,
+            no_op=(
+                f"nothing changed: the top {top_n} confirmed pairs are already the watch set"
+                if top_n
+                else "nothing changed: the watch set is already empty"
+            ),
+            done=f"{added} tracked, {removed} untracked",
+            extra={"added": added, "removed": removed, "pairs_top": self.pairs_top},
+        )
+
+    async def _finish_track(
+        self,
+        rows: int,
+        plan: TrackPlan,
+        *,
+        no_op: str,
+        done: str,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Apply a write to the watch set, or say plainly that it did nothing.
+
+        A control that changed no rows must not come back looking like a
+        control that worked: an afternoon went into re-pressing a button whose
+        success toast meant "the statement ran", not "the state moved".
+
+        But "no rows changed" is NOT the same as "nothing to do". The database
+        and the running ArbMonitor can disagree — rejecting a watched pair on
+        /pairs clears ``tracked`` in SQL without touching the runtime, and a
+        venue call failing mid-apply commits the flag and leaves the monitor
+        behind. The old RELOAD PAIRS reloaded unconditionally, so it repaired
+        those silently; making it a no-op on rowcount removed the only escape
+        hatch and left a rejected pair quoting — and, with a trader attached,
+        still being paper-traded. So a zero-row write is a no-op only when the
+        LIVE watch set already matches the one the plan wants.
+        """
+        await self.refresh_pair_counts()
+        detail: dict[str, Any] = {
+            "rows_changed": rows,
+            "plan": plan.payload(),
+            "pairs": self.pairs_payload(),
+            **(extra or {}),
+        }
+        live = sorted(p.pair_id for p in self._host.arbmon.pairs) if self._host.arbmon else []
+        diverged = live != sorted(plan.wanted)
+        if rows == 0 and not diverged:
+            counts = self._pair_counts or {}
+            detail["changed"] = False
+            detail["message"] = (
+                f"{no_op} — watching {counts.get('tracked', plan.tracked_after)} of "
+                f"{counts.get('confirmed', plan.confirmed)} confirmed pairs"
             )
-            self.pairs_top = top_n
-            self._host.arbmon = ArbMonitor(self._host.books, load.tracked) if load.tracked else None
-            for pair in load.tracked:
-                self._market_meta.setdefault(
-                    pair.kalshi_market_id,
-                    {
-                        "market_id": pair.kalshi_market_id,
-                        "ticker": pair.kalshi_ticker,
-                        "title": pair.label,
-                        "volume_24h": 0.0,
-                        "venue": "kalshi",
-                    },
-                )
-            self.set_pair_universe(
-                kalshi=[p.kalshi_ticker for p in load.tracked],
-                polymarket=load.polymarket_slugs,
+            detail["tracked_pairs"] = len(self._host.arbmon.pairs) if self._host.arbmon else 0
+            return detail
+        applied = await self._reload_tracked()
+        detail.update(applied)
+        detail["changed"] = True
+        detail["pairs"] = self.pairs_payload()
+        cycle = detail.get("polymarket_us", {}).get("cycle_s")
+        cycle_text = f", Polymarket cycle {cycle:.1f}s per book" if isinstance(cycle, float) else ""
+        # A zero-row apply means we reloaded to repair a drift, not to honour a
+        # write. Say which, or the receipt claims a change the operator did not
+        # make and hides the one the system just corrected.
+        drift_note = f"{no_op}, but the live watch set had drifted — re-resolved it"
+        lead = drift_note if rows == 0 else done
+        detail["message"] = (
+            f"{lead}; watching {detail['tracked_pairs']} pairs{cycle_text}"  # live, post-apply
+        )
+        return detail
+
+    async def _reload_tracked(self) -> dict[str, Any]:
+        """Re-resolve the watch set from the database and apply it live.
+
+        Everything after the load is the ordinary universe path — the same one
+        ``universe.kalshi``/``universe.polymarket`` use — so subscribing,
+        evicting, retuning the staleness budget and the fresh hello are not
+        reimplemented here.
+        """
+        engine = self._require_engine()
+        load = await load_tracked_pairs(self._config, self._run, engine, sink=self._sink)
+        self._host.arbmon = ArbMonitor(self._host.books, load.tracked) if load.tracked else None
+        for pair in load.tracked:
+            self._market_meta.setdefault(
+                pair.kalshi_market_id,
+                {
+                    "market_id": pair.kalshi_market_id,
+                    "ticker": pair.kalshi_ticker,
+                    "title": pair.label,
+                    "volume_24h": 0.0,
+                    "venue": "kalshi",
+                },
             )
+        self.set_pair_universe(
+            kalshi=[p.kalshi_ticker for p in load.tracked],
+            polymarket=load.polymarket_slugs,
+        )
         polymarket = await self._apply_polymarket_universe() if self.polymarket else {}
-        kalshi = await self._apply_kalshi_universe() if self.kalshi else {}
-        tracked = len(self._host.arbmon.pairs) if self._host.arbmon is not None else 0
+        # An empty union would be an illegal Kalshi subscription; with no base
+        # markets and no watched pairs there is nothing to subscribe to, so the
+        # existing subscription is left alone rather than raising at the venue.
+        kalshi = await self._apply_kalshi_universe() if self.kalshi and self.kalshi_tickers else {}
         return {
-            "changed": top_n != previous
-            or bool(kalshi.get("changed") or polymarket.get("changed")),
             "pairs_top": self.pairs_top,
-            "tracked_pairs": tracked,
+            "tracked_pairs": len(load.tracked),
             "kalshi": kalshi,
             "polymarket_us": polymarket,
         }
@@ -1542,4 +1986,9 @@ class ControlPlane:
     # -- teardown ----------------------------------------------------------
 
     async def shutdown(self) -> None:
+        task = self._pair_counts_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         await self.jobs.shutdown()
