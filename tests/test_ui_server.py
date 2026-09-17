@@ -2,6 +2,7 @@
 plus ServerState payload shapes fed from the real captured Kalshi frames."""
 
 import asyncio
+import json
 import math
 import time
 from pathlib import Path
@@ -553,3 +554,36 @@ async def test_control_log_route_is_capped(tmp_path: Path) -> None:
     assert len(capped.json()["actions"]) == 5
     # A caller asking for everything gets the ceiling, not the whole table.
     assert len(absurd.json()["actions"]) == 200
+
+
+def test_universe_change_pushes_a_fresh_hello() -> None:
+    """A confirmed pair's legs must reach MONITOR without a page reload.
+
+    The browser builds its market list from the `hello` frame and `onHello` is
+    written to be re-run. Before this, a runtime universe change subscribed
+    the new legs and streamed their books while MONITOR still showed the list
+    from connect time.
+    """
+    state = ServerState(
+        run_id="testrun", recording=False, books=BookManager(staleness_limit_ns=10**12)
+    )
+    sent: list[str] = []
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
+    state._clients[cast(Any, object())] = queue  # pyright: ignore[reportPrivateUsage]
+
+    state.set_markets([{"market_id": "kalshi:AAA", "ticker": "AAA", "venue": "kalshi"}])
+    state.add_markets(
+        [{"market_id": "polymarket_us:bbb", "ticker": "bbb", "venue": "polymarket_us"}]
+    )
+
+    while not queue.empty():
+        sent.append(queue.get_nowait())
+    frames = [json.loads(s) for s in sent]
+    hellos = [f for f in frames if f.get("t") == "hello"]
+    assert len(hellos) == 2, "both set_markets and add_markets must re-announce"
+    # The last one carries the whole universe, not just the delta.
+    assert [m["market_id"] for m in hellos[-1]["markets"]] == [
+        "kalshi:AAA",
+        "polymarket_us:bbb",
+    ]
+    assert hellos[-1]["run_id"] == "testrun"

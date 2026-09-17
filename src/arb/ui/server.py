@@ -559,6 +559,23 @@ class ServerState:
 
     def add_markets(self, markets: list[dict[str, Any]]) -> None:
         self._markets = [*self._markets, *markets]
+        self.broadcast_hello()
+
+    def broadcast_hello(self) -> None:
+        """Re-send the market list to every open tab.
+
+        The browser builds MONITOR from the ``hello`` frame, and `onHello` is
+        written to be re-run: it rebuilds the list, keeps the selection if it
+        survived and prunes books for markets that left. Without this, a
+        universe change (confirming a pair, then RELOAD PAIRS) subscribed both
+        legs and streamed their books while MONITOR still showed the list from
+        connect time — the new markets only appeared after a page reload.
+
+        Every startup call site runs before a client exists, so this is a
+        no-op then; it lives here rather than at the one runtime call site so
+        a future one cannot forget it.
+        """
+        self.broadcast({"t": "hello", "run_id": self.run_id, "markets": self.hello_markets()})
 
     # -- pairs ----------------------------------------------------------------
 
@@ -683,6 +700,7 @@ class ServerState:
 
     def set_markets(self, markets: list[dict[str, Any]]) -> None:
         self._markets = markets
+        self.broadcast_hello()
 
     # -- DES (market description) ----------------------------------------------
 
