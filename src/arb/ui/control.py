@@ -1811,8 +1811,17 @@ class ControlPlane:
         # make and hides the one the system just corrected.
         drift_note = f"{no_op}, but the live watch set had drifted — re-resolved it"
         lead = drift_note if rows == 0 else done
+        # The selection filters on a close time recorded at proposal time; the
+        # venues are asked again at load. When the second answer differs, the
+        # flag count and the quoting count diverge, and saying nothing leaves
+        # "TRACKED 12" sitting above six live pairs with no explanation.
+        settled = detail.get("settled_pairs") or []
+        settled_text = (
+            f" ({len(settled)} skipped — the venue says they have settled)" if settled else ""
+        )
         detail["message"] = (
-            f"{lead}; watching {detail['tracked_pairs']} pairs{cycle_text}"  # live, post-apply
+            f"{lead}; watching {detail['tracked_pairs']} pairs"  # live, post-apply
+            f"{settled_text}{cycle_text}"
         )
         return detail
 
@@ -1850,6 +1859,10 @@ class ControlPlane:
         return {
             "pairs_top": self.pairs_top,
             "tracked_pairs": len(load.tracked),
+            # Pairs the venues said were over. The flag is still set on them,
+            # so /control would otherwise read "TRACKED 12" against six pairs
+            # actually quoting and give the operator no way to tell why.
+            "settled_pairs": [{"pair_id": pid, "reason": why} for pid, why in load.expired],
             "kalshi": kalshi,
             "polymarket_us": polymarket,
         }
