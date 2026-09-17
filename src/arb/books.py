@@ -12,7 +12,7 @@ Market ids follow the shared ``"<venue>:<native-id>"`` convention (see the
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from arb.book import Book, BookLevelUpdate, BookSnapshot, BookStatus, InvalidReason, UpdateMode
 from arb.interfaces import BookEvent, ResyncRequired
@@ -56,6 +56,19 @@ def level_deltas(before: Book | None, after: BookSnapshot) -> list[BookLevelUpda
     return out
 
 
+def _retune(book: Book, limit_ns: int) -> None:
+    """Change a live book's staleness budget in place.
+
+    ``Book`` captures the limit at construction and exposes no setter, and
+    ``arbmon``/the UI call ``book.status()`` directly rather than through this
+    manager, so a manager-side override would not reach them. Rebuilding the
+    book would throw away its ladders and sequence state — a real outage in
+    exchange for a cosmetic one. So: one documented private write, in one
+    place. See followups: ``Book`` should grow a public setter.
+    """
+    book._staleness_limit_ns = limit_ns
+
+
 class BookManager:
     def __init__(self, *, staleness_limit_ns: int) -> None:
         self._staleness_limit_ns = staleness_limit_ns
@@ -63,15 +76,57 @@ class BookManager:
         self._books: dict[str, Book] = {}
         self._last_apply_mono_ns: dict[str, int] = {}
 
-    def set_venue_staleness(self, venue: str, limit_ns: int) -> None:
-        """Per-venue staleness for books created from now on.
+    def set_venue_staleness(self, venue: str, limit_ns: int) -> set[str]:
+        """Set a venue's staleness budget, live. Returns the books retuned.
 
         A polled venue refreshes each book once per poll cycle, so the
-        streaming default would flag every book stale between polls.
+        streaming default would flag every book stale between polls — and the
+        cycle length changes whenever the target count or the poll rate does.
+        The new budget therefore applies to books that ALREADY exist as well
+        as to ones created from now on; otherwise growing the poll universe
+        leaves every live book flapping STALE against a budget computed for a
+        smaller one, which is exactly the bug this used to have.
         """
         if limit_ns <= 0:
             raise ValueError("limit_ns must be positive")
         self._staleness_by_venue[venue] = limit_ns
+        retuned = {mid for mid in self._books if venue_of(mid) == venue}
+        for mid in retuned:
+            _retune(self._books[mid], limit_ns)
+        return retuned
+
+    def evict(self, market_ids: Iterable[str]) -> set[str]:
+        """Forget these books entirely. Returns the ids actually removed.
+
+        A book whose market is no longer subscribed stops updating, ages into
+        permanent staleness and is re-sent to every newly connected UI client
+        forever, because nothing else ever removes it. Whoever changes a
+        venue's universe owns calling this for what it dropped.
+
+        Unknown ids are ignored, so this is safe to call with the full "old
+        universe" set.
+        """
+        removed: set[str] = set()
+        for mid in market_ids:
+            if self._books.pop(mid, None) is not None:
+                removed.add(mid)
+            self._last_apply_mono_ns.pop(mid, None)
+        return removed
+
+    def retain(self, market_ids: Iterable[str], *, venue: str | None = None) -> set[str]:
+        """Evict every book NOT in ``market_ids``. Returns the ids removed.
+
+        With ``venue`` set, only that venue's books are candidates — which is
+        what a per-venue universe change wants, since changing the Kalshi
+        subscription must not evict Polymarket's books.
+        """
+        keep = set(market_ids)
+        doomed = [
+            mid
+            for mid in self._books
+            if mid not in keep and (venue is None or venue_of(mid) == venue)
+        ]
+        return self.evict(doomed)
 
     def staleness_limit_ns(self, market_id: str) -> int:
         return self._staleness_by_venue.get(venue_of(market_id), self._staleness_limit_ns)

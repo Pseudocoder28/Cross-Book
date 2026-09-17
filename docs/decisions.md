@@ -8,7 +8,9 @@ Design choices and why. Newest first.
   recorder-first ingest as `arb record` (every raw frame enqueued before
   parsing) and additionally parses through the Kalshi adapter into
   `BookManager`, broadcasting to browser clients. `--no-record` exists for
-  DB-less viewing.
+  DB-less viewing. *Completed by M20:* `arb record` is deleted — this was
+  always the same ingest path twice — and `--no-record` now only sets the
+  starting value of a runtime toggle on `/control`.
 - **Frontend is three static files, zero build step, zero external
   requests.** Vanilla JS/CSS served by FastAPI; system mono font stack; no
   CDN. A Python repo should not grow a node toolchain for one page.
@@ -35,6 +37,214 @@ Design choices and why. Newest first.
   density maximalist): black/amber terminal chrome, tabular-nums data,
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
+
+## M21 — the frontend gets tested, in two layers
+
+- **Two suites, because the two shipped bugs failed in different layers.**
+  Typing `RUN` on `/pairs` writing to Postgres was pure resolution-order logic
+  in `onKey` — a unit test catches it. `/control`'s fields being uneditable was
+  the browser dropping focus when a rendered-over `<input>` was removed — no
+  unit test can see that. One harness would have caught one bug.
+- **`node --test`, not vitest or jest.** The standing rule is that a Python
+  project should not grow a node toolchain for one page, and node 22 ships a
+  test runner, so the suite has no `package.json`, no `node_modules` and no
+  dependency. It is the same binary already used for `node --check`.
+- **The unit shim is a stub and says so.** It installs the handful of globals
+  the core modules touch at import and nothing more. It deliberately cannot
+  reproduce focus-stealing, and that was demonstrated rather than asserted: the
+  pre-fix `control.js` was restored and the suite stayed green. Faking that
+  behaviour would have produced a test that passes for the wrong reason.
+- **The acceptance suite does not run `arb ui`.** It serves `create_app` with a
+  stub state and the real static assets, wrapped in the same Origin guard
+  `run_ui` applies. Real app, real JS, no venue traffic, no Postgres — a test
+  suite that hits production venues on every run is a suite people stop running.
+- **Keys go through CDP, never a synthetic `KeyboardEvent`.** A `KeyboardEvent`
+  dispatched on `document` has `document` as its target, so `scopeOf(e.target)`
+  reads COMMAND no matter what is focused. The `RUN` test would have passed
+  against a completely broken key path.
+- **The browser suite reads its action descriptors from a real `ControlPlane`.**
+  The `/control` page renders entirely from them, so a hand-written copy is a
+  suite driving a fiction — and the first one had already drifted (9 actions
+  against 13, `pairs.top` published G3 when it is G2).
+- **Every test was mutation-tested, and two were rewritten because they could
+  not fail.** One waited on the wall clock for a 1 s tick, so deleting the tick
+  left it green; one never consumed `Log.entryAdded`, so a 404'd stylesheet that
+  left the page unstyled was invisible. A test that cannot fail buys false
+  confidence, which is worse than an acknowledged gap.
+- **Still no CI.** Both suites are things a human types. That is the remaining
+  hole and it is recorded as one in `docs/testing.md` rather than implied away.
+
+## M20 — the CLI collapses to three commands and the UI becomes the control plane
+
+- **Three CLI commands survive, and each one survives for a reason a button
+  cannot cover.** The ask was "remove all the CLI commands and instead add
+  them as triggers in the UI", and the honest reading of that is *operating*
+  the system, not *starting* it. So `arb record` and the whole `arb pairs`
+  subtree (`propose`, `list`, `backfill`, `show`, `confirm`, `reject`) are
+  deleted — module and all — and what is left is:
+
+  | Command | Why it cannot be a button |
+  | --- | --- |
+  | `arb ui` | it is the process the buttons live in. Its flags are now *starting* values the UI changes from there, and `docker-compose.yml` runs `arb ui --top 20 --host 0.0.0.0`, so the flag names are a live dependency, not decoration. |
+  | `arb doctor` | you run it when the UI will **not** start. A button inside a dead server diagnoses nothing. `/control` also has a `jobs.doctor` action, for when the server is alive and the database is not. |
+  | `arb replay` | it is the **worker** the UI spawns (see below). It is a machine interface now as well as a human one, which means its argv is a contract — `tests/test_cli.py` pins the flags `ControlPlane._apply_replay` builds. |
+
+  What made deletion safe rather than destructive is that `arb record` was
+  never a separate capability: `arb ui` has run the same recorder-first ingest
+  since M9, so the recorder command was a second way to spell a flag. Removing
+  it also removed the last thing that bound `:9000`, so `infra/prometheus.yml`
+  lost its `arb` job and now scrapes `arb ui`'s own `/metrics` and nothing
+  else — a scrape target that can never come up is an alert that means nothing.
+- **`replay` is a subprocess, not a coroutine, and that is a latency
+  decision.** The obvious implementation of a REPLAY button is to `await
+  run_replay(...)` in the server, and it would have been wrong in a way that
+  looks like a venue outage. `replay.py`'s per-row loop contains no `await` and
+  yields only every `BATCH = 2000` rows, so it holds the event loop for seconds
+  to minutes; `ws.py` runs with `ping_timeout_s = 10.0`, so the Kalshi socket
+  drops, reconnects, gaps and resnapshots every book — because someone clicked
+  replay. `asyncio.to_thread` does not fix it either: the engine, the
+  `RunContext` and the recorder sink are all loop-affine. A child process
+  cannot stall this loop at all, and streaming its stdout back line by line
+  gives the job log for free. The contrast with `propose`/`backfill` is
+  deliberate and is the general rule: those already carry their one blocking
+  stage (scoring) into a worker thread and keep every loop-affine object on the
+  loop, so they are awaited in-process; `replay` has no such seam, so it leaves
+  the process entirely.
+- **One executor, not a route per toggle.** Every control goes through
+  `ControlPlane.execute(action, params, *, confirm, actor)`, and the HTTP
+  surface is one handler, `POST /api/control/{action}`. Thirteen handlers would
+  have been thirteen chances to forget the read-only refusal, the
+  arm-then-confirm, the audit row or the metric — and the forgetting is silent,
+  because a toggle that works is indistinguishable from a toggle that works and
+  records nothing. Here those are structural: an action is a row in an action
+  table (`ActionSpec`: name, grade, summary, validate, effect, apply) and
+  cannot opt out. The order inside `execute` is the design — unknown action →
+  validate → read-only refusal → arm-or-confirm → apply → audit → broadcast —
+  and validation runs *before* the refusal so a read-only server still tells
+  you your parameters were wrong rather than hiding one failure behind another.
+  The same table is what the browser renders from: `GET /api/control` returns
+  the action descriptors, so the page cannot show a button the server does not
+  have, or a grade the server disagrees with.
+
+  | Action | Grade | Notes |
+  | --- | --- | --- |
+  | `recording.start` `recording.stop` | G2 | the recorder and its writer now always exist; recording is a flag read per message |
+  | `paper.suspend` `paper.resume` `paper.limits` | G2 | one trader for the life of the run |
+  | `pairs.top` | G2 | reloads tracked pairs; costs a Kalshi reconnect |
+  | `universe.kalshi` | G2 | reconnect, snapshot burst, eviction |
+  | `universe.polymarket` | G2 | live, no reconnect; retunes staleness |
+  | `jobs.propose` `jobs.backfill` | G3 | always confirm — thousands of rows |
+  | `jobs.replay` | G3 | confirms only when `persist` is set — the one form that writes |
+  | `jobs.doctor` | G0 | `mutates=False`, so it runs in read-only mode |
+  | `jobs.cancel` | G2 | SIGTERM, then SIGKILL after 5 s, for the subprocess |
+
+- **Confirmation is server-side, and the token is bound to a hash of
+  `(action, params)`.** A confirm dialog implemented in the browser is not a
+  confirmation: it is a rendering choice that `curl -X POST` skips, that a
+  second tab never sees, and that leaves nothing behind. So the first call with
+  no token is *armed* — the server mints a single-use token with a 90 s TTL,
+  fingerprinted over the canonical JSON of the action and its parameters, and
+  answers `428` with the sentence to show. Binding the fingerprint is what
+  stops the attack the arm/confirm split otherwise creates: arm
+  `jobs.propose` at `min_score 0.75`, read a sentence about a conservative
+  threshold, then confirm at `0.10` and write ten times the rows. Verified
+  live — the second call is refused with "the parameters changed since this
+  action was armed". A failed spend also *burns* the token, because one
+  authorisation covers one exact set of parameters; letting the caller retry
+  with the same token would make the binding advisory.
+- **The audit row stores the sentence that was SHOWN, verbatim.** `effect` is
+  a `Text` column in `control_actions` (migration `0004`), not something
+  re-derived from `params_json` at read time. The point of the record is what
+  the operator agreed to, and re-deriving it means the log silently changes
+  meaning whenever the wording, a default or a fee model changes. The browser
+  renders the same string it got in the `428` body, so the screen and the
+  permanent record are the same bytes.
+- **A G3 action cannot be armed without its audit row, which is how it fails
+  closed.** The arming write passes `required=True`; every other audit write
+  is best-effort. That asymmetry is the whole mechanism: a G3 action needs a
+  token, a token is only minted after the arming row commits, so a G3 action
+  that was never recorded was also never runnable. Verified live — with the
+  `control_actions` table missing, `jobs.propose` returned `503` and did not
+  run. G2 actions deliberately do *not* fail closed: refusing to stop the
+  recorder because Postgres is unreachable turns a database problem into an
+  inability to operate, so they proceed and increment
+  `arb_control_audit_failures_total`, which is the thing to alert on.
+- **Origin and Host checks, not CSRF tokens.** Before this milestone a
+  cross-site `POST` with `Origin: https://evil.example` returned `200`, and
+  `WS /ws` accepted any `Origin` at all — the same-origin policy simply does
+  not apply to WebSocket, so any page the operator visited could read the live
+  feed. `security.py` is a pure-ASGI middleware *outside* FastAPI, because the
+  WebSocket handshake is the one scope Starlette's HTTP middleware never sees.
+  It checks `Host` against a loopback allowlist (which is what actually kills
+  DNS rebinding: a rebound request still carries the attacker's hostname) and,
+  on anything but `GET`/`HEAD`, refuses a foreign `Origin` or
+  `Sec-Fetch-Site: cross-site`. Verified: cross-site POST `403`, same-origin
+  POST `200`, `Host: attacker.example` `403`. A missing `Origin` is allowed on
+  purpose — that is `curl` and the replay subprocess, processes already on this
+  machine that could speak to the socket directly. **CSRF tokens were rejected,
+  not overlooked**: there is no login, no session and no user table, so there
+  is nothing to bind a token *to*; a token minted and accepted by the same
+  server with no session behind it is an Origin check with extra steps and a
+  cookie jar to get wrong. If this is ever exposed for real, the answer is an
+  authenticating proxy or the SSH tunnel that is already the documented way in.
+  Two smaller pieces of the same floor: binding off loopback now requires an
+  explicit `ARB_ALLOW_REMOTE_BIND=1` (refused at startup, before anything
+  listens), and `--read-only` / `UI_READ_ONLY=1` serves every view and refuses
+  every mutating action, so a tunnelled port can be shown to someone without
+  handing them the controls.
+- **Paper trading suspends; it is never rebuilt.** The tempting implementation
+  of an on/off toggle is to construct a `PaperTrader` on and drop it off, and
+  it would have quietly defeated the only risk limit that matters:
+  `room_notional = max_notional_ticks - notional_ticks` is computed from state
+  on the *instance*, so a fresh trader re-opens the entire spend budget from
+  zero — each off-and-on cycle grants another full `max_notional`, so a
+  "$1,000 max" becomes $1,000 per toggle — and takes the ledger and every open
+  position with it. So one trader lives for the whole run (built
+  even when `--paper` was not passed, starting suspended, so there is something
+  to resume) and `suspend()`/`resume()` flip a flag that `consider()` checks
+  first. `set_limits()` is live for the same reason and tightens without
+  unwinding: there is no such thing as un-filling a fill, so a lowered
+  `max_notional` leaves `room_notional` negative and stops new trades — a hard
+  stop, not a rollback. That makes "tighten the limits" a usable panic button
+  that never fabricates an exit.
+- **A borrowed `RunContext`, because a second one wedges the recorder for
+  good.** `pairs/run.py` now accepts an injected engine, `RunContext` and sink
+  (`JobDeps`) and, when given them, constructs nothing and disposes nothing.
+  The alternative — the job building its own `RunContext` — looks harmless and
+  is the worst failure in this milestone: a second context on the *same*
+  `run_id` hands out a second `ingest_seq` starting at 0, `raw_messages` is
+  `UNIQUE (run_id, ingest_seq)`, `insert_raw_messages` has no `ON CONFLICT`,
+  and `Recorder._write_with_retry` retries a failing batch **forever**. One
+  duplicate therefore stops *all* recording permanently while the REC pill
+  still reads ON. The standalone path never reuses a configured `RUN_ID`
+  either, because the identical collision happens between two processes.
+- **Three landmines the mutability itself laid, each fixed at the layer that
+  owned it.** (1) `PolymarketUSRestSource` indexed `self._slugs[i % len(...)]`,
+  so an empty target set was a `ZeroDivisionError` inside a *supervised* task —
+  a crash-restart loop on a venue, forever. Empty is now a supported idle
+  state, and `/system` reports it as "no poll targets" rather than a venue
+  outage. (2) `BookManager.set_venue_staleness` applied only to books created
+  afterwards, so growing the poll universe (which lengthens the cycle) left
+  every existing book judged against a budget computed for a smaller one and
+  flapping STALE; it now retunes live books and returns the ids it touched, so
+  the caller can re-publish them. (3) Nothing ever removed a book, so a market
+  dropped from the universe stopped updating, aged into permanent staleness and
+  was re-sent to every newly connected client for the life of the process —
+  hence `BookManager.retain()`, called by whoever changes a venue's universe.
+- **`SystemExit` became a real exception.** `run_replay` raised `SystemExit`
+  for "no recorded runs", which was fine while a CLI was the only caller.
+  `SystemExit` is a `BaseException`: Starlette's error middleware only catches
+  `Exception`, and asyncio task groups treat it as a shutdown request. The
+  first time a button awaited that coroutine, "you have not recorded anything
+  yet" would have taken the server down instead of returning a 4xx. It is
+  `ReplayError`/`NoRecordedRuns` now, and the CLI turns it into an exit status.
+- **The control page has no state of its own.** It renders from the server's
+  descriptors, never flips a toggle optimistically (it waits for the POST, then
+  re-renders from the `control` WebSocket frame, so two tabs cannot disagree),
+  and shows the server's confirm sentence verbatim. Every screen in this app
+  has drifted from its backend at some point; a page that can start a process
+  which will later place real orders is the wrong place to keep a second copy
+  of the truth.
 
 ## M19 — the keyboard gets a focus model, and keys get a price
 

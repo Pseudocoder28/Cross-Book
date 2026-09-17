@@ -54,3 +54,6 @@ include = ["src", "tests"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "browser: drives the real frontend in headless Chrome (slower; skips without Chrome)",
+]

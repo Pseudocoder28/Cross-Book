@@ -16,6 +16,7 @@
 <link rel="stylesheet" href="/static/css/pairs.css">
 <link rel="stylesheet" href="/static/css/paper.css">
 <link rel="stylesheet" href="/static/css/system.css">
+<link rel="stylesheet" href="/static/css/control.css">
 <link rel="stylesheet" href="/static/css/help.css">
 </head>
 <body>
@@ -46,7 +47,8 @@
     <a class="nav-tab" href="/pairs" data-page="pairs"><span class="nav-key" aria-hidden="true">3</span>PAIRS</a>
     <a class="nav-tab" href="/paper" data-page="paper"><span class="nav-key" aria-hidden="true">4</span>PAPER</a>
     <a class="nav-tab" href="/system" data-page="system"><span class="nav-key" aria-hidden="true">5</span>SYSTEM</a>
-    <a class="nav-tab" href="/help" data-page="help"><span class="nav-key" aria-hidden="true">6</span>HELP</a>
+    <a class="nav-tab" href="/control" data-page="control"><span class="nav-key" aria-hidden="true">6</span>CONTROL</a>
+    <a class="nav-tab" href="/help" data-page="help"><span class="nav-key" aria-hidden="true">7</span>HELP</a>
     <!-- Filled by core/keys.js from NAVLABEL: CTRL on macOS, ALT elsewhere.
          One constant drives the hint, the keys strip and every footer. -->
     <span id="nav-hint" class="nav-hint"></span>
@@ -260,7 +262,7 @@
         <div id="arb-rows" class="arb-rows" data-keyregion="list" role="listbox" aria-label="Pair edges" tabindex="0"></div>
       </div>
       <div class="des-right arb-right">
-        <div id="arb-empty" class="quiet-line">NO CONFIRMED PAIRS TRACKED &#8212; CONFIRM PAIRS, THEN RESTART arb ui</div>
+        <div id="arb-empty" class="quiet-line">NO CONFIRMED PAIRS TRACKED &#8212; CONFIRM PAIRS ON /pairs, THEN RELOAD PAIRS ON /control</div>
         <div id="arb-detail" hidden>
           <div id="ad-label" class="des-event pair-event">&#8212;</div>
           <div id="ad-dir" class="des-sub">&#8212;</div>
@@ -295,7 +297,7 @@
     </div>
     <div class="des-body paper-body">
       <div class="des-left paper-left">
-        <div id="paper-banner" class="paper-banner" hidden>PAPER TRADING DISABLED &#8212; START WITH: arb ui --paper</div>
+        <div id="paper-banner" class="paper-banner" hidden>PAPER TRADING SUSPENDED &#8212; RESUME IT ON /control</div>
         <div class="paper-totals" aria-label="Totals">
           <div class="kv"><span class="k">STATE</span><span id="pt-state" class="v">&#8212;</span></div>
           <div class="kv"><span class="k">TRADES</span><span id="pt-trades" class="v num">&#8212;</span></div>
@@ -343,6 +345,8 @@
   <section id="system-page" class="page" aria-label="System" hidden></section>
 
   <!-- ===== PAGE: HELP (/help) — built from JS by pages/help.js ===== -->
+  <section id="control-page" class="page" aria-label="Control plane" hidden></section>
+
   <section id="help-page" class="page" aria-label="Help" hidden></section>
 
   <!-- Filled by core/keys.js on every focus change: it names the LIVE scope

@@ -2,9 +2,173 @@
 
 ## Current milestone
 
-**M19 — the keyboard gets a focus model: typing can no longer write to the database.**
+**M21 — the frontend gets tested, in two layers.**
 
 ## What works
+
+- **A frontend unit suite on `node --test`** — 109 tests, and no
+  `package.json`, no `node_modules`, no npm dependency: node 22 ships the
+  runner, so the standing "no node toolchain for one page" rule holds. A
+  ~12-line shim installs the globals the core modules touch at import
+  (`navigator` needs `Object.defineProperty`; it is getter-only in node), and
+  the suites import the REAL modules unmocked. Heaviest coverage is
+  `core/keys.js`'s resolution order — a bare printable in COMMAND scope must
+  never reach a page's `onKey`, which is the whole content of the `RUN` bug —
+  plus the Escape ladder, `e.repeat`, the nav chord including the `"macOS"`
+  lower-case trap, and the tick/`Qty` formatters.
+- **A browser acceptance suite** — 7 tests driving real headless Chrome over
+  CDP with `websockets` (already a dependency); no playwright, no selenium, no
+  driver binary. It serves `create_app(<stub>, static_dir=STATIC_DIR)` rather
+  than `arb ui`, so a run makes zero venue calls and needs no Postgres
+  (verified by running it green with `DATABASE_URL` and both venue bases
+  pointed at a dead port). Keys go through `Input.dispatchKeyEvent`, never a
+  synthetic `KeyboardEvent`, because the latter targets `document` and would
+  make every LIST-scope assertion vacuous.
+- **The manual checklist is now executable.** Typing `RUN` on `/pairs` types
+  and writes nothing; a `/control` field survives a live re-render as the same
+  DOM node with focus and value intact and reaches the wire; a blurred-but-
+  edited field is not reverted by the next frame; a leaned-on decision key
+  writes once, not once per autorepeat; the scope ladder end to end; the
+  cross-site POST and WebSocket refusals over a real socket; every route
+  cold-loads with no console error or failed subresource.
+- **Every test was mutation-tested** — defect reintroduced in the real source,
+  test watched to fail, source restored and re-verified. Two of the originals
+  could NOT fail and were rewritten rather than kept: one waited on the wall
+  clock for a 1 s tick (deleting the tick left it green), one never consumed
+  `Log.entryAdded` (a 404'd stylesheet left the page unstyled and invisible).
+  The browser suite's action descriptors now come from a real `ControlPlane`,
+  because the hand-written copy had already drifted — 9 actions against 13,
+  with `pairs.top` published G3 when it is G2.
+- 307 Python tests (7 browser) + 109 node tests; ruff, pyright and
+  `node --check` clean. `uv run pytest -m "not browser"` is the fast loop at
+  300 tests in ~1.3 s.
+- **Open**: there is still no CI, so both suites are things a human types —
+  that is the remaining hole and `docs/testing.md` records it as one. The
+  browser suite also skips (green) where there is no Chrome, so a machine
+  without a browser leaves the frontend's integration behaviour unguarded.
+
+### From M20 — the CLI collapses to three commands and the UI becomes the control plane
+
+- **Everything is operated from the browser.** A new `/control` page (the 7th
+  nav page; the `CTRL+1`–`CTRL+N` chord label is derived from the nav count, so
+  it re-sized itself) carries 13 actions in 11 sections behind 12 buttons:
+  recorder START/STOP, paper SUSPEND/RESUME and APPLY LIMITS, tracked-pairs
+  RELOAD, the Kalshi SUBSCRIBE and Polymarket US SET TARGETS universe fields,
+  and the jobs — RUN DOCTOR, PROPOSE PAIRS, BACKFILL SLUGS, REPLAY — plus a
+  CANCEL on each running job.
+- **The CLI is three commands**: `arb ui` (the server the buttons live in;
+  flags are *starting* values now, plus a new `--read-only`), `arb doctor`
+  (what you run when the UI will not start) and `arb replay` (also the worker
+  the UI's `jobs.replay` spawns as a subprocess). `arb record` and the whole
+  `arb pairs` subtree — `propose`, `list`, `backfill`, `show`, `confirm`,
+  `reject` — are deleted, module and all. `infra/prometheus.yml` lost its `arb`
+  job (`app:9000`): only `arb record` ever served that port, so it was a scrape
+  target that could never come up.
+- **One executor.** `ControlPlane.execute(action, params, *, confirm, actor)`
+  is the only way anything in the runtime changes, and `POST
+  /api/control/{action}` is the only HTTP write. The read-only refusal, the
+  arm-then-confirm, the audit row and the metric are properties of the
+  executor, not of thirteen handlers that each have to remember them. The
+  browser renders from the server's own action descriptors (`GET
+  /api/control`), so a button cannot claim a grade or a confirmation the server
+  does not implement.
+- **Server-side confirmation.** A first call with no token is armed: the server
+  mints a single-use token with a 90 s TTL bound to a SHA-256 fingerprint of
+  `(action, params)`, and answers `428` with the sentence to show. Confirming
+  with changed parameters is refused ("the parameters changed since this action
+  was armed") and burns the token. `jobs.propose` and `jobs.backfill` always
+  confirm; `jobs.replay` confirms only with `--persist`, the one form that
+  writes.
+- **An audit trail in Postgres** (`control_actions`, migration `0004`) storing
+  the effect sentence that was *shown*, verbatim, alongside the action,
+  parameters, actor, result and error. Armings, refusals and failures are rows
+  too. A G3 action's arming write is `required=True`, so an action that could
+  not be recorded never becomes confirmable — verified live: with the table
+  missing, `jobs.propose` returned `503` and did not run. G2 actions proceed
+  and count `arb_control_audit_failures_total` instead, so a database problem
+  cannot stop you turning the recorder off.
+- **Jobs**: threads for `propose`/`backfill` (single-flight per group,
+  progress-reported by phase), a **subprocess** for `replay` with its stdout
+  streamed back line by line, in-process for `doctor`. Output is bounded at 500
+  lines per job (overflow counted), finished jobs stay readable for 32 jobs, and
+  every job is cancellable (SIGTERM then SIGKILL after 5 s for the subprocess).
+- **Network security floor** (`src/arb/ui/security.py`, 332 lines). Before:
+  a cross-site `POST` with `Origin: https://evil.example` returned `200` and
+  `WS /ws` accepted any Origin. Now a pure-ASGI middleware — outside FastAPI,
+  because the WebSocket handshake is the one scope Starlette's HTTP middleware
+  never sees — checks `Host` against a loopback allowlist (kills DNS rebinding)
+  and, on anything but `GET`/`HEAD`, refuses a foreign `Origin` or
+  `Sec-Fetch-Site: cross-site`. Verified: cross-site POST `403`, same-origin
+  POST `200`, `Host: attacker.example` `403`, cross-site WS closed. Plus a
+  startup bind guard (non-loopback needs `ARB_ALLOW_REMOTE_BIND=1`) and
+  `--read-only` / `UI_READ_ONLY=1`.
+- **Runtime mutability, with the landmines it laid defused at the right layer**:
+  `KalshiWSSource.set_tickers()` + `force_resync()` (costs a reconnect and a
+  snapshot burst, documented on the method); `PolymarketUSRestSource.set_targets()`
+  live with no reconnect, and an **empty** set is now a supported idle state
+  rather than a `ZeroDivisionError` inside a supervised task;
+  `BookManager.retain()`/`evict()` so a dropped market's book stops being
+  re-sent to every new client forever; `set_venue_staleness()` retunes **live**
+  books and returns the ids it touched, because growing the poll universe used
+  to leave every existing book flapping STALE against a budget computed for a
+  smaller one; `PaperTrader.suspend()`/`resume()`/`set_limits()` instead of
+  rebuild, because a fresh trader re-opens the whole `max_notional` budget and
+  discards the ledger; `pairs/run.py` borrowing the server's engine,
+  `RunContext` and sink, because a second context on one `run_id` collides on
+  `UNIQUE (run_id, ingest_seq)` and `Recorder._write_with_retry` retries
+  forever — all recording would have stopped permanently with the REC pill
+  still reading ON; and `replay.py`'s `SystemExit` becoming `ReplayError`,
+  because `SystemExit` is a `BaseException` that Starlette's error middleware
+  does not catch.
+- **Verified live in a browser**: `/control` renders 11 sections and 12
+  buttons; clicking START turned recording on; PROPOSE armed with the server's
+  sentence and a 90 s countdown instead of running; RUN DOCTOR produced an
+  11-line report still readable after it finished.
+- **300 tests pass** (was 195 at M19) — 35 in `tests/test_control.py`, 28 in
+  `tests/test_security.py`, 19 in `tests/test_cli.py` (which pins the `arb
+  replay` argv the control plane builds and asserts the deleted commands are
+  gone). `ruff check`, `ruff format --check` (97 files), `pyright` (0 errors)
+  and `node --check` on all 16 JS modules (6,767 lines) are clean.
+- **Open — read this before deploying:**
+  - `uv run alembic upgrade head` is now **required** before the controls work.
+    G3 actions fail closed without the `control_actions` table, so `/control`
+    will answer `503` on PROPOSE, BACKFILL and a persisting REPLAY against a
+    database that has not been migrated.
+  - **`docker compose up -d` will not start the app container as it stands.**
+    Compose runs `arb ui --top 20 --host 0.0.0.0` but sets no
+    `ARB_ALLOW_REMOTE_BIND`, and `check_bind_host` refuses a non-loopback bind
+    without it (confirmed: `RemoteBindRefused` for `0.0.0.0` with
+    `allow_remote=False`, and `AppConfig().ui_allow_remote_bind` is `False`).
+    `docker-compose.yml` needs `ARB_ALLOW_REMOTE_BIND: "1"` in the app service's
+    `environment`, and `.env.example` documents neither of the new settings.
+  - **Still no JS test harness.** 16 modules and 6,767 lines of browser code
+    are checked by `node --check` and a manual browser pass, and nothing else
+    (`docs/testing.md`). M19's open item is unchanged and now covers a page
+    that starts and stops processes.
+  - `/help` does not know about `/control` yet: `SCREENS` in `pages/help.js`
+    has no `control` entry, so the READING THE SCREENS section renders "no
+    description available for this page yet". The page *does* appear in HELP's
+    PAGES list and its footer keys are read verbatim, both of which are derived
+    from the live router.
+  - There is no `ARB>` command for the control page — `MON`, `ARB`, `PAIRS`,
+    `PAPER`, `SYS`, `HELP`, `BACK` and `DES` exist; `/control` is reachable
+    only by the nav tab, its chord and its URL.
+  - `arb_ui_requests_rejected_total` is declared in `src/arb/ui/security.py`,
+    not in `src/arb/metrics.py` where the hard rules say every metric name
+    lives. There is a `TODO(control-plane)` on it.
+  - `books.py` changes a live book's staleness budget by writing
+    `book._staleness_limit_ns` through a single documented `_retune()` helper;
+    `Book` should grow a public setter.
+  - `run_ui` constructs `PolymarketUSRestSource` with a `["__idle__"]`
+    placeholder and clears it before `stream()` is ever called, because the
+    constructor still rejects an empty list while `set_targets([])` does not.
+    No request is made for it, but the constructor should accept empty.
+  - Day 3's hard rule holds: still no code that places, amends or cancels an
+    order. G4 has no implementation, by design.
+
+### From M19
+
+**M19 — the keyboard gets a focus model: typing can no longer write to the database.**
 
 - **The reported bug is fixed.** "Why can't I type R, U and N in the search
   bar" was the symptom; the disease was that on `/pairs` with nothing focused,
@@ -209,7 +373,7 @@
 
 ### From M13
 
-- `src/arb/pairs/`: `text.py` (venue-vocabulary normalization, name similarity with containment), `matcher.py` (blocked, IDF-weighted title similarity + outcome overlap → one-to-one outcome pairing; explainable features), `store.py` (chunked upserts that never overwrite a human decision; list/decide/decide-many), `run.py` (`arb pairs propose` fetches both universes — Kalshi `/events` cursor pages, Polymarket `/v1/events` at `limit=500` — records them, proposes, persists). Alembic `0002` adds the `pairs` table.
+- `src/arb/pairs/`: `text.py` (venue-vocabulary normalization, name similarity with containment), `matcher.py` (blocked, IDF-weighted title similarity + outcome overlap → one-to-one outcome pairing; explainable features), `store.py` (chunked upserts that never overwrite a human decision; list/decide/decide-many), `run.py` (`arb pairs propose` fetches both universes — Kalshi `/events` cursor pages, Polymarket `/v1/events` at `limit=500` — records them, proposes, persists). Alembic `0002` adds the `pairs` table. *Superseded by M20: the `arb pairs` CLI is deleted; `run.py` is now driven by the `jobs.propose`/`jobs.backfill` controls.*
 - Universe fetchers: `kalshi.discovery.fetch_universe` / `event_refs`, `polymarket_us.discovery.fetch_active_markets` (429-retry) / `event_refs`.
 - Review in the terminal: `PAIRS` command → list sorted by score with both legs, right-hand detail with both rules texts and match features; ↑↓ select, Y/N decide, Shift+Y/Shift+N decide the whole event pairing, U undecide, TAB cycles proposed/confirmed/rejected/all. API: `GET /api/pairs`, `POST /api/pairs/{id}/decide`, `POST /api/pairs/decide` (batch).
 - Evaluated on the live universes (6,000 Kalshi events × 3,563 Polymarket events, 88k markets): thousands of high-confidence proposals — identical-title events (NFL divisions, EPL/Serie A, Bitcoin/Musk/gas-price ladders, Supreme Court) at 1.0, MVP/Cy Young/ROTY at ~0.96, state governor/senate races at 0.95. Real data fixes along the way: Polymarket `minimumTradeQty` can be `0.01` (Decimal now), asyncpg's 32,767-parameter cap (chunked upserts).
@@ -218,7 +382,7 @@
 ### From M12
 
 - `src/arb/venues/polymarket_us/{discovery,source,adapter,detail}.py`: category-ranked discovery over `/v1/events` (recorded), a rate-budgeted round-robin book poller (`PolymarketUSRestSource`, an `EventSource`), an adapter emitting unsequenced snapshots + book stats, and a DES payload (tick size, fee coefficient, min qty). `level_deltas` in `books.py` diffs consecutive snapshots into tape events. Per-venue staleness in `BookManager`.
-- `arb ui`/`arb record` take `--poly-top N` / `--poly-slugs`; both venues are recorded (`rest:events`, `rest:book`). Status reports `polled`; the terminal shows K/P badges, an amber `POLY US POLLED` pill, and live poll stats in the Polymarket panel; DES works for both venues.
+- `arb ui`/`arb record` take `--poly-top N` / `--poly-slugs` (*M20: `arb record` is gone; the poll targets are a `/control` field*); both venues are recorded (`rest:events`, `rest:book`). Status reports `polled`; the terminal shows K/P badges, an amber `POLY US POLLED` pill, and live poll stats in the Polymarket panel; DES works for both venues.
 - **Measured the real Polymarket limiter**: a 5-token bucket refilling ~1 token/2 s on the book endpoint (docs claim 20 req/s). Default poll rate 0.45 req/s; verified zero 429s at that rate.
 - Infra (M16, committed separately): Grafana "ARB — Data Plane" dashboard (31 panels) provisioned and loaded; compose app container now runs the recording terminal with `restart: unless-stopped`.
 - 134 tests; ruff, pyright, `node --check` clean.
@@ -237,7 +401,7 @@
 ### From M9
 
 - `uv run arb ui` at http://127.0.0.1:8080 — black/amber terminal: live market monitor (real volumes + event titles from discovery), depth ladder with complement NO prices, mid/spread seam and flash-on-change, tape, latency sparkline (last/median/p95), system panel (recorder, parse errors, seq gaps, DB rows by run), Polymarket US down-screen driven by live REST reachability, keyboard navigation, dual UTC/ET clocks.
-- Backend: `BookManager` (`src/arb/books.py`) + `KalshiMarketDataAdapter` (per-`sid` seq tracking; gap → metric + `ResyncRequired` + forced WS reconnect for fresh snapshots per the reliability rules); FastAPI server (`src/arb/ui/server.py`) with `/api/status`, `/metrics`, and a WS push protocol (integer ticks / 0.0001-contract units on the wire); recorder-first ingest identical to `arb record`; per-client bounded send queues so a slow browser can never stall the feed.
+- Backend: `BookManager` (`src/arb/books.py`) + `KalshiMarketDataAdapter` (per-`sid` seq tracking; gap → metric + `ResyncRequired` + forced WS reconnect for fresh snapshots per the reliability rules); FastAPI server (`src/arb/ui/server.py`) with `/api/status`, `/metrics`, and a WS push protocol (integer ticks / 0.0001-contract units on the wire); recorder-first ingest identical to `arb record` (*M20: `arb ui` is the only recorder now*); per-client bounded send queues so a slow browser can never stall the feed.
 - Frontend: three static files, vanilla JS/CSS, no build step, no external requests; design synthesized from a judged three-way panel; staleness shown as calm "QUIET", red INVALID reserved for structural book failures. (M18 replaced the three files with 15 ES modules and moved the system/Polymarket panels to `/system`; no build step and no external requests still hold.)
 - Verified live end-to-end (2026-09-14): REST + WS contract probed, headless-Chrome renders confirmed live books, tape deltas, latency ~18 ms median, recorder rows growing in Postgres during viewing.
 - 119 tests; ruff, pyright, `node --check` clean.
@@ -246,7 +410,7 @@
 
 - `src/arb/venues/kalshi/discovery.py`: liquidity-ranked discovery via `/events?with_nested_markets=true` (documented params only); every REST response goes to the recorder before parsing.
 - `src/arb/venues/kalshi/source.py`: `KalshiWSSource` — shared `ReconnectingWebSocket` + signed handshake (headers recomputed per attempt) + resubscribe with fresh cmd id on every (re)connect.
-- `src/arb/record.py` + `uv run arb record`: sources → recorder → Postgres, supervised tasks, Prometheus metrics server (`metrics_host:metrics_port`; compose sets `METRICS_HOST=0.0.0.0` for in-network scraping), graceful drain on shutdown (`Recorder.drain` via queue join).
+- `src/arb/record.py` + `uv run arb record` (*deleted in M20 — `arb ui` does this, and recording is a `/control` toggle*): sources → recorder → Postgres, supervised tasks, Prometheus metrics server (`metrics_host:metrics_port`; compose sets `METRICS_HOST=0.0.0.0` for in-network scraping), graceful drain on shutdown (`Recorder.drain` via queue join).
 - **Verified live end-to-end (2026-09-14)**: 25 s run recorded 2 discovery pages + 10 WS frames into `raw_messages` with contiguous `ingest_seq` under one `run_id`; payload bytes byte-exact in Postgres.
 - 99 tests; ruff and pyright clean.
 
@@ -256,7 +420,7 @@
 - Migration `0001` applied to real Postgres; verified a live write/read roundtrip through `insert_raw_messages` (rows cleaned up afterwards).
 - `uv run arb doctor` exits 0 locally (all ok except the expected Polymarket US keys warn) and **inside the container** via `docker compose exec app uv run arb doctor` (DB over the compose network, keys via mounted `secrets/`, env via `env_file`).
 - Dockerfile sets `UV_NO_SYNC=1` so in-container `uv run` uses the baked `--no-dev` environment instead of re-syncing at runtime.
-- Note: Prometheus's `arb` scrape target (`app:9000`) stays down until `arb record` serves `/metrics` — expected.
+- Note: Prometheus's `arb` scrape target (`app:9000`) stays down until `arb record` serves `/metrics` — expected. *M20 removed that job: nothing binds `:9000`, and Prometheus scrapes `arb ui`'s own `/metrics`.*
 
 ### From M6
 
@@ -317,12 +481,21 @@
 
 ## What's next
 
-Day 1 (data, read-only):
+Day 3 (live trading at tiny size). The control plane is the half of it that
+exists; the other half is the part with money in it:
 
-- Book manager consuming recorded/live events: per-`sid` seq tracking with `get_snapshot` gap recovery, book invalidation metrics, staleness policy.
-- Polymarket US REST-polling source into `arb record` (public gateway, 20 req/s budget); WS adapter blocked on their credentials (KYC + polymarket.us/developer).
-- Pair matcher for equivalent markets.
-- Run the app container as the recorder (swap `sleep infinity` for `arb record`) once multi-venue recording lands.
+- Fix the two deployment gaps above first: `ARB_ALLOW_REMOTE_BIND` in
+  `docker-compose.yml` (the app container will not start without it) and
+  `alembic upgrade head` in the deploy path.
+- Order placement, amend and cancel — still unwritten, still gated on a prompt
+  that asks for it. It is **G4**, so by the rule set in M19 it is never a
+  hotkey and never a one-click button: a typed command plus a typed
+  confirmation, through the same executor, with the same audit row.
+- Venue credentials for authenticated order entry, and a kill switch that is
+  reachable when the UI is not (the one control that must not live only in a
+  browser page).
+- A JS test harness, or an explicit written decision to keep verifying the
+  browser by hand.
 
 ## Open questions
 

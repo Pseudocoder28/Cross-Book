@@ -14,9 +14,21 @@ from prometheus_client import REGISTRY
 from starlette.testclient import TestClient
 
 from arb.books import BookManager
+from arb.config import AppConfig
+from arb.paper import PaperLimits, PaperTrader
+from arb.run import RunContext
 from arb.types import RawMessage
-from arb.ui.server import SPA_ROUTES, DatabaseStatus, ServerState, create_app
+from arb.ui.control import ControlResult, NotAvailable
+from arb.ui.server import (
+    SPA_ROUTES,
+    DatabaseStatus,
+    ServerState,
+    create_app,
+    no_control_payload,
+)
 from arb.venues.kalshi.adapter import KalshiMarketDataAdapter
+from arb.venues.polymarket_us.adapter import PolymarketUSMarketDataAdapter
+from arb.venues.polymarket_us.source import PolymarketUSRestSource
 
 FIXTURE = Path(__file__).parent / "fixtures" / "kalshi" / "ws_orderbook_capture.jsonl"
 
@@ -30,6 +42,9 @@ class StubState:
         self.polymarket_rest_reachable = True
         self.added = 0
         self.removed = 0
+        self.control = no_control_payload(run_id="testrun", recording=True)
+        self.controls: list[tuple[str, dict[str, Any] | None, str | None]] = []
+        self.audit: list[dict[str, Any]] = []
 
     def uptime_s(self) -> float:
         return 1.5
@@ -77,6 +92,23 @@ class StubState:
     async def paper_payload(self) -> dict[str, Any]:
         return {"enabled": False, "totals": {"trades": 0}, "positions": [], "trades": []}
 
+    def control_payload(self) -> dict[str, Any]:
+        return self.control
+
+    def job_payload(self, job_id: str) -> dict[str, Any] | None:
+        return {"job_id": job_id, "status": "ok", "lines": ["done"]} if job_id == "j1" else None
+
+    async def execute_control(
+        self, action: str, params: dict[str, Any] | None, *, confirm: str | None
+    ) -> ControlResult:
+        # The stub has no runtime to drive, so every action is unavailable —
+        # which is exactly what a process with no control plane should answer.
+        self.controls.append((action, params, confirm))
+        raise NotAvailable("stub has no control plane")
+
+    async def control_log(self, limit: int) -> list[dict[str, Any]]:
+        return self.audit[:limit]
+
     def add_client(self, ws: object) -> asyncio.Queue[str]:
         self.added += 1
         return asyncio.Queue()
@@ -91,7 +123,8 @@ def client_for(app: FastAPI) -> httpx.AsyncClient:
 
 
 async def test_api_status_matches_contract(tmp_path: Path) -> None:
-    app = create_app(StubState(), static_dir=tmp_path)
+    state = StubState()
+    app = create_app(state, static_dir=tmp_path)
     async with client_for(app) as client:
         response = await client.get("/api/status")
     assert response.status_code == 200
@@ -107,6 +140,7 @@ async def test_api_status_matches_contract(tmp_path: Path) -> None:
             },
         },
         "recording": True,
+        "control": state.control,
         "database": {
             "connected": True,
             "raw_messages_total": 42,
@@ -281,11 +315,16 @@ def test_ws_sends_hello_then_registers_and_cleans_up(tmp_path: Path) -> None:
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as ws:
             hello = ws.receive_json()
+            control = ws.receive_json()
     assert hello == {
         "t": "hello",
         "run_id": "testrun",
         "markets": [{"market_id": "kalshi:AAA", "ticker": "AAA", "title": "", "volume_24h": 0.0}],
     }
+    # Control state rides in on connect, before any book: a tab that opens
+    # mid-run must not have to guess whether paper trading is on.
+    assert control["t"] == "control"
+    assert control["control"]["run_id"] == "testrun"
     assert state.added == 1
     assert state.removed == 1  # no client leak on disconnect
 
@@ -428,3 +467,89 @@ def test_gauges_go_nan_when_nothing_was_measured() -> None:
     assert stats["clock_skew_ms"] is None
     assert math.isnan(sample_value("arb_ws_rtt_ms", {"venue": "kalshi", "stream": "ws"}))
     assert math.isnan(sample_value("arb_clock_skew_ms", {"venue": "kalshi"}))
+
+
+async def test_control_routes_are_read_only_views(tmp_path: Path) -> None:
+    """The control state and one job's log are G0 reads. The write endpoints
+    land with the control page; these two are how the browser catches up."""
+    app = create_app(StubState(), static_dir=tmp_path)
+    async with client_for(app) as client:
+        control = await client.get("/api/control")
+        job = await client.get("/api/control/jobs/j1")
+        missing = await client.get("/api/control/jobs/nope")
+    assert control.status_code == 200
+    assert control.json()["run_id"] == "testrun"
+    assert control.json()["read_only"] is True  # nothing attached: nothing to drive
+    assert job.status_code == 200 and job.json()["lines"] == ["done"]
+    assert missing.status_code == 404 and missing.json()["job_id"] == "nope"
+
+
+def test_server_state_control_payload_without_a_plane() -> None:
+    """A UI with no control plane still answers one shape, and claims nothing."""
+    state = ServerState(
+        run_id="testrun", recording=True, books=BookManager(staleness_limit_ns=10**12)
+    )
+    payload = state.control_payload()
+    assert payload["read_only"] is True
+    assert payload["recording"] is True
+    assert payload["jobs"] == [] and payload["actions"] == []
+    assert state.job_payload("anything") is None
+
+
+def test_paper_payload_reports_the_live_suspend_state() -> None:
+    """Regression guard: the ledger used to be reported enabled=True always,
+    so a suspended trader looked live."""
+    state = ServerState(
+        run_id="testrun", recording=False, books=BookManager(staleness_limit_ns=10**12)
+    )
+    state.trader = PaperTrader(PaperLimits())
+    state.trader.suspend()
+    payload = asyncio.run(state.paper_payload())
+    assert payload["enabled"] is False and payload["suspended"] is True
+    assert state.trader.resume() is True
+    assert asyncio.run(state.paper_payload())["enabled"] is True
+
+
+def test_polymarket_status_is_idle_not_down_without_targets() -> None:
+    """An empty poll set is a supported state (the poller naps); calling it
+    "down" would report a venue outage that is not happening."""
+    config = AppConfig()
+    source = PolymarketUSRestSource(config=config, run=RunContext("r"), slugs=["a"])
+    state = ServerState(
+        run_id="testrun", recording=False, books=BookManager(staleness_limit_ns=10**12)
+    )
+    state.attach_polymarket(source, PolymarketUSMarketDataAdapter())
+    assert state.polymarket_status()[0] == "connecting"
+    source.set_targets([])
+    assert state.polymarket_status() == ("idle", "no poll targets")
+
+
+async def test_control_execute_route_maps_control_errors(tmp_path: Path) -> None:
+    """Every ControlError carries its own status; the route must not invent one."""
+    state = StubState()
+    app = create_app(state, static_dir=tmp_path)
+    async with client_for(app) as client:
+        # The stub has no plane, so NotAvailable (409) is the honest answer.
+        unavailable = await client.post("/api/control/recording.stop", json={})
+        bad_params = await client.post("/api/control/recording.stop", json={"params": 7})
+        bad_confirm = await client.post("/api/control/recording.stop", json={"confirm": 7})
+    assert unavailable.status_code == 409
+    assert "control plane" in unavailable.json()["error"]
+    assert bad_params.status_code == 400
+    assert bad_confirm.status_code == 400
+    # The action and its params still reached the executor verbatim.
+    assert state.controls == [("recording.stop", None, None)]
+
+
+async def test_control_log_route_is_capped(tmp_path: Path) -> None:
+    state = StubState()
+    state.audit = [{"id": i, "action": "recording.stop"} for i in range(200)]
+    app = create_app(state, static_dir=tmp_path)
+    async with client_for(app) as client:
+        default = await client.get("/api/control/log")
+        capped = await client.get("/api/control/log?limit=5")
+        absurd = await client.get("/api/control/log?limit=100000")
+    assert len(default.json()["actions"]) == 50
+    assert len(capped.json()["actions"]) == 5
+    # A caller asking for everything gets the ceiling, not the whole table.
+    assert len(absurd.json()["actions"]) == 200

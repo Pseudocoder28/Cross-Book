@@ -11,7 +11,8 @@ one long-lived WebSocket, so every page URL must survive a deep link or a
 reload. This app serves the same shell document (``static/index.html``) for
 each of those routes:
 
-- ``/`` ``/arb`` ``/pairs`` ``/paper`` ``/system`` ``/help`` (:data:`SPA_ROUTES`)
+- ``/`` ``/arb`` ``/pairs`` ``/paper`` ``/system`` ``/control`` ``/help``
+  (:data:`SPA_ROUTES`)
 - ``/market/{market_id}`` — ``market_id`` is opaque and never validated here,
   so a link to a market that has rolled off the discovery list still opens
   the shell and lets the browser report the miss
@@ -26,6 +27,10 @@ Wire contract (server → client JSON text frames):
 - ``book``: full YES-book state per market, coalesced to <= 10/s per market
 - ``delta``: one tape entry per applied orderbook delta
 - ``stats``: totals, rates and latency percentiles, broadcast every second
+- ``control``: the whole control-plane state (recording, paper, universe,
+  jobs), sent on connect and after every control action so two open tabs can
+  never disagree about whether paper trading is on
+- ``job``: one long action's progress and output tail
 
 Prices are integer ticks of $0.0001; quantities are integer units of 0.0001
 contracts. Metrics are served on ``GET /metrics`` from this app — ``run_ui``
@@ -81,6 +86,20 @@ from arb.storage.db import insert_raw_messages, make_engine
 from arb.storage.models import RawMessageRow
 from arb.supervise import supervise
 from arb.types import RawMessage
+from arb.ui.control import (
+    ConfirmRequired,
+    ControlError,
+    ControlPlane,
+    ControlResult,
+    NotAvailable,
+    ReadOnlyRefused,
+)
+from arb.ui.security import (
+    BindInfo,
+    OriginGuardMiddleware,
+    check_bind_host,
+    parse_csv,
+)
 from arb.venues.kalshi.adapter import KalshiMarketDataAdapter
 from arb.venues.kalshi.detail import build_market_detail
 from arb.venues.kalshi.discovery import fetch_event, fetch_liquid_markets, fetch_market
@@ -115,7 +134,7 @@ SEND_QUEUE_MAX = 1024
 DETAIL_TTL_MS = 30_000
 PAIR_STATUSES = ("proposed", "confirmed", "rejected")
 # Client-side routes without a path parameter; each serves the app shell.
-SPA_ROUTES = ("/", "/arb", "/pairs", "/paper", "/system", "/help")
+SPA_ROUTES = ("/", "/arb", "/pairs", "/paper", "/system", "/control", "/help")
 
 # (ticker, cached event or None) -> fresh (market, event)
 type DetailRefreshFn = Callable[
@@ -136,6 +155,45 @@ class DatabaseStatus:
     connected: bool
     raw_messages_total: int | None
     runs: tuple[tuple[str, int], ...]  # (run_id, message count), newest first
+
+
+def no_control_payload(*, run_id: str, recording: bool) -> dict[str, Any]:
+    """Control state for a process with no control plane attached.
+
+    Read-only by construction: with nothing wired up there is nothing to
+    drive, and the browser renders the same shape it always does.
+    """
+    return {
+        "run_id": run_id,
+        "read_only": True,
+        "recording": recording,
+        "bind": None,
+        "paper": {
+            "attached": False,
+            "enabled": False,
+            "suspended": False,
+            "limits": PaperLimits().payload(),
+            "notional_ticks": 0,
+            "skipped_suspended": 0,
+        },
+        "pairs_top": 0,
+        "tracked_pairs": 0,
+        "universe": {
+            "kalshi": {"tickers": [], "base": [], "pairs": [], "attached": False},
+            "polymarket_us": {
+                "slugs": [],
+                "base": [],
+                "pairs": [],
+                "attached": False,
+                "interval_s": None,
+                "cycle_s": None,
+            },
+        },
+        "jobs": [],
+        "actions": [],
+        "confirm_ttl_s": 0.0,
+        "ts_ms": time.time_ns() // 1_000_000,
+    }
 
 
 class UIState(Protocol):
@@ -181,6 +239,28 @@ class UIState(Protocol):
         """Paper-trading ledger (live trader if enabled, else history)."""
         ...
 
+    def control_payload(self) -> dict[str, Any]:
+        """Control-plane state: what is on, what is running, what is allowed.
+
+        Always present, even when no control plane is attached (tests, the
+        replay harness), so the browser has one shape to render.
+        """
+        ...
+
+    def job_payload(self, job_id: str) -> dict[str, Any] | None:
+        """One job with its output tail, or None if the id is unknown."""
+        ...
+
+    async def execute_control(
+        self, action: str, params: dict[str, Any] | None, *, confirm: str | None
+    ) -> ControlResult:
+        """Run one control action. Raises the ControlError the route maps."""
+        ...
+
+    async def control_log(self, limit: int) -> list[dict[str, Any]]:
+        """Recent audit rows, newest first."""
+        ...
+
     def add_client(self, ws: WebSocket) -> asyncio.Queue[str]:
         """Register a client; returns its bounded outbound frame queue."""
         ...
@@ -224,6 +304,7 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
                 },
             },
             "recording": state.recording,
+            "control": state.control_payload(),
             "database": {
                 "connected": db.connected,
                 "raw_messages_total": db.raw_messages_total,
@@ -279,6 +360,64 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
     async def api_paper() -> Response:
         return JSONResponse(await state.paper_payload())
 
+    @app.get("/api/control")
+    async def api_control() -> Response:
+        """Control-plane state and the job list. Reading is G0: free."""
+        return JSONResponse(state.control_payload())
+
+    @app.post("/api/control/{action}")
+    async def api_control_execute(action: str, body: dict[str, Any] | None = None) -> Response:
+        """Run one control action. The ONLY write entry point.
+
+        Every action goes through ``ControlPlane.execute``, which owns the
+        read-only refusal, the arm-then-confirm handshake, the audit row and
+        the metric. A route per toggle would be a route per chance to forget
+        one of those, which is why this is a single path with the action in
+        the URL rather than eleven handlers.
+
+        Status codes carry the meaning the control page renders against:
+        409 is "arm accepted, ask the operator", not a failure.
+        """
+        payload = body or {}
+        params = payload.get("params")
+        if params is not None and not isinstance(params, dict):
+            return JSONResponse({"error": "params must be an object"}, status_code=400)
+        confirm = payload.get("confirm")
+        if confirm is not None and not isinstance(confirm, str):
+            return JSONResponse({"error": "confirm must be a string"}, status_code=400)
+        try:
+            result = await state.execute_control(action, params, confirm=confirm)
+        except ConfirmRequired as exc:
+            # Not a failure: the first call armed the action, and the body
+            # carries the sentence the operator must be shown before the second.
+            return JSONResponse(
+                {"confirm_required": True, **exc.payload()}, status_code=exc.status_code
+            )
+        except ControlError as exc:
+            # Every ControlError carries its own status, so the mapping lives
+            # with the failure instead of in a table here that drifts from it.
+            failure: dict[str, Any] = {"error": str(exc)}
+            if isinstance(exc, ReadOnlyRefused):
+                failure["read_only"] = True
+            return JSONResponse(failure, status_code=exc.status_code)
+        return JSONResponse(result.payload())
+
+    @app.get("/api/control/log")
+    async def api_control_log(limit: int = 50) -> Response:
+        """The audit trail. It is the only record that a recording gap, a
+        universe change or a bulk write was deliberate rather than a crash."""
+        rows = await state.control_log(max(1, min(limit, 500)))
+        return JSONResponse({"actions": rows})
+
+    @app.get("/api/control/jobs/{job_id}")
+    async def api_control_job(job_id: str) -> Response:
+        """One job with its output. A finished job stays readable, so a
+        browser that disconnected mid-job still sees how it ended."""
+        job = state.job_payload(job_id)
+        if job is None:
+            return JSONResponse({"error": "unknown job", "job_id": job_id}, status_code=404)
+        return JSONResponse(job)
+
     @app.get("/metrics")
     async def metrics() -> Response:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
@@ -294,6 +433,9 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
             queue.put_nowait(
                 json.dumps({"t": "hello", "run_id": state.run_id, "markets": state.hello_markets()})
             )
+            # Control state before the books: a tab that connects mid-job must
+            # not render "paper: on" for even one frame if it is suspended.
+            queue.put_nowait(json.dumps({"t": "control", "control": state.control_payload()}))
             for payload in state.book_payloads():
                 queue.put_nowait(json.dumps(payload))
         except asyncio.QueueFull:
@@ -354,6 +496,9 @@ class ServerState:
         self._pairs_engine: AsyncEngine | None = None
         self.arbmon: ArbMonitor | None = None
         self.trader: PaperTrader | None = None
+        # Attached by run_ui once the runtime exists; None in tests and in any
+        # process that has no controls (control_payload still answers).
+        self.control: ControlPlane | None = None
         self.rtt_fn: Callable[[], float | None] | None = None
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
@@ -388,6 +533,11 @@ class ServerState:
         if src is None:
             return "down", "awaiting API credentials"
         n = len(src.targets)
+        if n == 0:
+            # A supported state since the universe became mutable: the poller
+            # naps instead of dividing by zero. Say so rather than claiming
+            # a venue outage.
+            return "idle", "no poll targets"
         budget = f"{n} markets @ {src.rate_per_s:g} req/s"
         last = self._pm_last_frame_mono_ns
         if last is None:
@@ -468,7 +618,9 @@ class ServerState:
 
     async def paper_payload(self) -> dict[str, Any]:
         if self.trader is not None:
-            return self.trader.payload(enabled=True)
+            # No enabled= override: the trader's own suspend state is the
+            # truth, and a toggle must not make the ledger disappear.
+            return self.trader.payload()
         history: list[dict[str, Any]] = []
         if self._pairs_engine is not None:
             try:
@@ -488,6 +640,34 @@ class ServerState:
             "positions": [],
             "trades": history,
         }
+
+    # -- control plane --------------------------------------------------------
+
+    def attach_control(self, control: ControlPlane) -> None:
+        self.control = control
+
+    def control_payload(self) -> dict[str, Any]:
+        if self.control is not None:
+            return self.control.payload()
+        return no_control_payload(run_id=self.run_id, recording=self.recording)
+
+    def job_payload(self, job_id: str) -> dict[str, Any] | None:
+        if self.control is None:
+            return None
+        record = self.control.jobs.get(job_id)
+        return record.log_payload() if record is not None else None
+
+    async def execute_control(
+        self, action: str, params: dict[str, Any] | None, *, confirm: str | None
+    ) -> ControlResult:
+        if self.control is None:
+            raise NotAvailable("this process has no control plane")
+        return await self.control.execute(action, params, confirm=confirm)
+
+    async def control_log(self, limit: int) -> list[dict[str, Any]]:
+        if self.control is None:
+            return []
+        return await self.control.recent_actions(limit)
 
     def add_client(self, ws: WebSocket) -> asyncio.Queue[str]:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=SEND_QUEUE_MAX)
@@ -729,6 +909,19 @@ async def run_ui(
     paper: bool = False,
     paper_limits: PaperLimits | None = None,
 ) -> None:
+    # Before anything binds or connects: the UI has no authentication and its
+    # controls drive a process that will place real orders, so a non-loopback
+    # bind is refused unless it was asked for explicitly.
+    try:
+        bind: BindInfo = check_bind_host(host, allow_remote=config.ui_allow_remote_bind)
+    except Exception as exc:
+        log.error("%s", exc)
+        raise
+    if not bind.loopback:
+        log.warning(
+            "ui bound to non-loopback host %s — anyone who can route here has the controls", host
+        )
+
     run = RunContext(config.run_id or None)
     log.info("run_id=%s", run.run_id)
 
@@ -742,18 +935,26 @@ async def run_ui(
     )
     state.set_pairs_engine(engine)
 
-    recorder: Recorder | None = None
-    writer: asyncio.Task[object] | None = None
-    if record:
-        recorder = Recorder(
-            partial(insert_raw_messages, engine),
-            queue_max=config.recorder_queue_max,
-            batch_max=config.recorder_batch_max,
-        )
-        writer = asyncio.create_task(supervise(recorder.run, name="recorder-writer"))
+    # The recorder and its writer always exist, whatever --no-record said:
+    # recording is a runtime toggle now, and a toggle that has to build a
+    # recorder and start a supervised writer mid-flight is a toggle that can
+    # fail halfway. An idle recorder costs one empty queue and one parked task.
+    recorder = Recorder(
+        partial(insert_raw_messages, engine),
+        queue_max=config.recorder_queue_max,
+        batch_max=config.recorder_batch_max,
+    )
+    writer = asyncio.create_task(supervise(recorder.run, name="recorder-writer"))
 
     def record_raw(message: RawMessage) -> None:
-        if recorder is None:
+        """The one sink. Gated on the LIVE flag, read per message.
+
+        Callers pass this unconditionally; recording off means messages are
+        dropped here, not that the sink is None. ``ingest_seq`` is allocated
+        by the source either way, so a recording gap leaves a hole in the
+        sequence — which only has to increase, not be contiguous.
+        """
+        if not state.recording:
             return
         if recorder.enqueue(message):
             state.recorder_enqueued += 1
@@ -761,11 +962,10 @@ async def run_ui(
             state.recorder_dropped += 1
 
     tasks: list[asyncio.Task[object]] = []
+    control: ControlPlane | None = None
     try:
         if not tickers:
-            discovered = await fetch_liquid_markets(
-                config, run, top_n=top_n, sink=record_raw if record else None
-            )
+            discovered = await fetch_liquid_markets(config, run, top_n=top_n, sink=record_raw)
             log.info("discovered %d liquid kalshi markets", len(discovered))
             tickers = [m.ticker for m in discovered]
             state.set_markets(
@@ -807,7 +1007,7 @@ async def run_ui(
         if pairs_top > 0:
             try:
                 load = await load_tracked_pairs(
-                    config, run, engine, top_n=pairs_top, sink=record_raw if record else None
+                    config, run, engine, top_n=pairs_top, sink=record_raw
                 )
                 tracked = load.tracked
                 pair_pm_slugs = load.polymarket_slugs
@@ -840,12 +1040,11 @@ async def run_ui(
         # Polymarket US over public REST until WS credentials exist. Failure
         # here must never take Kalshi down: polling is simply disabled.
         pm_adapter = PolymarketUSMarketDataAdapter()
-        pm_source: PolymarketUSRestSource | None = None
         pm_targets = list(poly_slugs or [])
         if not pm_targets and poly_top > 0:
             try:
                 pm_markets = select_poll_targets(
-                    await fetch_active_markets(config, run, sink=record_raw if record else None),
+                    await fetch_active_markets(config, run, sink=record_raw),
                     poly_top,
                 )
             except Exception:
@@ -895,20 +1094,21 @@ async def run_ui(
                         }
                     ]
                 )
-        if pm_targets:
-            pm_source = PolymarketUSRestSource(config=config, run=run, slugs=pm_targets)
-            state.attach_polymarket(pm_source, pm_adapter)
-            # A polled book is only as fresh as its poll cycle; allow three
-            # cycles (one 429 cooldown) before calling it stale.
-            cycle_ns = int(len(pm_targets) / pm_source.rate_per_s * 1e9)
-            books.set_venue_staleness(
-                "polymarket_us", max(config.book_staleness_limit_ms * 1_000_000, 3 * cycle_ns)
-            )
+        # The poller always exists, even with nothing to poll: an empty target
+        # set is a supported idle state (set_targets([])), and having the
+        # source and its task there from the start is what lets the universe
+        # control add targets later without spawning anything. The constructor
+        # still rejects an empty list, so it is built with a placeholder that
+        # is cleared before stream() is ever called — no request is made for it.
+        pm_source = PolymarketUSRestSource(config=config, run=run, slugs=pm_targets or ["__idle__"])
+        if not pm_targets:
+            pm_source.set_targets([])
+        state.attach_polymarket(pm_source, pm_adapter)
 
         async def refresh_detail(
             ticker: str, cached_event: KalshiEvent | None
         ) -> tuple[KalshiMarket, KalshiEvent | None]:
-            sink = record_raw if record else None
+            sink = record_raw
             market = await fetch_market(config, run, ticker, sink=sink)
             event = cached_event
             if event is None or event.event_ticker != market.event_ticker:
@@ -919,13 +1119,48 @@ async def run_ui(
 
         if tracked:
             state.arbmon = ArbMonitor(books, tracked)
-            if paper:
-                state.trader = PaperTrader(paper_limits or PaperLimits())
-                log.info("paper trading enabled: %s", state.trader.limits.payload())
+        # ONE trader for the life of the run. The committed spend, the open
+        # positions and the ledger live on this instance, so the on/off toggle
+        # suspends it — rebuilding one would silently reopen the whole
+        # max_notional budget and throw the ledger away. It is built even when
+        # --paper was not passed (starting suspended) so the control has
+        # something to resume.
+        state.trader = PaperTrader(paper_limits or PaperLimits())
+        state.trader.set_suspended(not paper)
+        log.info(
+            "paper trading %s: %s",
+            "enabled" if paper else "suspended (resume from the UI)",
+            state.trader.limits.payload(),
+        )
 
         source = KalshiWSSource(config=config, run=run, market_tickers=tickers)
         state.rtt_fn = source.rtt_ms
         adapter = KalshiMarketDataAdapter()
+
+        # Everything mutable is now built: hand the control plane its handles.
+        control = ControlPlane(
+            config=config,
+            host=state,
+            run=run,
+            engine=engine,
+            sink=record_raw,
+            bind=bind,
+            pairs_top=pairs_top,
+        )
+        control.attach_kalshi(source)
+        control.attach_polymarket(pm_source)
+        control.seed_markets(state.hello_markets())
+        control.set_base_universe(
+            kalshi=[t for t in tickers if t not in {p.kalshi_ticker for p in tracked}],
+            polymarket=[s for s in pm_targets if s not in set(pair_pm_slugs)],
+        )
+        control.set_pair_universe(
+            kalshi=[p.kalshi_ticker for p in tracked], polymarket=pair_pm_slugs
+        )
+        # A polled book is only as fresh as its poll cycle, and the cycle
+        # length is a function of the target count — so it is derived here,
+        # from the live poller, by the same code the universe control reuses.
+        control.retune_polymarket_staleness()
 
         async def consume() -> None:
             async for raw in source.stream():
@@ -979,7 +1214,6 @@ async def run_ui(
                     await source.force_resync()
 
         async def consume_poly() -> None:
-            assert pm_source is not None
             async for raw in pm_source.stream():
                 state.on_polymarket_frame()
                 record_raw(raw)  # hard rule: enqueue before any parsing
@@ -1018,17 +1252,24 @@ async def run_ui(
                     payload = state.book_payload(market_id)
                     if payload is not None:
                         state.broadcast(payload)
-                if state.arbmon is not None and dirty_ids & state.arbmon.market_ids:
-                    state.broadcast({"t": "arb", "quotes": state.arbmon.snapshot()})
-                    if state.trader is not None:
+                # Rebind both once, up front: a control action can swap the
+                # monitor (pairs reload) between these statements, and there
+                # is an await below — `state.trader is not None` followed by
+                # `state.trader.consider(...)` across an await is exactly the
+                # race that a toggle would win.
+                monitor, trader = state.arbmon, state.trader
+                if monitor is not None and dirty_ids & monitor.market_ids:
+                    state.broadcast({"t": "arb", "quotes": monitor.snapshot()})
+                    if trader is not None:
                         ts_ms = time.time_ns() // 1_000_000
                         new_trades = []
-                        for pair in state.arbmon.affected(dirty_ids):
-                            d1, d2 = state.arbmon.best_quotes(pair)
+                        for pair in monitor.affected(dirty_ids):
+                            d1, d2 = monitor.best_quotes(pair)
                             best = (
                                 d1 if d1.net_per_contract_ticks >= d2.net_per_contract_ticks else d2
                             )
-                            trade = state.trader.consider(pair, best, ts_ms=ts_ms)
+                            # A suspended trader declines everything itself.
+                            trade = trader.consider(pair, best, ts_ms=ts_ms)
                             if trade is not None:
                                 new_trades.append(trade)
                         if new_trades:
@@ -1082,26 +1323,40 @@ async def run_ui(
             asyncio.create_task(supervise(stats_loop, name="ui-stats")),
             asyncio.create_task(supervise(poll_polymarket, name="polymarket-us-reachability")),
         ]
-        if pm_source is not None:
-            tasks.append(asyncio.create_task(supervise(consume_poly, name="polymarket-us-poll")))
+        tasks.append(asyncio.create_task(supervise(consume_poly, name="polymarket-us-poll")))
 
+        state.attach_control(control)
         app = create_app(state)
-        server = uvicorn.Server(
-            uvicorn.Config(app, host=host, port=port, log_config=None, access_log=False)
+        # Pure-ASGI guard, outside FastAPI, so it also sees the WebSocket
+        # handshake — the one scope Starlette's http middleware never gets.
+        guarded = OriginGuardMiddleware(
+            app,
+            allowed_hosts=parse_csv(config.ui_allowed_hosts),
+            allowed_origins=parse_csv(config.ui_allowed_origins),
         )
-        log.info("ui listening on http://%s:%d", host, port)
+        server = uvicorn.Server(
+            uvicorn.Config(guarded, host=host, port=port, log_config=None, access_log=False)
+        )
+        log.info(
+            "ui listening on http://%s:%d%s%s",
+            host,
+            port,
+            "" if bind.loopback else " (NON-LOOPBACK)",
+            " [read-only]" if control.read_only else "",
+        )
         await server.serve()  # returns (or raises KeyboardInterrupt) on Ctrl-C
     finally:
+        if control is not None:
+            await control.shutdown()
         for task in tasks:
             task.cancel()
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        if recorder is not None and writer is not None:
-            # Flush what's queued before tearing the writer down.
-            if not await recorder.drain(DRAIN_TIMEOUT_S):
-                log.warning("recorder drain timed out; some queued messages were not written")
-            writer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await writer
+        # Flush what's queued before tearing the writer down.
+        if not await recorder.drain(DRAIN_TIMEOUT_S):
+            log.warning("recorder drain timed out; some queued messages were not written")
+        writer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await writer
         await engine.dispose()

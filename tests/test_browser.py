@@ -1,0 +1,399 @@
+"""Acceptance tests: the real frontend, in a real browser, against the real app.
+
+These are the tests the manual checklist in PROGRESS.md used to stand in for.
+Each one maps to a failure mode that actually shipped or that would be silent
+until an operator hit it:
+
+1. ``RUN`` on /pairs types; it does not write. The word cost two Postgres
+   decisions once, from a user who believed they were typing in a search box.
+2. A /control field survives a live re-render — same DOM node, same focus,
+   typed value intact, and the value reaches the wire. The page repaints on
+   every control frame and on a 1 s tick; rebuilding its cards made every
+   field uneditable after about two keystrokes.
+3. The focus ladder: an arrow from ``ARB>`` enters the list, a letter then
+   reaches the page (and writes), Escape comes home and the same letter is
+   typing again. This is the contract the whole scope model rests on.
+4. The network security floor: a cross-site POST is refused, a same-origin
+   one is not, and the same holds for the WebSocket handshake.
+5. Every page boots clean: no uncaught exception, no console error. A page
+   module that fails to import degrades to a stub, which is easy to miss.
+
+Run them with ``uv run pytest tests/test_browser.py``; exclude them from a
+fast loop with ``-m "not browser"``. They skip themselves where there is no
+Chrome, so a bare CI container stays green.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+
+import httpx
+import pytest
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import connect
+
+from tests.browser import (
+    Browser,
+    TerminalState,
+    chrome_available,
+    guarded_app,
+    serve,
+    terminal,
+)
+
+pytestmark = pytest.mark.browser
+
+needs_chrome = pytest.mark.skipif(not chrome_available(), reason="no Chrome/Chromium on this host")
+
+PAIRS_READY = 'document.querySelectorAll("#pair-rows .pair-row").length === 3'
+CMD_TEXT = 'document.getElementById("cmd-text").textContent'
+
+
+def eventually(predicate: Callable[[], bool], what: str, timeout: float = 10.0) -> None:
+    """Poll a server-side condition until it holds. No bare sleeps."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def focus_settles(page: Browser, element_id: str) -> None:
+    page.wait_for(
+        f'document.activeElement && document.activeElement.id === "{element_id}"',
+        f"focus to land on #{element_id}",
+    )
+
+
+# --------------------------------------------------------------------------
+# 1. the "RUN" test — the one that matters
+# --------------------------------------------------------------------------
+
+
+@needs_chrome
+def test_typing_run_on_pairs_types_and_never_decides() -> None:
+    """R, U, N with nothing focused must be three characters, not three acts.
+
+    R reloads the list, U sets the selected pair PROPOSED and N sets it
+    REJECTED — every one of them a write to the dataset that drives trading.
+    They are LIST-scope keys, and the home position is COMMAND scope, so the
+    only correct outcome of typing the word is the word.
+    """
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/pairs", ready=PAIRS_READY)
+        # The home position: every page mounts with the keyboard on ARB>.
+        assert page.focused() == "cmd"
+
+        page.clear()  # forget the mount's own GET /api/pairs
+        page.type("run")
+
+        page.wait_for(f'{CMD_TEXT} === "RUN"', 'the ARB> buffer to read "RUN"')
+        # Not one request touched the pairs API: no decision POST, and not
+        # even R's refetch.
+        assert [r for r in page.requests() if "/api/pairs" in r.url] == []
+        assert state.decisions == []
+
+        # Escape clears the half-typed command and leaves the buffer empty.
+        page.key("Escape")
+        page.wait_for(f'{CMD_TEXT} === ""', "Escape to clear the command line")
+        assert state.decisions == []
+
+
+# --------------------------------------------------------------------------
+# 2. the control-field test
+# --------------------------------------------------------------------------
+
+
+FIELD_STATE = """
+(() => {
+  const e = document.getElementById("ctl-minnet");
+  return {
+    same: e === window.__arbProbeNode,
+    probe: e.__arbProbe || null,
+    focused: document.activeElement === e,
+    active: document.activeElement ? (document.activeElement.id
+      || "<" + document.activeElement.tagName + ">") : "<none>",
+    value: e.value,
+  };
+})()
+"""
+
+
+@needs_chrome
+def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
+    """Type into a numeric limit while the page repaints under you.
+
+    The defect was node REPLACEMENT: render() rebuilt its cards with
+    replaceChildren on every control frame and on the 1 s tick, so the
+    <input> was destroyed after about two keystrokes and focus fell to
+    <body>. Hence the three assertions: same node (tagged, then compared by
+    identity), focus still inside it, and the characters still there. The
+    click at the end proves the value was not merely on screen — it is what
+    the action posts.
+    """
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-minnet") !== null')
+        page.wait_ws_live()
+        # The server's value, written in by render() before anyone touched it.
+        assert page.eval('document.getElementById("ctl-minnet").value') == "50"
+
+        # TAB is the documented way into the fields, so use it rather than a
+        # programmatic focus(): the focus path is part of what broke.
+        page.key("Tab")
+        focus_settles(page, "ctl-minnet")
+        page.eval(
+            '(() => { const e = document.getElementById("ctl-minnet");'
+            ' e.__arbProbe = "tagged"; window.__arbProbeNode = e; e.select(); return true; })()'
+        )
+
+        page.type("75")
+
+        # Drive a real re-render: a control frame is what the live plane
+        # broadcasts after every action, and the page repaints on it.
+        state.push_control(tracked_pairs=4242)
+        page.wait_for(
+            'document.getElementById("control-page").textContent.indexOf("4,242") >= 0',
+            "the control frame to repaint the page",
+        )
+
+        after_frame = page.eval(FIELD_STATE)
+        assert after_frame["same"] is True, "the <input> was replaced by the re-render"
+        assert after_frame["probe"] == "tagged"
+        assert after_frame["focused"] is True, f"focus fell to {after_frame['active']}"
+        assert after_frame["value"] == "75"
+
+        # Keep typing across the repaint, then wait for the 1 s tick — the
+        # other path that used to rebuild the DOM under the caret.
+        page.type("00")
+        # Wait for EVIDENCE the tick ran, not for the clock. A wall-clock sleep
+        # here made the assertions below vacuous: deleting the setInterval from
+        # control.js left this test green, because time passes either way.
+        # render() rewrites textContent every tick, so a MutationObserver sees it.
+        page.eval(
+            """window.__arbTicks = 0;
+               window.__arbObs = new MutationObserver((rs) => { window.__arbTicks += rs.length; });
+               window.__arbObs.observe(document.getElementById("control-page"),
+                 { subtree: true, childList: true, characterData: true });"""
+        )
+        page.wait_for(
+            "window.__arbTicks > 0",
+            "the 1 s control tick to actually repaint the page",
+            timeout=10.0,
+        )
+
+        after_tick = page.eval(FIELD_STATE)
+        assert after_tick["same"] is True, "the 1 s tick replaced the <input>"
+        assert after_tick["focused"] is True, f"focus fell to {after_tick['active']}"
+        assert after_tick["value"] == "7500"
+
+        # And the edit is what the action sends, not the server's old value.
+        page.click('button[data-action="paper.limits"]')
+        eventually(
+            lambda: any(a == "paper.limits" for a, _p, _c in state.controls),
+            "APPLY LIMITS to post",
+        )
+        params = next(p for a, p, _c in state.controls if a == "paper.limits")
+        assert params is not None and params["min_net_ticks"] == 7500
+
+
+# --------------------------------------------------------------------------
+# 3. keyboard / focus integration
+# --------------------------------------------------------------------------
+
+
+@needs_chrome
+def test_arrow_enters_the_list_a_letter_then_writes_escape_comes_home() -> None:
+    """The scope ladder, end to end, on the page that has the writes.
+
+    Same keystroke, two outcomes, decided only by where the focus is: this is
+    the positive half of the "RUN" test, and it is what makes that test's
+    silence meaningful rather than accidental.
+    """
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/pairs", ready=PAIRS_READY)
+        assert page.focused() == "cmd"
+
+        # An arrow from the home position moves FOCUS, not the cursor.
+        page.key("ArrowDown")
+        focus_settles(page, "pair-rows")
+
+        page.clear()
+        page.key("n")  # LIST scope: the page owns the letter, and it writes
+        eventually(lambda: state.decisions == [(101, "rejected")], "the REJECT to post")
+        posts = [r for r in page.requests() if r.hits("/api/pairs/101/decide", "POST")]
+        assert len(posts) == 1
+
+        # Escape leaves the list and disarms the page.
+        page.key("Escape")
+        focus_settles(page, "cmd")
+
+        # The very same letter is typing again.
+        page.clear()
+        page.key("n")
+        page.wait_for(f'{CMD_TEXT} === "N"', "the letter to type at ARB>")
+        assert state.decisions == [(101, "rejected")]
+        assert [r for r in page.requests() if "/decide" in r.url] == []
+
+
+# --------------------------------------------------------------------------
+# 4. the security floor (plain HTTP and a raw WebSocket — no browser)
+# --------------------------------------------------------------------------
+
+
+def test_cross_site_requests_are_refused_and_same_origin_ones_are_not() -> None:
+    """The guard ``run_ui`` wraps the app in, exercised over the wire.
+
+    Done with a plain client rather than through the browser so the headers
+    are exactly what the test says they are: a browser would not let a page
+    forge ``Origin`` and the result would prove less.
+    """
+    state = TerminalState()
+    with serve(guarded_app(state)) as base_url:
+        with httpx.Client(base_url=base_url, timeout=10.0) as client:
+            cross = client.post(
+                "/api/control/recording.stop",
+                json={},
+                headers={"Origin": "https://evil.example"},
+            )
+            marked = client.post(
+                "/api/control/recording.stop",
+                json={},
+                headers={"Origin": base_url, "Sec-Fetch-Site": "cross-site"},
+            )
+            same = client.post("/api/control/recording.stop", json={}, headers={"Origin": base_url})
+            read = client.get("/api/control", headers={"Origin": "https://evil.example"})
+
+        ws_url = "ws://" + base_url.removeprefix("http://") + "/ws"
+        with pytest.raises(WebSocketException):
+            # The same-origin policy does not apply to WebSocket, so Origin is
+            # the only thing standing between a cross-site page and the feed.
+            with connect(ws_url, additional_headers={"Origin": "https://evil.example"}):
+                pass
+        with connect(ws_url, additional_headers={"Origin": base_url}) as allowed:
+            hello = allowed.recv()
+
+    assert cross.status_code == 403
+    assert marked.status_code == 403
+    # Through the guard and into the executor: this stub has no control plane,
+    # so 409 is the honest answer and proves the request was not refused.
+    assert same.status_code == 409 and "control plane" in same.json()["error"]
+    # A cross-site GET is a read, and reads are not state-changing.
+    assert read.status_code == 200
+    assert '"t": "hello"' in (hello if isinstance(hello, str) else hello.decode())
+    # Exactly one request reached the executor: the same-origin POST.
+    assert [a for a, _p, _c in state.controls] == ["recording.stop"]
+
+
+# --------------------------------------------------------------------------
+# 5. every page boots clean
+# --------------------------------------------------------------------------
+
+PAGES = (
+    ("/", "monitor-page"),
+    ("/arb", "arbpage"),
+    ("/pairs", "pairs"),
+    ("/paper", "paperpage"),
+    ("/system", "system-page"),
+    ("/control", "control-page"),
+    ("/help", "help-page"),
+    ("/market/kalshi%3AAAA", "des"),
+)
+
+
+@needs_chrome
+def test_every_route_cold_loads_without_a_console_error() -> None:
+    """Each page URL is a deep link, and a broken module is a silent stub.
+
+    main.js catches an import failure and substitutes a placeholder page, so a
+    module that throws costs you a whole screen with no other symptom than one
+    console.error. This is the test that reads it.
+    """
+    state = TerminalState()
+    with terminal(state) as page:
+        for path, root in PAGES:
+            page.clear()
+            page.goto(path, ready=f'!document.getElementById("{root}").hidden')
+            page.wait_ws_live()
+            bad = [line for line in page.console() if line.level in ("error", "exception")]
+            assert bad == [], f"{path} logged {bad}"
+
+
+@needs_chrome
+def test_a_blurred_edit_is_not_silently_reverted_by_the_next_frame() -> None:
+    """Type a limit, TAB away, then let a control frame land.
+
+    The focused-field guard is only half of it. `syncField` also refuses to
+    write into a field you have EDITED but left — otherwise you type a new
+    min-net, tab to the next box, one frame arrives (they arrive on every
+    change anywhere) and your edit is silently replaced by the server's old
+    value. APPLY then posts a number you never chose, which is the worst
+    shape this can take: no error, no visible change, wrong write.
+    """
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-minnet") !== null')
+        page.wait_ws_live()
+
+        page.key("Tab")
+        focus_settles(page, "ctl-minnet")
+        page.eval('document.getElementById("ctl-minnet").select()')
+        page.type("75")
+        # Leave the field the way an operator would: on to the next limit.
+        page.key("Tab")
+        page.wait_for(
+            'document.activeElement.id !== "ctl-minnet"',
+            "focus to leave the edited field",
+        )
+
+        state.push_control(tracked_pairs=4242)
+        page.wait_for(
+            'document.body.textContent.indexOf("4,242") >= 0',
+            "the control frame to repaint the page",
+        )
+
+        assert page.eval('document.getElementById("ctl-minnet").value') == "75", (
+            "a blurred-but-edited field was reverted by the next control frame"
+        )
+
+        page.click('button[data-action="paper.limits"]')
+        eventually(
+            lambda: any(a == "paper.limits" for a, _p, _c in state.controls),
+            "APPLY LIMITS to post",
+        )
+        params = next(p for a, p, _c in state.controls if a == "paper.limits")
+        assert params is not None and params["min_net_ticks"] == 75
+
+
+@needs_chrome
+def test_a_leaned_on_decision_key_writes_once_not_once_per_autorepeat() -> None:
+    """Hold Y in the pairs list: one decision, not one per repeat.
+
+    `decidePair` advances the cursor under a status filter, so without the
+    e.repeat guard a stuck key walks the queue writing as it goes — five
+    Postgres decisions from one press. Both layers guard it (core/keys.js
+    drops a repeated printable in LIST, and the page refuses e.repeat), and
+    neither guard was covered by a real browser until this test.
+    """
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/pairs", ready=PAIRS_READY)
+        page.wait_ws_live()
+
+        page.key("ArrowDown")
+        focus_settles(page, "pair-rows")
+
+        page.key("y")  # the real press
+        for _ in range(4):
+            page.key("y", repeat=True)  # what a held key sends after it
+
+        eventually(lambda: len(state.decisions) >= 1, "the first decision to post")
+        # Give the repeats every chance to land before counting.
+        time.sleep(0.5)
+        assert len(state.decisions) == 1, (
+            f"a held key wrote {len(state.decisions)} decisions: {state.decisions}"
+        )

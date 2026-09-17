@@ -144,7 +144,7 @@ const SCREENS = {
     ],
   },
   paper: {
-    lead: "The simulated ledger. When `arb ui --paper` is running, every measured edge that "
+    lead: "The simulated ledger. When the trader is resumed (on /control, or `arb ui --paper` at startup), every measured edge that "
       + "clears the risk limits is 'taken' at the liquidity the edge walk already consumed. "
       + "No venue is contacted and no order exists; the ledger is a record of what the "
       + "measured edges would have been worth.",
@@ -173,6 +173,37 @@ const SCREENS = {
       },
     ],
   },
+  control: {
+    lead: "Where you operate the system. Everything that used to be a command-line flag or "
+      + "an `arb` subcommand is a control here, and every one of them goes through one "
+      + "server-side executor that refuses it in read-only mode, asks you to confirm the "
+      + "expensive ones, and writes an audit row recording the exact sentence you were shown.",
+    groups: [
+      {
+        name: "CARDS",
+        cols: [
+          ["RECORDER", "start and stop writing raw messages to Postgres. Off leaves a hole a "
+            + "replay reads straight across, so the audit row is the only sign it was deliberate"],
+          ["PAPER TRADING", "suspend or resume the trader and retune its risk limits live. "
+            + "Suspend keeps positions and the spend already committed — it is not a reset"],
+          ["UNIVERSE", "replace either venue's market list and reload the tracked pairs. The "
+            + "Kalshi change costs a reconnect; the Polymarket one retunes the staleness budget"],
+          ["JOBS", "doctor, pair proposal, slug backfill and replay. Propose takes about three "
+            + "minutes and writes thousands of rows; replay runs as a subprocess"],
+          ["AUDIT TRAIL", "what was done, the effect sentence shown at the time, and how it ended"],
+        ],
+      },
+      {
+        name: "GRADES",
+        cols: [
+          ["G0", "read-only — runs even when the server is in read-only mode"],
+          ["G2", "changes this run — one click, audited"],
+          ["G3", "writes many rows — arms first, and you confirm a sentence the server wrote"],
+        ],
+      },
+    ],
+  },
+
   system: {
     lead: "The plumbing, one card per subsystem. This is where you look when a number "
       + "elsewhere stops moving. Read-only diagnostics, live off the one-second stats frame "

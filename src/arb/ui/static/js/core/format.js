@@ -47,8 +47,19 @@ export function fmtAge(ms) {
   return ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(1) + "s";
 }
 
+/** An elapsed duration, one unit, terse enough for a table column.
+
+    Seconds only up to a minute, then m / h / d. The audit trail is the one
+    place in the terminal that shows ages beyond a minute, and seconds-only
+    rendered a day-old row as "76523s AGO" — a number nobody reads as 21
+    hours. Larger units floor rather than round: "2h" for anything in the
+    third hour is honest, "3h" would not be. */
 export function fmtAgo(ms) {
-  return Math.max(0, Math.round(ms / 1000)) + "s";
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
 }
 
 export function fmtRate(r) {

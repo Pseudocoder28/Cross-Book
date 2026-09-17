@@ -240,7 +240,7 @@ function syncControls(skipInput) {
     ? "PAPER TRADER MINIMUM — " + paperMin + " TICKS/CT (" + fmtSignedCents(paperMin) + ")"
     : "PAPER TRADER DEFAULT MINIMUM — " + paperMin + " TICKS/CT ("
       + fmtSignedCents(paperMin) + ") — NOT IN FORCE: NO PAPER TRADER ON THIS RUN."
-      + " FILTERS THIS VIEW ONLY. START ONE WITH: arb ui --paper";
+      + " FILTERS THIS VIEW ONLY. RESUME THE TRADER ON /control";
   for (const b of document.querySelectorAll("#arb-presets .abtn")) {
     const p = b.dataset.preset;
     const on = p === "all" ? view.min == null
@@ -329,7 +329,7 @@ async function loadPaperMin() {
     detail pane's copy also says how to get the rows back. */
 function emptyText(withHint) {
   const n = state.arb.quotes.length;
-  if (!n) return "NO CONFIRMED PAIRS TRACKED — CONFIRM PAIRS, THEN RESTART arb ui";
+  if (!n) return "NO CONFIRMED PAIRS TRACKED — CONFIRM PAIRS ON /pairs, THEN RELOAD PAIRS ON /control";
   return "NO PAIR CLEARS " + view.min + " TICKS/CT — " + nf.format(n) + " TRACKED"
     + (withHint ? " · LOWER MIN NET/CT, OR PRESS ALL" : "");
 }

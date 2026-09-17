@@ -149,3 +149,46 @@ CLOCK_SKEW_MS = Gauge(
     "Estimated local clock offset from the venue's (negative: local is behind)",
     labelnames=["venue"],
 )
+
+
+# --- UI control plane -------------------------------------------------------
+# result is "ok" | "error" | "refused" | "armed" | "read_only" |
+# "confirm_invalid" | "unknown": every way a control can end, including the
+# ones that are a refusal rather than a failure.
+CONTROL_ACTIONS = Counter(
+    "arb_control_actions_total",
+    "UI control actions by action and outcome",
+    labelnames=["action", "result"],
+)
+
+# An audit row that could not be written. For a G3 action this also refuses
+# the action (fail closed); for a G2 one the action happened and the record of
+# it did not, which is exactly the thing worth alerting on.
+CONTROL_AUDIT_FAILURES = Counter(
+    "arb_control_audit_failures_total",
+    "Control-action audit writes that failed",
+    labelnames=["action"],
+)
+
+CONTROL_JOBS = Counter(
+    "arb_control_jobs_total",
+    "Control-plane background jobs by name and outcome (ok/error/cancelled)",
+    labelnames=["job", "result"],
+)
+
+# A job's output buffer is bounded, so a chatty job loses its oldest lines
+# rather than the process losing memory. Nonzero means the log is incomplete.
+CONTROL_JOB_OUTPUT_DROPPED = Counter(
+    "arb_control_job_output_dropped_total",
+    "Job output lines dropped from the bounded per-job buffer",
+    labelnames=["job"],
+)
+
+# Incremented by the UI's origin/host guard when a request is refused. The UI
+# has no authentication, so this is the only signal that something off-origin
+# tried to drive the control plane.
+UI_REQUESTS_REJECTED = Counter(
+    "arb_ui_requests_rejected_total",
+    "UI requests refused by the origin/host guard",
+    labelnames=["scope", "reason"],
+)

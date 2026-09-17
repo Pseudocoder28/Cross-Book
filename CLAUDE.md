@@ -47,17 +47,23 @@ Detects and trades price gaps between equivalent binary markets on Kalshi and Po
 
 ## Commands
 
-- `uv run pytest`, `uv run ruff check .` and `uv run pyright`
-- `uv run alembic upgrade head` migrates the database (URL from `.env` via `AppConfig`)
+Three CLI commands, and only three. `arb ui` starts the server the controls
+live in; `arb doctor` is what you run when that server will not start (a button
+inside a dead process diagnoses nothing); `arb replay` is the worker the UI's
+`jobs.replay` spawns as a subprocess. Everything else is a control on
+`/control` — recording, paper trading, the market universe, tracked pairs and
+pair proposal/backfill are runtime state, not argv.
+
+- `uv run pytest`, `uv run ruff check .` and `uv run pyright`; `node --test "tests/js/**/*.test.mjs"` runs the frontend unit suite (node's built-in runner — no package.json, no npm). `uv run pytest -m "not browser"` skips the headless-Chrome acceptance tests for a fast loop; they skip themselves where there is no Chrome.
+- `uv run alembic upgrade head` migrates the database (URL from `.env` via `AppConfig`). Run it before using the UI's controls: every action writes an audit row to `control_actions` (migration `0004`), and a G3 action refuses to arm if that write fails.
 - `docker compose up -d` starts Postgres with pgvector, Prometheus, Grafana and the app
-- `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk
-- `uv run arb record [--tickers T1,T2 | --top N] [--poly-top N | --poly-slugs ...] [--duration S]` streams raw Kalshi WS + Polymarket US REST-polled market data into Postgres
-- `uv run arb ui [--tickers ... | --top N] [--poly-top N | --poly-slugs ...] [--pairs-top N] [--port 8080] [--no-record]` serves the terminal UI at http://127.0.0.1:8080 (records while it runs unless --no-record); a multi-page app routed client-side over the History API on one long-lived WebSocket — `/` MONITOR, `/arb`, `/pairs`, `/paper`, `/system`, `/help` and `/market/<market_id>` (DES, not in the nav); `CTRL+1`–`CTRL+6` jump and `CTRL+[`/`CTRL+]` cycle on macOS, `ALT+…` elsewhere (`ALT` is a live alias everywhere); history back/forward is the browser's own chord, unbound in the app; a bare letter at `ARB>` always types — page keys fire only with a list focused; `ESC` clears the command line or returns to MONITOR; `ARB>` commands: `MON`/`MONITOR`, `ARB`, `PAIRS`, `PAPER`, `SYS`/`SYSTEM`, `HELP`/`?`, `BACK`, `DES`, `<TICKER>`, `<TICKER> DES`
-- Grafana at http://127.0.0.1:3000 (admin/admin) has the provisioned "ARB — Data Plane" dashboard
-- `uv run arb pairs propose [--min-score 0.75]` fetches both venues' open universes and proposes pairs into Postgres; `arb pairs list [--status ...]`, `arb pairs confirm|reject ID`; review in the terminal with the `PAIRS` command
-- `uv run arb ui --paper [--min-net-ticks 50 --max-cts-per-pair 100 --max-notional 1000]` simulates fills on measured edges (ledger on the `PAPER` page and `GET /api/paper`)
-- `uv run arb replay [RUN_ID] [--pairs-top N] [--paper ...] [--persist]` replays a recorded run through the identical pipeline (default: latest run)
-- Keep this list current as commands are added.
+- `uv run arb doctor` checks env, keys, clock skew, database, venue reachability and disk (also a `/control` job, `jobs.doctor`)
+- `uv run arb ui [--tickers T1,T2 | --top N] [--poly-top N | --poly-slugs ...] [--pairs-top N] [--host H] [--port 8080] [--no-record] [--read-only] [--paper --min-net-ticks 50 --max-cts-per-pair 100 --max-notional 1000]` serves the terminal UI at http://127.0.0.1:8080. Every flag is a *starting* value the UI changes from there; `docker-compose.yml` runs `arb ui --top 20 --host 0.0.0.0`, so the flag names are a live dependency. A non-loopback `--host` is refused unless `ARB_ALLOW_REMOTE_BIND=1`; `--read-only` (or `UI_READ_ONLY=1`) serves every view and refuses every control.
+- The UI is a multi-page app routed client-side over the History API on one long-lived WebSocket — `/` MONITOR, `/arb`, `/pairs`, `/paper`, `/system`, `/control`, `/help` and `/market/<market_id>` (DES, not in the nav); `CTRL+1`–`CTRL+7` jump and `CTRL+[`/`CTRL+]` cycle on macOS, `ALT+…` elsewhere (`ALT` is a live alias everywhere); history back/forward is the browser's own chord, unbound in the app; a bare letter at `ARB>` always types — page keys fire only with a list focused; `ESC` clears the command line or returns to MONITOR; `ARB>` commands: `MON`/`MONITOR`, `ARB`, `PAIRS`, `PAPER`, `SYS`/`SYSTEM`, `HELP`/`?`, `BACK`, `DES`, `<TICKER>`, `<TICKER> DES`
+- `/control` is the operating surface: recorder on/off, paper suspend/resume and live risk limits, the Kalshi and Polymarket US universes, tracked-pairs top N, and the jobs (doctor, propose, backfill, replay, cancel). Every action goes through one executor (`POST /api/control/{action}`), which owns the read-only refusal, the server-side arm-then-confirm and the audit row. G3 actions arm first and show the sentence that gets recorded.
+- `uv run arb replay [RUN_ID] [--pairs-top N] [--paper ...] [--persist]` replays a recorded run through the identical pipeline (default: latest run). It is also a machine interface: `ControlPlane._apply_replay` builds this argv, so flag names, defaults and the optional positional are a contract pinned by `tests/test_cli.py`.
+- Grafana at http://127.0.0.1:3000 (admin/admin) has the provisioned "ARB — Data Plane" dashboard; Prometheus scrapes `arb ui`'s own `GET /metrics` and nothing else
+- Keep this list current as commands and controls are added.
 
 ## Where decisions live
 

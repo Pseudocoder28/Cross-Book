@@ -1,0 +1,190 @@
+/* CONTROL page. Same amber-on-black terminal idiom as the rest; the only new
+   visual language is the consequence grade on a button and the confirm band,
+   because those are the two things a user must not misread. */
+
+#control-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.cbanner { flex: none; }
+
+.cbody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.cgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+
+.cwide {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.cblock {
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  padding: 8px 10px 10px;
+  min-width: 0;
+}
+
+/* a second heading inside one card */
+.cs2 { margin-top: 10px; }
+
+.cnote {
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 14px;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- buttons ---------- */
+
+.cbtns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cbtn {
+  appearance: none;
+  background: var(--raised);
+  color: var(--ink);
+  border: 1px solid var(--hair);
+  padding: 3px 10px;
+  font: 700 10px/16px var(--mono);
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background-color 160ms var(--ease), color 160ms var(--ease);
+}
+.cbtn:hover:not(:disabled) { background: var(--bg); color: var(--amber); }
+.cbtn:focus-visible { outline: 1px solid var(--amber); outline-offset: -2px; }
+.cbtn:disabled { color: var(--dim); cursor: not-allowed; }
+.cbtn.primary { border-color: var(--amber); color: var(--amber); }
+.cbtn.tiny { padding: 1px 6px; margin-left: 8px; }
+
+/* The grade is the server's, and it is the one thing on the button that says
+   how much it costs to be wrong. G3 writes many rows; G4 is irreversible. */
+.cbtn.g-g3 { border-left: 3px solid var(--amber); }
+.cbtn.g-g4 { border-left: 3px solid var(--ask); color: var(--ask); }
+
+/* ---------- inputs ---------- */
+
+.cnum, .clist {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--hair);
+  font: 400 11px/16px var(--mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 1px 6px;
+  text-align: right;
+}
+.cnum:focus, .clist:focus { outline: 1px solid var(--amber); outline-offset: -1px; }
+.crun { text-align: left; width: 24ch; }
+
+.clist {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  text-align: left;
+  resize: vertical;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* ---------- banners ---------- */
+
+.cbind, .cro {
+  padding: 4px 10px;
+  font: 700 10px/18px var(--mono);
+  letter-spacing: 0.08em;
+}
+.cbind { background: var(--ask); color: #000; }
+.cro { background: var(--raised); color: var(--dim); }
+
+/* The confirm band: reversed video, because agreeing to a G3 write should not
+   look like the rest of the page. */
+.carm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  background: var(--amber);
+  color: #000;
+  font: 700 10px/20px var(--mono);
+  letter-spacing: 0.06em;
+}
+.carm-tag { font-weight: 700; letter-spacing: 0.12em; }
+.carm-eff {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.carm .cbtn { background: #000; color: var(--amber); border-color: #000; }
+.carm .cbtn:hover { background: var(--bg); }
+.carm-ttl { margin-left: auto; }
+
+/* ---------- jobs ---------- */
+
+.cjob .k { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.cj-name { color: var(--ink); font-weight: 700; }
+.cj-st { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; }
+.cj-v { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.cj-phase { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cj-el { margin-left: auto; color: var(--dim); }
+.cj-err { color: var(--ask); }
+
+.st-running { color: var(--amber); }
+.st-ok { color: var(--bid); }
+.st-error { color: var(--ask); }
+.st-cancelled { color: var(--dim); }
+.st-refused { color: var(--ask); }
+.st-armed { color: var(--amber); }
+
+/* ---------- audit ---------- */
+
+/* The effect sentence IS the audit record — it is what the operator was shown
+   and agreed to, which is why it is stored rather than re-derived from the
+   parameters later. So it wraps and is never clipped: measured at 1600px it
+   was losing 47% of itself to an ellipsis, which left rows reading "…the
+   ledger are kept, so re…" with the outcome cut off. `.kv` pins a 16px row
+   height and `nowrap`, so an audit row has to opt out of both. */
+.caud {
+  height: auto;
+  min-height: 16px;
+  align-items: baseline;
+  padding: 1px 0;
+}
+.caud .k { display: flex; gap: 8px; align-items: baseline; flex: none; }
+.caud .v { white-space: normal; }
+.ca-when { color: var(--dim); font-size: 10px; white-space: nowrap; }
+.ca-res { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; }
+.ca-v { display: flex; gap: 8px; align-items: baseline; min-width: 0; flex-wrap: wrap; }
+.ca-act { color: var(--amber); font-weight: 700; white-space: nowrap; }
+.ca-eff {
+  color: var(--ink2);
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ca-err { color: var(--ask); }
+
+@media (prefers-reduced-motion: reduce) {
+  .cbtn { transition: none; }
+}

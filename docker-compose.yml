@@ -1,6 +1,14 @@
 # All host ports bind to 127.0.0.1 only. On the VM these are reached over an
 # SSH tunnel — never exposed publicly.
 
+# Pinned on purpose. Without it Compose names the project after the directory,
+# so every git worktree of this repo gets its OWN stack — and since the host
+# ports here are fixed, the second one dies on "Bind for 127.0.0.1:5432 failed:
+# port is already allocated" after having already built an image and created
+# four containers. One name means `docker compose` targets the same stack from
+# any checkout.
+name: arb
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -46,12 +54,15 @@ services:
     environment:
       # Inside the compose network the DB host is the service name.
       DATABASE_URL: postgresql+asyncpg://arb:arb@postgres:5432/arb
-      # Prometheus scrapes app:9000 from inside the network; the port is not
-      # mapped to the host.
-      METRICS_HOST: 0.0.0.0
       # The UI binds all interfaces inside the network; the host mapping
       # below keeps it 127.0.0.1-only.
       UI_HOST: 0.0.0.0
+      # …and because it does, the bind guard has to be told this is the
+      # deliberate case. Without it the server refuses to start: the UI has no
+      # authentication and its controls drive a trading process, so binding
+      # off loopback is opt-in, not a default. Prometheus scrapes this same
+      # port (app:8080/metrics) — nothing binds :9000 since `arb record` went.
+      ARB_ALLOW_REMOTE_BIND: "1"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

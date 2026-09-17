@@ -177,3 +177,72 @@ def test_per_venue_staleness_override() -> None:
     assert kalshi is not None and not kalshi.valid  # streaming default: stale after 5s
     assert poly is not None and poly.valid  # polled venue: 20s budget
     assert manager.staleness_limit_ns("polymarket_us:B") == 20_000_000_000
+
+
+def test_evict_forgets_books_so_they_stop_being_republished() -> None:
+    # Without eviction a de-subscribed market lingers forever: it never
+    # updates again, ages into permanent staleness, and is still handed to
+    # every newly connected UI client.
+    adapter = KalshiMarketDataAdapter()
+    manager = BookManager(staleness_limit_ns=STALE_NS)
+    for frame in snapshot_frames():
+        manager.apply(adapter.parse(raw(frame)), mono_ns=0)
+    assert len(manager.books) == 5
+    dropped = sorted(manager.books)[:2]
+    kept = sorted(manager.books)[2:]
+
+    removed = manager.evict([*dropped, "kalshi:never-seen"])
+    assert removed == set(dropped)  # unknown ids are ignored, not an error
+    assert sorted(manager.books) == kept
+    for market_id in dropped:
+        assert manager.get(market_id) is None
+        assert manager.status(market_id, now_mono_ns=0) is None
+        assert manager.last_update_mono_ns(market_id) is None
+    for market_id in kept:
+        status = manager.status(market_id, now_mono_ns=0)
+        assert status is not None and status.valid
+    assert manager.evict(dropped) == set()  # idempotent
+
+
+def test_retain_is_venue_scoped() -> None:
+    from arb.book import BookSnapshot
+
+    manager = BookManager(staleness_limit_ns=STALE_NS)
+    ids = ["kalshi:A", "kalshi:B", "polymarket_us:x", "polymarket_us:y"]
+    manager.apply([BookSnapshot(mid, (), (), None) for mid in ids], mono_ns=0)
+
+    # Shrinking the Kalshi universe must not touch Polymarket's books.
+    assert manager.retain(["kalshi:A"], venue="kalshi") == {"kalshi:B"}
+    assert sorted(manager.books) == ["kalshi:A", "polymarket_us:x", "polymarket_us:y"]
+    assert manager.retain(["kalshi:A", "polymarket_us:x"]) == {"polymarket_us:y"}
+    assert sorted(manager.books) == ["kalshi:A", "polymarket_us:x"]
+
+
+def test_set_venue_staleness_retunes_live_books() -> None:
+    from arb.book import BookSnapshot
+
+    manager = BookManager(staleness_limit_ns=5_000_000_000)
+    manager.apply([BookSnapshot("polymarket_us:B", (), (), None)], mono_ns=0)
+    manager.apply([BookSnapshot("kalshi:A", (), (), None)], mono_ns=0)
+    ten_s = 10_000_000_000
+
+    # Growing the poll universe widens the budget; the book that already
+    # exists must be retuned too, or it flaps STALE against the old cycle.
+    assert manager.set_venue_staleness("polymarket_us", 20_000_000_000) == {"polymarket_us:B"}
+    poly = manager.status("polymarket_us:B", now_mono_ns=ten_s)
+    kalshi = manager.status("kalshi:A", now_mono_ns=ten_s)
+    assert poly is not None and poly.valid
+    assert kalshi is not None and not kalshi.valid  # other venues untouched
+
+    # And shrinking it again tightens the live book back down.
+    manager.set_venue_staleness("polymarket_us", 1_000_000_000)
+    poly = manager.status("polymarket_us:B", now_mono_ns=ten_s)
+    assert poly is not None and not poly.valid and poly.reason is InvalidReason.STALE
+    # Direct book access (what arbmon and the UI use) agrees with the manager.
+    book = manager.get("polymarket_us:B")
+    assert book is not None and not book.status(now_mono_ns=ten_s).valid
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        manager.set_venue_staleness("polymarket_us", 0)
