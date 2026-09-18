@@ -1330,14 +1330,15 @@ async def run_ui(
                     state.broadcast({"t": "arb", "quotes": monitor.snapshot()})
                     if trader is not None:
                         ts_ms = time.time_ns() // 1_000_000
+                        now_mono_ns = time.monotonic_ns()
                         new_trades = []
                         for pair in monitor.affected(dirty_ids):
-                            d1, d2 = monitor.best_quotes(pair)
-                            best = (
-                                d1 if d1.net_per_contract_ticks >= d2.net_per_contract_ticks else d2
+                            # Quotes net of what paper already took, the fill,
+                            # and the record of what it consumed: one call,
+                            # so none of the three can be skipped.
+                            trade = trader.trade_pair(
+                                monitor, pair, ts_ms=ts_ms, now_mono_ns=now_mono_ns
                             )
-                            # A suspended trader declines everything itself.
-                            trade = trader.consider(pair, best, ts_ms=ts_ms)
                             if trade is not None:
                                 new_trades.append(trade)
                         if new_trades:
