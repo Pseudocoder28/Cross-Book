@@ -63,6 +63,7 @@ pair proposal/backfill are runtime state, not argv.
 - `/control` is the operating surface: recorder on/off, paper suspend/resume and live risk limits, the Kalshi and Polymarket US universes, tracked-pairs top N, and the jobs (doctor, propose, backfill, replay, cancel). Every action goes through one executor (`POST /api/control/{action}`), which owns the read-only refusal, the server-side arm-then-confirm and the audit row. G3 actions arm first and show the sentence that gets recorded.
 - `uv run arb replay [RUN_ID] [--pairs-top N] [--paper ...] [--persist]` replays a recorded run through the identical pipeline (default: latest run). It is also a machine interface: `ControlPlane._apply_replay` builds this argv, so flag names, defaults and the optional positional are a contract pinned by `tests/test_cli.py`.
 - Grafana at http://127.0.0.1:3000 (admin/admin) has the provisioned "ARB — Data Plane" dashboard; Prometheus scrapes `arb ui`'s own `GET /metrics` and nothing else
+- `uv run python scripts/preview_ui.py [--port 8765] [--failures]` serves the real UI against simulated books (Kalshi streamed, Polymarket US polled; `--failures` cycles a seq gap and a crossed book) with no venues, keys or database — for designing and judging the MONITOR depth panel's motion. `uv run python scripts/snap.py OUT [--selector #depth] [--frames N] [--market ID] [--until JS] [--reduced]` screenshots or filmstrips it in headless Chrome. Dev tools, not `arb` commands.
 - Keep this list current as commands and controls are added.
 
 ## Where decisions live
