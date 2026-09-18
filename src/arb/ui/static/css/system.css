@@ -1,155 +1,199 @@
-/* css/system.css — styles that belong to the SYSTEM page only.
-   Loaded after style.css, so equal-specificity rules here win.
+/* css/system.css — SYSTEM (/system): verdict, pipeline, checks.
 
-   The shared components do the work: .sys-block, .sys-title, .kv, .runs and
-   the whole .poly-* down-screen are style.css's. This file is the page frame
-   (a card grid inside one route instead of two panels on the old workspace),
-   plus the two re-layouts that let the ported markup live in a card. */
+   One colour language, used nowhere else on the page for anything else:
+     ok    green      working
+     warn  amber      working, look at it
+     fail  red        broken now
+     off   grey       deliberately not running
+     wait  dim grey   no data yet
+   A level sets --lv on its element; lights, tags and edges all read it. */
 
-.sys-page {
-  height: 100%;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: 24px minmax(0, 1fr) 20px;
-}
+.sys-page { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--panel); }
 
-.sys-page .des-head { grid-row: 1; }
+.lv-ok   { --lv: var(--bid); }
+.lv-warn { --lv: var(--amber); }
+.lv-fail { --lv: var(--ask); }
+.lv-off  { --lv: var(--dim); }
+.lv-wait { --lv: #3a3f47; }
 
-.sys-body {
-  grid-row: 2;
-  min-height: 0;
-  overflow: auto;
-  padding: 8px 10px 4px;
-}
+.sys-headstat { max-width: 60%; }
 
-.sys-page .des-foot {
-  grid-row: 3;
-  margin: 0;
-  padding: 0 10px;
-  line-height: 20px;
-  background: var(--raised);
-  /* One 20px grid row: clip rather than wrap, so a narrow window loses the
-     tail of the note instead of pushing the cards' scroll area off-screen.
-     The chord label is leftmost, so it is the last thing to go. */
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-/* AWAITING DATA is a banner, not a row: it carries no .kv, so select-to-copy
-   never mistakes it for data. */
-.sys-banner {
-  height: 16px; line-height: 16px;
-  margin-bottom: 6px;
-  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-}
-
-/* ---------- the card grid ---------- */
-
-.sys-cards {
-  display: grid;
-  gap: 10px 18px;
-  grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.25fr) minmax(250px, 1.05fr);
-  grid-template-rows: auto auto minmax(0, 1fr);
-  grid-template-areas:
-    "engine clock  kalshi"
-    "rec    clock  poly"
-    "db     obs    poly";
-  align-items: start;
-}
-
-.a-engine { grid-area: engine; }
-.a-rec    { grid-area: rec; }
-.a-db     { grid-area: db; }
-.a-clock  { grid-area: clock; }
-.a-kalshi { grid-area: kalshi; }
-.a-poly   { grid-area: poly; }
-.a-obs    { grid-area: obs; }
-
-/* a card is a .sys-block with a seam under its title */
-.sys-card { overflow: visible; }
-
-.sys-head-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 3px;
-  border-bottom: 1px solid var(--hair);
-}
-
-.sys-sub {
-  height: 16px; line-height: 16px;
-  color: var(--dim);
-  font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
-}
-
-/* The teaching text. Wraps (every other line on this page is nowrap), because
-   the point of it is to be read once, not scanned. */
-.sys-note {
-  margin: 5px 0 0;
-  color: var(--ink2);
-  font-size: 10px; line-height: 14px; letter-spacing: 0.04em;
-  white-space: normal;
-}
-
-.sys-link { color: var(--amber); text-decoration: none; }
-.sys-link:hover, .sys-link:focus-visible { text-decoration: underline; }
-
-/* ---------- database: which run is being written right now ---------- */
-
-#sys-runs { max-height: 168px; overflow: auto; }
-
-.runs .kv .run-id { flex: 1; min-width: 0; }
-
-.runs .run-tag {
-  width: 4ch;
-  color: var(--bid);
-  font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
-  text-align: left;
-}
-
-.runs .kv.run-live .run-id { color: var(--ink); }
-
-/* ---------- clock & latency ---------- */
-
-.a-clock .sys-banner {
-  margin: 2px 0 4px;
-  color: var(--bid);
-}
-
-.a-clock .sys-banner.warn { color: var(--amber); }
-.a-clock .sys-banner.quiet-line { color: var(--dim); }
-
-/* ---------- venue cards ---------- */
-
-/* .poly-body is the old full-panel down-screen: a centred, vertically
-   stretched hero. Inside a diagnostics card it is a three-line header, so it
-   is re-laid-out here rather than by editing the ported markup. */
-.a-poly .poly-body {
+/* the light: a lit dot. OK breathes faintly, a problem blinks. */
+.sl {
   flex: none;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: 2px;
-  padding: 2px 0 6px;
-  text-align: left;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--lv);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lv) 22%, transparent), 0 0 8px color-mix(in srgb, var(--lv) 55%, transparent);
+}
+.lv-off .sl, .lv-wait .sl { box-shadow: none; }
+.lv-fail .sl { animation: sl-blink 1s steps(2, jump-none) infinite; }
+@keyframes sl-blink { 50% { opacity: 0.25; } }
+
+/* ---------- verdict ---------- */
+
+.sysv {
+  flex: none;
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hair);
+  border-left: 3px solid var(--lv);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--lv) 9%, transparent), transparent 55%),
+    var(--panel);
+}
+.sysv > .sl { width: 14px; height: 14px; }
+.sysv-text { min-width: 0; flex: 1; }
+.sysv-head {
+  color: var(--lv);
+  font-size: 20px; font-weight: 700; line-height: 24px; letter-spacing: 0.04em;
+}
+.lv-wait .sysv-head, .lv-off .sysv-head { color: var(--ink2); }
+.sysv-line {
+  color: var(--ink2); font-size: 11px; line-height: 16px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sysv-rate { flex: none; width: 190px; text-align: right; }
+.sysv-spark { display: block; width: 190px; height: 28px; }
+.sysv-ratenum { color: var(--ink); font-size: 11px; font-weight: 700; line-height: 14px; letter-spacing: 0.06em; }
+
+/* ---------- pipeline ----------
+   feeds → books → engine → paper, and recorder → database underneath. A
+   stage's left connector is its ::before; while messages are arriving the
+   dashes travel toward it. */
+
+.sysp {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: auto auto;
+  column-gap: 34px; row-gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--hair);
+  background: var(--bg);
+}
+.s-k { grid-area: 1 / 1; } .s-p { grid-area: 2 / 1; }
+.s-b { grid-area: 1 / 2 / 3 / 2; align-self: center; }
+.s-e { grid-area: 1 / 3; } .s-t { grid-area: 1 / 4; }
+.s-r { grid-area: 2 / 3; } .s-d { grid-area: 2 / 4; }
+
+.sysp-node {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: "l name" "l fig" "l sub";
+  column-gap: 10px; align-items: center;
+  padding: 7px 10px;
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-left: 2px solid var(--lv);
+  border-radius: 0;
+  color: inherit; font: inherit; text-align: left;
+  cursor: pointer;
+}
+.sysp-node:hover { background: var(--raised); }
+.sysp-node:focus-visible { outline: 1px solid var(--amber); outline-offset: -1px; }
+.sysp-node .sl { grid-area: l; }
+.sysp-name { grid-area: name; color: var(--ink2); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; line-height: 13px; }
+.sysp-fig { grid-area: fig; color: var(--ink); font-size: 14px; font-weight: 700; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lv-fail .sysp-fig, .lv-warn .sysp-fig { color: var(--lv); }
+.lv-off .sysp-fig, .lv-wait .sysp-fig { color: var(--ink2); }
+.sysp-sub { grid-area: sub; color: var(--dim); font-size: 10px; line-height: 13px; letter-spacing: 0.04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* connectors: everything but the two feeds is fed from its left */
+.sysp-node:not(.s-k):not(.s-p)::before {
+  content: "";
+  position: absolute; right: 100%; top: 50%;
+  width: 34px; height: 1px; margin-right: 2px;
+  background: repeating-linear-gradient(90deg, var(--dim) 0 5px, transparent 5px 10px);
+}
+.sysp-node:not(.s-k):not(.s-p)::after {
+  content: "";
+  position: absolute; right: calc(100% + 2px); top: calc(50% - 3px);
+  border: 3px solid transparent; border-left: 5px solid var(--dim); border-right: 0;
+}
+.sysp-node.flow:not(.s-k):not(.s-p)::before { animation: sysp-flow 0.7s linear infinite; }
+@keyframes sysp-flow { to { background-position: 10px 0; } }
+/* the recorder is fed by the feeds, not by the engine above it: say so */
+.s-r::before { background: repeating-linear-gradient(90deg, #3a3f47 0 5px, transparent 5px 10px) !important; }
+
+/* ---------- checks + detail ---------- */
+
+.sys-main {
+  flex: 1; min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr);
+  gap: 1px;
+  background: var(--hair);
+}
+.sys-listwrap, .sys-detail { background: var(--panel); min-height: 0; min-width: 0; }
+.sys-listwrap { display: flex; flex-direction: column; }
+.sys-colhead, .sysd-label {
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em; line-height: 16px;
+}
+.sys-colhead { flex: none; padding: 4px 16px; background: var(--raised); }
+
+.sys-checks { flex: 1; min-height: 0; overflow-y: auto; outline: none; }
+.sys-checks:focus-visible { box-shadow: inset 0 0 0 1px var(--amber); }
+
+.sysc {
+  display: grid;
+  grid-template-columns: 8px 62px 168px minmax(0, 1fr) auto;
+  column-gap: 12px; align-items: center;
+  height: 30px;
+  padding: 0 16px 0 14px;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--hair);
+  cursor: pointer;
+}
+.sysc:hover { background: var(--raised); }
+.sysc.sel { background: var(--raised); border-left-color: var(--amber); }
+.sysc-tag {
+  color: var(--lv);
+  font-size: 9px; font-weight: 700; letter-spacing: 0.1em;
+}
+.lv-wait .sysc-tag { color: var(--dim); }
+.sysc-name { color: var(--ink); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; white-space: nowrap; }
+.sysc-reading { color: var(--ink2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lv-warn .sysc-reading, .lv-fail .sysc-reading { color: var(--ink); }
+.sysc-go { color: var(--dim); font-size: 10px; letter-spacing: 0.06em; white-space: nowrap; }
+.sysc.sel .sysc-go { color: var(--amber); }
+
+.sys-detail { overflow-y: auto; padding: 12px 16px 16px; border-top: 2px solid var(--lv); }
+.sysd-head { display: flex; align-items: center; gap: 10px; }
+.sysd-name { color: var(--ink); font-size: 13px; font-weight: 700; letter-spacing: 0.06em; }
+.sysd-tag { margin-left: auto; color: var(--lv); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; }
+.sysd-reading { margin-top: 6px; color: var(--lv); font-size: 12px; font-weight: 700; line-height: 17px; letter-spacing: 0.02em; }
+.lv-ok .sysd-reading, .lv-off .sysd-reading, .lv-wait .sysd-reading { color: var(--ink); }
+.sysd-label { margin-top: 14px; }
+.sysd-fix {
+  margin-top: 12px; padding: 0 10px 8px;
+  border: 1px solid var(--lv);
+  background: color-mix(in srgb, var(--lv) 7%, transparent);
+}
+.sysd-fix .sysd-label { margin-top: 6px; color: var(--lv); }
+/* Sentence case on purpose: these two are read, not scanned. */
+.sysd-fixtext, .sysd-what { color: var(--ink); font-size: 12px; line-height: 18px; text-transform: none; letter-spacing: 0; }
+.sysd-what { color: var(--ink2); }
+.sysd-nums .kv, .sysd-runs .kv { height: 18px; line-height: 18px; border-bottom: 1px solid var(--hair); }
+.sysd-nums .v { color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.sysd-runs .run-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; text-transform: none; letter-spacing: 0; }
+.sysd-runs .run-tag { color: var(--bid); font-size: 9px; font-weight: 700; letter-spacing: 0.08em; margin-left: auto; }
+.sysd-runs .run-live .run-id { color: var(--ink); }
+.sysd-go {
+  margin-top: 14px;
+  padding: 3px 10px;
+  background: var(--raised); color: var(--amber);
+  border: 1px solid var(--amber); border-radius: 0;
+  font: 700 10px/16px var(--mono); letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.sysd-go:hover { background: var(--bg); }
+
+@media (max-width: 1100px) {
+  .sys-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  .sysc { grid-template-columns: 8px 62px 150px minmax(0, 1fr); }
+  .sysc-go { display: none; }
 }
 
-.a-poly .poly-main { font-size: 12px; color: var(--ink); }
-.a-poly .poly-sub { white-space: normal; }
-.a-poly .poly-live { font-size: 10px; letter-spacing: 0.02em; }
-
-#sys-k-detail, #sys-k-tr { overflow: hidden; text-overflow: ellipsis; }
-
-/* ---------- narrow windows: the grid collapses to two columns ---------- */
-
-@media (max-width: 1340px) {
-  .sys-cards {
-    grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr);
-    grid-template-rows: auto auto auto auto;
-    grid-template-areas:
-      "engine clock"
-      "rec    clock"
-      "db     kalshi"
-      "db     poly"
-      "obs    poly";
-  }
-}
+.sys-page > .des-foot { flex: none; margin-top: 0; padding: 0 16px; line-height: 18px; border-top: 1px solid var(--hair); white-space: nowrap; overflow: hidden; }

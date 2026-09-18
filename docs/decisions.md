@@ -977,3 +977,52 @@ new connection gets the current quotes even when nothing is watched — /arb
 only heard about quotes when a watched book moved, so an emptied watch set
 left stale rows on screen for good.
 
+## A paper fill consumes the liquidity it took (2026-09-18)
+
+A paper fill never reaches the venue, so the size it took keeps sitting in the
+book, and the trader re-read the raw book on every change. Live: a 16-contract
+Polymarket bid was filled against six times in a minute — 100 contracts out of
+16, stopped only by the per-pair cap — and the ledger's expected net was
+inflated by the same factor.
+
+`arb.taken` keeps, per (market, side, price), what paper fills have consumed;
+the trader is quoted off ladders net of it, while /arb still shows the market
+as it is. The rules are wrong only against the book: available = displayed −
+taken; taken shrinks when the venue shows less (so a later increase is
+genuinely new); a price that leaves the ladder is forgotten, but an empty side
+is a resync, not a pulled market. It assumes a maker would NOT have
+replenished a level we really hit, which undercounts fills; the alternative
+overcounts them. `PaperTrader.trade_pair` is the single entry point for live
+and replay — quote net, take, record — and it also declines any pair with a
+missing or structurally invalid book (`stale` alone is not structural).
+
+## A Kalshi seq that goes backwards is a new subscription, not a gap (2026-09-18)
+
+Kalshi restarts at `sid=1, seq=1` on every connection (verified in the
+recorder; docs/venue-notes.md). The adapter outlives the connection and
+compared that seq=1 with the old connection's last seq, called it a gap, and
+asked for a resync — which is a reconnect, which restarts at seq=1. From the
+first reconnect of a run (a 30s stall on quiet markets is enough) the socket
+was torn down within a second of every connect, forever, and every Kalshi book
+sat at `seq_gap`. Earlier in the week this was misread as Kalshi rate-limiting
+rapid watch-set changes. Only `seq > last + 1` is a gap now.
+
+## SYSTEM gives a verdict, not counters (2026-09-18)
+
+The page was seven cards of raw counters with a paragraph under each, and
+never said whether anything was wrong: the reconnect loop above ran under a
+green "KALSHI LIVE" for days. It is now a verdict line, a pipeline picture
+(feeds → books → engine → paper; recorder → database) and one plain-English
+check per part, problems first; the selected check explains what it is, the
+numbers behind it and the fix, and ⏎ opens the page where the fix lives. Every
+judgement is a pure function in `pages/system-model.js`, tested in node.
+
+- A level is a judgement about NOW: a sequence gap that recovered stays OK
+  ("6 gaps recovered"), only a book untrusted right now warns. Counters that
+  only ever grow are read as a two-minute delta.
+- OFF (paper suspended, nothing watched) is a choice and never counts against
+  the verdict.
+- The Kalshi check reads the connection count, because "last frame 2s ago"
+  looks healthy in a reconnect loop — every reconnect delivers snapshots.
+- Sentence case for the explanation and the fix: they are read, not scanned.
+

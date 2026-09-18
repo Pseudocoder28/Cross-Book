@@ -493,3 +493,62 @@ def test_the_depth_panel_prints_the_book_it_was_sent_and_never_a_mid_it_cannot_s
 
         errors = [c for c in page.console() if c.level == "error"]
         assert not errors, errors
+
+
+# --------------------------------------------------------------------------
+# 8. SYSTEM gives a verdict, and a problem leads it
+# --------------------------------------------------------------------------
+
+
+@needs_chrome
+def test_system_gives_a_verdict_and_a_dropped_recording_leads_it() -> None:
+    """SYSTEM used to print counters and leave the judgement to the reader.
+    It now has to say, in words, whether anything is wrong — and when the
+    recorder starts losing messages, that must become the headline and the
+    first check, with the fix attached, without anyone hunting for it."""
+    state = TerminalState()
+    # Healthy venues, so the recorder is the only thing that can go wrong.
+    state.kalshi_status = lambda: ("live", "last frame 200ms ago")  # type: ignore[method-assign]
+    state.polymarket_status = lambda: ("polled", "REST polling 3 markets")  # type: ignore[method-assign]
+    stats = {
+        "t": "stats",
+        "msg_total": 500,
+        "msg_rate_1s": 12.0,
+        "parse_errors": 0,
+        "seq_gaps": 0,
+        "ws_clients": 1,
+        "uptime_s": 300.0,
+        "latency_ms": {"last": 40.0, "median": 38.0, "p95": 60.0, "n": 200},
+        "rtt_ms": 70.0,
+        "clock_skew_ms": 3.0,
+        "recorder": {"enqueued": 500, "dropped": 0},
+    }
+    with terminal(state) as page:
+        page.goto("/system")
+        page.wait_ws_live()
+        state.broadcast(stats)
+        page.wait_for(
+            'document.querySelector("#sysc-recorder .sysc-tag").textContent === "OK"',
+            "the recorder check to read OK",
+        )
+        page.wait_for(
+            'document.querySelector("#sysc-kalshi .sysc-tag").textContent === "OK"',
+            "the status poll to land",
+        )
+        assert "PROBLEM" not in page.text(".sysv-head")
+
+        state.broadcast({**stats, "recorder": {"enqueued": 900, "dropped": 25}})
+        page.wait_for(
+            'document.querySelector(".sysv-head").textContent === "1 PROBLEM"',
+            "the verdict to name the problem",
+        )
+        assert "RECORDER" in page.text(".sysv-line")
+        first = page.eval('document.querySelector("#sys-checks .sysc").id')
+        assert first == "sysc-recorder", "problems sort to the top"
+        assert "25 MESSAGES LOST" in page.text("#sysc-recorder .sysc-reading")
+        # Nobody picked a row, so the detail pane follows the worst check.
+        assert page.text(".sysd-name") == "RECORDER"
+        assert page.eval('!document.querySelector(".sysd-fix").hidden')
+
+        errors = [c for c in page.console() if c.level == "error"]
+        assert not errors, errors

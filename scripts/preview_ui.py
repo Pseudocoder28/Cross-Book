@@ -297,8 +297,11 @@ class PreviewState(TerminalState):
 def run_sim(st: PreviewState) -> None:
     kalshi = [s for s in st.sims if s.venue == "kalshi"]
     poly = [s for s in st.sims if s.venue == "polymarket_us"]
+    last_poll = time.monotonic()
     next_poll = {s.market_id: time.monotonic() + rng.uniform(1, 6) for s in poly}
-    last_stats = time.monotonic()
+    last_stats = started = time.monotonic()
+    last_total = 0
+    polls = 0
     total_rate = sum(s.rate for s in kalshi)
     while True:
         time.sleep(rng.expovariate(total_rate))
@@ -332,6 +335,8 @@ def run_sim(st: PreviewState) -> None:
         for ps in poly:
             if now >= next_poll[ps.market_id]:
                 next_poll[ps.market_id] = now + rng.uniform(*POLL_GAP_S)
+                polls += 1
+                last_poll = now
                 deltas = ps.repoll()
                 st.send(ps.payload())
                 for side, p, dq in deltas:
@@ -360,10 +365,21 @@ def run_sim(st: PreviewState) -> None:
             st.send({"t": "control", "control": ctl})
             w = sorted(st.lat[-LATENCY_KEEP:])
             n = len(w)
+            rate, last_total = float(st.msg_total - last_total), st.msg_total
             st.send(
                 {
                     "t": "stats",
                     "msg_total": st.msg_total,
+                    "msg_rate_1s": rate,
+                    "recorder": {"enqueued": st.msg_total, "dropped": 0},
+                    "polymarket_us": {
+                        "polls": polls,
+                        "rate_limited": 0,
+                        "errors": 0,
+                        "targets": len(poly),
+                        "rate_per_s": round(len(poly) / CYCLE_S, 2),
+                        "last_poll_age_ms": (now - last_poll) * 1000,
+                    },
                     "latency_ms": {
                         "last": st.lat[-1] if st.lat else None,
                         "median": w[n // 2] if n else None,
@@ -375,7 +391,7 @@ def run_sim(st: PreviewState) -> None:
                     "parse_errors": 0,
                     "seq_gaps": 0,
                     "ws_clients": 1,
-                    "uptime_s": now,
+                    "uptime_s": now - started,
                 }
             )
 

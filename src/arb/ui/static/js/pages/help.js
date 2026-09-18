@@ -225,27 +225,44 @@ const SCREENS = {
   },
 
   system: {
-    lead: "The plumbing, one card per subsystem. This is where you look when a number "
-      + "elsewhere stops moving. Read-only diagnostics, live off the one-second stats frame "
-      + "and /api/status.",
+    lead: "Is anything wrong, and what do I do about it. The page gives a verdict, draws the "
+      + "machine as a pipeline, and lists one plain-English check per part — problems first. "
+      + "Select a check to read what it means, the numbers behind it and the fix.",
     groups: [
       {
-        name: "CARDS",
+        name: "LEVELS",
         cols: [
-          ["ENGINE", "inbound messages this run and the last second's rate, plus parse errors "
-            + "and sequence gaps — both should stay at zero, and turn amber when they do not"],
-          ["RECORDER", "whether this run is writing raw messages to Postgres, and how many "
-            + "were enqueued versus dropped"],
-          ["DATABASE", "connection state, total recorded rows and the row count per run id — "
-            + "those ids are what `arb replay` takes"],
-          ["CLOCK & LATENCY", "one-way latency percentiles, keepalive RTT and the clock-skew "
-            + "estimate derived from them"],
-          ["KALSHI · WEBSOCKET", "the streamed venue's transport state"],
-          ["POLYMARKET US", "the polled venue: poll count, 429 rate-limit responses, errors "
-            + "and the age of the last successful book"],
-          ["OBSERVABILITY", "where the same numbers live outside the terminal — the Prometheus "
-            + "metric names and the provisioned Grafana dashboard"],
+          ["OK", "working"],
+          ["LOOK", "working, but something you should look at; the detail pane says what to do"],
+          ["PROBLEM", "broken now: data or results are wrong or missing"],
+          ["OFF", "deliberately not running (paper suspended, nothing watched) — never counts "
+            + "against the verdict"],
+          ["WAIT", "no data yet; normal for the first seconds after start"],
         ],
+      },
+      {
+        name: "CHECKS",
+        cols: [
+          ["THIS SCREEN", "this browser tab's connection to the server"],
+          ["KALSHI FEED", "the WebSocket that pushes every Kalshi book change"],
+          ["POLYMARKET US FEED", "the REST poller; POLLED is its healthy state. Warns when one "
+            + "full cycle takes over a minute — quotes that old are history, not prices"],
+          ["ORDER BOOKS", "books good / watched, books untrusted right now, and sequence gaps. "
+            + "A gap that recovered is routine and stays OK; only a book that is untrusted NOW warns"],
+          ["WATCH SET", "pairs marked to watch versus pairs actually quoting; the difference is "
+            + "markets a venue says have settled"],
+          ["ARB ENGINE", "pairs priced, how many have an edge after fees, how many clear the paper floor"],
+          ["PAPER TRADER", "trading or suspended, trades, budget deployed, and how often it "
+            + "declined a pair because a book was untrusted"],
+          ["RECORDER", "whether raw messages are being saved; messages lost in the last two "
+            + "minutes is a PROBLEM"],
+          ["DATABASE", "Postgres connection, rows stored, and the recorded runs"],
+          ["CLOCK & LATENCY", "venue-to-here message time, and whether this machine's clock "
+            + "agrees with the venue's. A disagreeing clock only distorts the latency display"],
+        ],
+        note: "\u2191\u2193 selects a check, \u23CE opens the page where its fix lives, and clicking a "
+          + "pipeline stage jumps to that stage's check. The bars top-right are messages per "
+          + "second over the last two minutes; the dashes between stages move while data flows.",
       },
     ],
   },

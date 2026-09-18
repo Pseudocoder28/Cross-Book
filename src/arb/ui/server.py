@@ -175,6 +175,10 @@ def no_control_payload(*, run_id: str, recording: bool) -> dict[str, Any]:
             "limits": PaperLimits().payload(),
             "notional_ticks": 0,
             "skipped_suspended": 0,
+            "trades": 0,
+            "positions": 0,
+            "skipped_invalid": 0,
+            "taken_levels": 0,
         },
         "pairs_top": 0,
         "tracked_pairs": 0,
@@ -515,6 +519,7 @@ class ServerState:
         # process that has no controls (control_payload still answers).
         self.control: ControlPlane | None = None
         self.rtt_fn: Callable[[], float | None] | None = None
+        self.kalshi_connects_fn: Callable[[], int] | None = None
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
         self._dirty: set[str] = set()
@@ -896,6 +901,9 @@ class ServerState:
                 "n": n,
             },
             "rtt_ms": rtt_ms,
+            # 1 is a socket that never dropped; a number that keeps climbing is
+            # a reconnect loop, which "last frame 2s ago" cannot show.
+            "kalshi_connects": self.kalshi_connects_fn() if self.kalshi_connects_fn else None,
             "clock_skew_ms": clock_skew_ms,
             "parse_errors": self.parse_errors,
             "seq_gaps": self.seq_gaps,
@@ -1203,6 +1211,7 @@ async def run_ui(
 
         source = KalshiWSSource(config=config, run=run, market_tickers=tickers)
         state.rtt_fn = source.rtt_ms
+        state.kalshi_connects_fn = lambda: source.connects
         adapter = KalshiMarketDataAdapter()
 
         # Everything mutable is now built: hand the control plane its handles.

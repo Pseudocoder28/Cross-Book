@@ -971,6 +971,12 @@ class ControlPlane:
                 "limits": (trader.limits if trader is not None else PaperLimits()).payload(),
                 "notional_ticks": trader.notional_ticks if trader is not None else 0,
                 "skipped_suspended": trader.skipped_suspended if trader is not None else 0,
+                # What SYSTEM's paper check reads: how much the book has done,
+                # and how often it refused a pair for a broken book.
+                "trades": len(trader.trades) if trader is not None else 0,
+                "positions": len(trader.positions) if trader is not None else 0,
+                "skipped_invalid": trader.skipped_invalid if trader is not None else 0,
+                "taken_levels": trader.taken.levels if trader is not None else 0,
             },
             "pairs_top": self.pairs_top,
             "tracked_pairs": len(self._host.arbmon.pairs) if self._host.arbmon else 0,
