@@ -136,11 +136,17 @@ const SCREENS = {
           ["DIRECTION", "which venue's YES is bought and which venue's NO"],
           ["K BID/ASK", "the Kalshi leg's best bid and ask"],
           ["P BID/ASK", "the Polymarket US leg's best bid and ask"],
-          ["BOOKS", "each leg's book state: valid, quiet, or the structural reason it is not"],
+          ["K · P AGE", "how current each price is, judged the way its venue delivers it. Kalshi is "
+            + "streamed, so it reads LIVE however long ago the book last changed — a market nobody "
+            + "touched for ten minutes is still exact. Polymarket US is polled one market at a "
+            + "time, so it reads the quote's age in seconds: that price is a photograph, and an "
+            + "edge against an old one may already be gone. Amber marks the leg with a problem: "
+            + "FROZEN (Kalshi socket not live), an overdue poll, or the structural reason a book "
+            + "is unusable"],
         ],
-        note: "Selecting a row shows both legs, the fee model in play and the reverse "
-          + "direction's numbers. The screen is empty until pairs are confirmed and "
-          + "`arb ui` is restarted with --pairs-top > 0.",
+        note: "Selecting a row shows both legs, the fee model in play, how current each price "
+          + "is and the reverse direction's numbers. The screen is empty until a pair is "
+          + "confirmed on /pairs and watched with T.",
       },
     ],
   },

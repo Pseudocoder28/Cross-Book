@@ -1074,3 +1074,43 @@ What changed, and why:
 - **Explanations are one sentence in sentence case.** Labels are scanned;
   sentences are read.
 
+
+## /arb says how current each price is, judged the way its venue delivers it (2026-09-18)
+
+The BOOKS column printed `K:QUIET P:OK` on 20 of 21 rows. It was true and it
+pointed at the wrong leg. Both legs were judged by one rule — "updated within
+the staleness limit" — with a 5s limit for Kalshi and three poll cycles (193s
+at 29 targets) for Polymarket US. Checked against the venues on the day: all 21
+"quiet" Kalshi books matched Kalshi's own REST bid/ask to the tick (most of
+those markets had zero 24h volume; nobody had touched them in seven minutes),
+while the Polymarket quotes reading OK were 0.8s to 63s old.
+
+- **Kalshi is streamed, so age is not freshness.** A gapless book on a live
+  socket is exact however long ago it changed. It reads `LIVE`; the detail line
+  adds "NO CHANGE FOR 6m 48s", which is a fact about the market, not a warning
+  about the feed. `LIVE` is never claimed over a socket `/api/status` does not
+  call live: that reads `FROZEN`, because the book is whatever it was when the
+  socket dropped. (The status poll is 10s, the same lag the header chip has.)
+- **Polymarket US is polled, so age IS freshness.** The cell prints the quote's
+  age in seconds and it ticks. Amber once the age passes 1.5 poll cycles or the
+  server calls the book stale — the poll is overdue, which is the one state
+  where something is wrong rather than merely slow. 1.0 cycles would flap on a
+  slow response or a single rate-limit retry.
+- **Colour is spent on the exception, on the half that has it.** Healthy is the
+  quiet ink: a column that is green on every row teaches the eye to skip it.
+  The two halves colour independently, so amber says which leg.
+- **No threshold pretends to know when an old quote is too old.** That is the
+  paper trader's `max_book_age_ms` question (PROGRESS.md), not a display
+  constant. The column shows the number; measured over 685 recorded paper
+  trades the Polymarket quote behind a fill was a median 17s old (p90 45s), and
+  all 720 trades went the same direction — buy YES on Kalshi, sell into a
+  Polymarket bid — which is what a stale-high polled bid against a live
+  streamed ask produces.
+- **Client only.** Every book frame already carries `age_ms` and the page keeps
+  `recvAt`, the same source MONITOR and DES age from, so the arb payload did not
+  change. A 1s timer rewrites the age words in place; it does not rebuild the
+  table under the cursor. The judgement is `pages/arb-model.js`, pinned by
+  `tests/js/arb-model.test.mjs` and one browser test.
+- The server-side model is untouched: `stale` is still a `Book` invalid reason
+  and the SYSTEM check and the DEPTH banner still say QUIET, where the words
+  "last update 6m ago" sit right next to it.

@@ -82,10 +82,18 @@
    class also brings a 2px transparent left border the arb grid never had. */
 .arb-row.mon-row { border-left: 0; }
 
-/* "K:QUIET P:QUIET" is wider than the 64px books column, and it inherited the
-   row's 24px line-height, so the wrapped second line printed on top of the
-   next row. Two 11px lines fit inside the row instead. */
-.arb-row .ar-books { font-size: 9px; line-height: 11px; align-self: center; }
+/* K · P AGE: how current each leg's price is (pages/arb-model.js). Healthy is
+   the quiet colour on purpose — this column is the same on every row most of
+   the time, and a column that is green everywhere teaches the eye to skip it.
+   Colour is spent on the exception only, and on the half that has it, so
+   amber says WHICH leg. The Polymarket age is the datum that varies, so it
+   gets the ink; LIVE is a constant and gets the dimmer one. */
+.aq.ok { color: var(--ink2); }
+.aq.num.ok { color: var(--ink); }
+.aq.wait { color: var(--dim); }
+.aq.bad { color: var(--amber); }
+.aq-sep { color: var(--dim); padding: 0 4px; }
+.kv .v.aq { font-size: 10px; letter-spacing: 0.04em; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* Actionable: an edge the paper trader's own min-net threshold would take.
    Three signals, only one of them colour — tint, a green net, and the "▸"

@@ -688,3 +688,130 @@ def test_an_invalid_limit_cannot_be_applied_and_says_which_field() -> None:
         page.wait_for(f"!document.querySelector('{apply_sel}').disabled", "APPLY to enable")
         assert "0.50¢ → 0.60¢" in page.text("#csec-paper .cdraft")
         assert state.controls == [], "nothing is sent until APPLY is pressed"
+
+
+# --------------------------------------------------------------------------
+# 12. /arb says how current each price is, judged the way its venue delivers it
+# --------------------------------------------------------------------------
+
+K_LEG = "kalshi:KXGAS-4.80"
+P_LEG = "polymarket_us:usgas-gt4pt80"
+
+
+def _leg_book(market_id: str, age_ms: float, **extra: object) -> dict[str, object]:
+    return {
+        **_book([[5000, 20 * C]], [[5100, 258 * C]], age_ms=age_ms, **extra),
+        "market_id": market_id,
+    }
+
+
+def _arb_frame(*, k_reason: str | None = "stale") -> dict[str, object]:
+    def leg(market_id: str, reason: str | None, bid: int, ask: int) -> dict[str, object]:
+        return {
+            "market_id": market_id,
+            "ticker": market_id.split(":", 1)[1],
+            "has_book": True,
+            "valid": reason is None,
+            "reason": reason,
+            "best_bid": [bid, 20 * C],
+            "best_ask": [ask, 258 * C],
+        }
+
+    def edge(direction: str, qty: int) -> dict[str, object]:
+        return {
+            "direction": direction,
+            "qty": qty,
+            "contracts": qty / C,
+            "gross_per_contract_ticks": 1900 if qty else 0,
+            "fee_per_contract_ticks": 325 if qty else 0,
+            "net_per_contract_ticks": 1575 if qty else 0,
+            "net_ticks": 15750 if qty else 0,
+            "fee_ticks": 3250 if qty else 0,
+            "legs": [],
+        }
+
+    return {
+        "t": "arb",
+        "quotes": [
+            {
+                "pair_id": 98,
+                "label": "US gas above $4.80",
+                "score": 0.99,
+                "kalshi": leg(K_LEG, k_reason, 5000, 5100),
+                "polymarket_us": leg(P_LEG, None, 7000, 9800),
+                "fee_info": {},
+                "best": edge("yes_a_no_b", 10 * C),
+                "other": edge("yes_b_no_a", 0),
+                "ts_ms": int(time.time() * 1000),
+            }
+        ],
+    }
+
+
+_AGE_CELL = 'document.querySelector("#arb-rows .ar-books")'
+
+
+@needs_chrome
+def test_arb_reads_a_quiet_kalshi_book_as_live_and_a_polled_quote_by_its_age() -> None:
+    """The old BOOKS column printed K:QUIET over a Kalshi book that matched the
+    venue to the tick, and P:OK over a Polymarket quote a minute old — true,
+    and pointed at the wrong leg. Kalshi is streamed, so seven minutes without
+    a change is a market nobody touched; Polymarket US is polled, so its age
+    IS its freshness, and it has to be a number that moves.
+
+    Amber goes to the half that has the problem: an overdue poll colours the
+    Polymarket age and leaves LIVE alone. And LIVE is never claimed over a
+    socket that is not live — the stub's default Kalshi state is "connecting",
+    which is the second half of this test."""
+    state = TerminalState()
+    state.kalshi_status = lambda: ("live", "last frame 200ms ago")  # type: ignore[method-assign]
+    # 20 targets at 0.5/s: one round-robin is 40s, overdue past 60s
+    stats = {"t": "stats", "polymarket_us": {"targets": 20, "rate_per_s": 0.5}}
+    with terminal(state) as page:
+        page.goto("/arb")
+        page.wait_ws_live()
+        state.broadcast(stats)
+        state.broadcast(_leg_book(K_LEG, 408_300.0, valid=False, reason="stale"))
+        state.broadcast(_leg_book(P_LEG, 34_200.0))
+        state.broadcast(_arb_frame())
+        page.wait_for(
+            f"{_AGE_CELL} && /^LIVE·3[4-9]s$/.test({_AGE_CELL}.textContent)",
+            "the age cell to read LIVE and the quote's age",
+        )
+        assert page.eval(f"{_AGE_CELL}.children[0].className") == "aq ok"
+        assert page.eval(f"{_AGE_CELL}.children[2].className") == "aq num ok"
+        assert "NO CHANGE FOR 6m 4" in _text(page, "ad-kbook")
+        assert _text(page, "ad-kbook").startswith("LIVE · STREAMED")
+        assert _text(page, "ad-pbook").startswith("POLLED 3")
+        assert "RE-READ EVERY 40s" in _text(page, "ad-pbook")
+
+        # an age that does not move is not an age
+        first = page.eval(f"{_AGE_CELL}.textContent")
+        page.wait_for(f'{_AGE_CELL}.textContent !== "{first}"', "the age to tick")
+
+        # the poll falls behind: amber on the Polymarket half, and only there
+        state.broadcast(_leg_book(P_LEG, 70_000.0))
+        page.wait_for(
+            f'{_AGE_CELL}.children[2].className === "aq num bad"', "the overdue poll to go amber"
+        )
+        assert page.eval(f"{_AGE_CELL}.children[0].className") == "aq ok"
+        assert "OVERDUE" in _text(page, "ad-pbook")
+
+        errors = [c for c in page.console() if c.level == "error"]
+        assert not errors, errors
+
+    # The stub's own Kalshi state: "connecting". The book is whatever it was
+    # when the socket dropped, so the cell must not say LIVE.
+    dropped = TerminalState()
+    with terminal(dropped) as page:
+        page.goto("/arb")
+        page.wait_ws_live()
+        dropped.broadcast(_leg_book(K_LEG, 3_000.0))
+        dropped.broadcast(_leg_book(P_LEG, 2_000.0))
+        dropped.broadcast(_arb_frame(k_reason=None))
+        page.wait_for(
+            f'{_AGE_CELL} && {_AGE_CELL}.children[0].textContent === "FROZEN"',
+            "a Kalshi leg on a socket that is not live to read FROZEN",
+        )
+        assert page.eval(f"{_AGE_CELL}.children[0].className") == "aq bad"
+        assert _text(page, "ad-kbook").startswith("FEED CONNECTING · PRICE FROZEN")
