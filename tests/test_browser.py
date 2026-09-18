@@ -397,3 +397,99 @@ def test_a_leaned_on_decision_key_writes_once_not_once_per_autorepeat() -> None:
         assert len(state.decisions) == 1, (
             f"a held key wrote {len(state.decisions)} decisions: {state.decisions}"
         )
+
+
+# --------------------------------------------------------------------------
+# 7. the depth panel shows exactly the book it was sent
+# --------------------------------------------------------------------------
+
+C = 10_000  # Qty units per contract
+
+
+def _book(bids: list[list[int]], asks: list[list[int]], **extra: object) -> dict[str, object]:
+    return {
+        "t": "book",
+        "market_id": "kalshi:AAA",
+        "bids": bids,
+        "asks": asks,
+        "valid": True,
+        "reason": None,
+        "age_ms": 0.0,
+        "ts_ms": int(time.time() * 1000),
+        **extra,
+    }
+
+
+def _text(page: Browser, element_id: str) -> str:
+    return page.eval(f'document.getElementById("{element_id}").textContent')
+
+
+def _cell(page: Browser, rank: int, css: str) -> str:
+    return page.eval(
+        f"document.querySelector('#ladder .ladder-row[data-rank=\"{rank}\"] {css}').textContent"
+    )
+
+
+@needs_chrome
+def test_the_depth_panel_prints_the_book_it_was_sent_and_never_a_mid_it_cannot_stand_behind() -> (
+    None
+):
+    """The redesigned DEPTH panel is mostly canvas, and a canvas cannot be
+    read back — so every number it draws is also DOM, and this checks the DOM
+    against the frame, digit for digit, in a real browser.
+
+    Prices are ticks of $0.0001 and sizes 1e-4 contracts: a misplaced factor
+    anywhere between the wire and the ladder shows up here as a wrong string.
+    Then the book goes structurally invalid, and the panel must stop stating a
+    mid anywhere — the hero says INVALID and the ladder greys, but every level
+    stays printed, because an operator needs to see what the untrusted book
+    claims."""
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/")
+        page.wait_ws_live()
+        page.wait_for(
+            'document.body.classList.contains("has-sel")', "the first market to be selected"
+        )
+
+        state.broadcast(
+            _book([[5100, 101 * C + 2020], [5000, 4 * C + 9156]], [[5200, 18 * C + 788]])
+        )
+        page.wait_for('document.getElementById("dp-mid").textContent === "51.50"', "the mid")
+
+        assert _text(page, "dp-bb") == "51.00"
+        assert _text(page, "dp-ba") == "52.00"
+        assert _text(page, "dp-midsub").startswith("SPR 1.00¢ · 1 TICK · NO 48.50%")
+        # the touch row: YES, its NO complement, exact size and cumulative
+        assert _cell(page, 0, ".yes.c-b") == "51.00"
+        assert _cell(page, 0, ".no.c-b") == "49.00"
+        assert _cell(page, 0, ".qty.c-b") == "101.202"
+        assert _cell(page, 0, ".yes.c-a") == "52.00"
+        assert _cell(page, 0, ".no.c-a") == "48.00"
+        assert _cell(page, 0, ".qty.c-a") == "18.0788"
+        # cumulative depth is the exact running sum, fractions and all
+        assert _cell(page, 1, ".cum.c-b") == "106.1176"
+        # the ask side ends after one level, and says so without inventing one
+        end_a = page.eval(
+            "document.querySelector('#ladder .ladder-row[data-rank=\"1\"]').dataset.endA"
+        )
+        assert "END OF BOOK · 1 LVL" in end_a
+        assert _cell(page, 1, ".qty.c-a") == ""
+        label = page.eval('document.getElementById("dp-scope").getAttribute("aria-label")')
+        assert "Bids 106.1176 contracts over 2 levels" in label
+
+        state.broadcast(_book([[5100, 7 * C]], [[5200, 3 * C]], valid=False, reason="seq_gap"))
+        page.wait_for(
+            'document.getElementById("depth-banner").textContent'
+            '.indexOf("INVALID · SEQ GAP") === 0',
+            "the invalid banner",
+        )
+        assert _text(page, "dp-mid") == "INVALID"
+        assert "UNTRUSTED" in _text(page, "dp-bblbl")
+        assert page.eval('document.getElementById("ladder").classList.contains("dim")')
+        # still printed: an untrusted book is greyed, never hidden
+        assert _cell(page, 0, ".qty.c-b") == "7"
+        assert _cell(page, 0, ".yes.c-a") == "52.00"
+
+        errors = [c for c in page.console() if c.level == "error"]
+        assert not errors, errors

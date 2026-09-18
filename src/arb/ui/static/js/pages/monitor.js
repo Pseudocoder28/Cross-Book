@@ -1,5 +1,6 @@
-/* pages/monitor.js — the default screen: market monitor, depth ladder, tape
-   and the latency panel. One route ("/"), one page module.
+/* pages/monitor.js — the default screen: market monitor, depth panel, tape
+   and the latency panel. One route ("/"), one page module; the depth panel's
+   own code lives in pages/depth.js (and its arithmetic in depth-model.js).
 
    The monitor list is filterable and sortable. Rows are never rebuilt for a
    data tick: cells are updated in place (so flash-on-change survives) and the
@@ -19,14 +20,13 @@ import { state, schedule, registerRenderer, select, isSelecting } from "../core/
 import { navigate } from "../core/router.js";
 import { SCOPE, focusCommand } from "../core/keys.js";
 import {
-  nf, fmtCents, fmtMid, fmtQty, fmtSignedQty, fmtMs, fmtAge, fmtTapeTime, percentile,
+  nf, fmtCents, fmtMid, fmtSignedQty, fmtMs, fmtTapeTime, percentile,
 } from "../core/format.js";
+import { initDepth, renderDepth, mountDepth, unmountDepth } from "./depth.js";
 
-const STALE_MS = 5000;          // project staleness default
 const MAX_TAPE_ROWS = 200;
 const TAPE_DRAIN_MS = 250;
 const TAPE_PER_DRAIN = 3;       // <= 12 rendered rows/s
-const MAX_LADDER = 12;          // levels per side
 const SPARK_WINDOW = 120;       // seconds shown
 const SPARK_W = 340;
 const SPARK_H = 48;
@@ -301,148 +301,6 @@ function moveSel(d) {
 function quickSelect(i) {
   const m = visibleMarkets()[i];
   if (m) select(m.market_id);
-}
-
-// ---------- depth ladder ----------
-
-const ladderRefs = { asks: [], bids: [] };
-const ladderEl = $("ladder");
-
-function ladderRow(side) {
-  const row = el("div", "ladder-row " + side);
-  const bq = el("div", "l-qty bid-q");
-  const aq = el("div", "l-qty ask-q");
-  const yes = el("span", "l-yes");
-  const no = el("span", "l-no");
-  const q = side === "bid" ? bq : aq;
-  const track = el("div", "track");
-  const fill = el("div", "fill");
-  const qtxt = el("span", "qtxt");
-  track.style.visibility = "hidden";
-  fill.style.visibility = "hidden";
-  q.append(track, fill, qtxt);
-  row.append(bq, yes, no, aq);
-  return { row, qcell: q, track, fill, qtxt, yes, no, prevP: undefined, prevQ: undefined };
-}
-
-function buildLadder() {
-  const ac = $("ask-rows");
-  const bc = $("bid-rows");
-  for (let i = 0; i < MAX_LADDER; i++) {
-    const r = ladderRow("ask");
-    if (i === MAX_LADDER - 1) r.row.classList.add("best"); // best ask sits just above mid
-    ladderRefs.asks.push(r);
-    ac.append(r.row);
-  }
-  for (let i = 0; i < MAX_LADDER; i++) {
-    const r = ladderRow("bid");
-    if (i === 0) r.row.classList.add("best"); // best bid just below mid
-    ladderRefs.bids.push(r);
-    bc.append(r.row);
-  }
-}
-
-function clearLadderRow(r) {
-  if (r.yes.textContent !== "") { r.yes.textContent = ""; r.yes.removeAttribute("title"); }
-  if (r.no.textContent !== "") { r.no.textContent = ""; r.no.removeAttribute("title"); }
-  if (r.qtxt.textContent !== "") r.qtxt.textContent = "";
-  r.track.style.visibility = "hidden";
-  r.fill.style.visibility = "hidden";
-  r.prevP = undefined;
-  r.prevQ = undefined;
-}
-
-function setLadderRow(r, lvl, side, maxQ) {
-  if (!lvl || lvl[0] == null) {
-    clearLadderRow(r);
-    return;
-  }
-  const p = lvl[0];
-  const q = lvl[1];
-  r.track.style.visibility = "";
-  r.fill.style.visibility = "";
-  const yesTxt = fmtCents(p);
-  if (r.yes.textContent !== yesTxt) {
-    r.yes.textContent = yesTxt;
-    r.yes.title = p + " ticks";
-  }
-  const noTxt = fmtCents(10000 - p);
-  if (r.no.textContent !== noTxt) {
-    r.no.textContent = noTxt;
-    r.no.title = (10000 - p) + " ticks";
-  }
-  const changed = r.prevP === p && r.prevQ !== undefined && r.prevQ !== q;
-  const qTxt = fmtQty(q);
-  if (r.qtxt.textContent !== qTxt) r.qtxt.textContent = qTxt;
-  r.fill.style.width = maxQ > 0 ? Math.min(100, (q / maxQ) * 100).toFixed(1) + "%" : "0%";
-  if (changed) flash(r.qcell, side);
-  r.prevP = p;
-  r.prevQ = q;
-}
-
-function renderDepth() {
-  const id = state.selectedId;
-  const mkt = id ? state.byId.get(id) : null;
-  $("depth-title").textContent = "DEPTH — " + (mkt ? mkt.ticker : "—");
-  const banner = $("depth-banner");
-  const stat = $("depth-stat");
-  const book = id ? state.books.get(id) : null;
-
-  if (!book) {
-    stat.textContent = "—";
-    stat.classList.remove("warn");
-    banner.textContent = id ? "AWAITING BOOK" : "NO SELECTION";
-    banner.classList.add("quiet");
-    banner.classList.remove("pulse");
-    ladderEl.classList.add("dim");
-    for (const r of ladderRefs.asks) clearLadderRow(r);
-    for (const r of ladderRefs.bids) clearLadderRow(r);
-    $("mid-val").textContent = "—";
-    $("spr-val").textContent = "—";
-    return;
-  }
-
-  const age = book.age_ms + (performance.now() - book.recvAt);
-  const quiet = age > STALE_MS;
-  // "stale" from the server just means no update inside the trading-engine
-  // staleness window — a quiet prediction market, not a broken book. Only
-  // structural reasons (seq gap, crossed, bad level) are alarming.
-  const structural = book.valid === false && book.reason && book.reason !== "stale";
-  stat.textContent = "AGE " + fmtAge(age);
-  stat.classList.toggle("warn", Boolean(structural));
-
-  if (structural) {
-    banner.classList.remove("quiet");
-    banner.textContent = "INVALID · " + String(book.reason).toUpperCase();
-  } else if (quiet || book.reason === "stale") {
-    banner.classList.add("quiet");
-    banner.textContent = "QUIET · LAST UPDATE " + (age / 1000).toFixed(0) + "s AGO";
-  } else {
-    banner.classList.remove("quiet");
-    banner.textContent = "";
-  }
-  banner.classList.toggle("pulse", Boolean(structural) && !isReducedMotion());
-  ladderEl.classList.toggle("dim", Boolean(structural));
-
-  const asks = book.asks.slice(0, MAX_LADDER);
-  const bids = book.bids.slice(0, MAX_LADDER);
-  let maxQ = 0;
-  for (const l of asks) if (l && l[1] > maxQ) maxQ = l[1];
-  for (const l of bids) if (l && l[1] > maxQ) maxQ = l[1];
-  for (let k = 0; k < MAX_LADDER; k++) {
-    // ask level k renders k rows above the mid seam (container bottom row = best ask)
-    setLadderRow(ladderRefs.asks[MAX_LADDER - 1 - k], asks[k] || null, "ask", maxQ);
-    setLadderRow(ladderRefs.bids[k], bids[k] || null, "bid", maxQ);
-  }
-
-  const bb = bids.length ? bids[0][0] : null;
-  const ba = asks.length ? asks[0][0] : null;
-  const midEl = $("mid-val");
-  const sprEl = $("spr-val");
-  const midTxt = bb != null && ba != null ? fmtMid((bb + ba) / 2) : "—";
-  const sprTxt = bb != null && ba != null ? fmtCents(ba - bb) : "—";
-  if (midEl.textContent !== midTxt) midEl.textContent = midTxt;
-  if (sprEl.textContent !== sprTxt) sprEl.textContent = sprTxt;
 }
 
 // ---------- tape ----------
@@ -736,7 +594,7 @@ function bindControls() {
 
 // ---------- init (module scope: the DOM is parsed, type=module defers) ----------
 
-buildLadder();
+initDepth();
 setupCanvas();
 loadView();
 bindControls();
@@ -761,7 +619,7 @@ window.addEventListener("resize", () => {
   schedule("spark");
 });
 
-registerRenderer("depth", () => { if (mounted) renderDepth(); });
+registerRenderer("depth", renderDepth);   // pages/depth.js guards its own mount
 registerRenderer("latnums", () => { if (mounted) renderLatNums(); });
 registerRenderer("spark", () => { if (mounted) drawSpark(); });
 
@@ -780,6 +638,7 @@ export default {
 
   mount() {
     mounted = true;
+    mountDepth();
     lastOrder = null;                     // re-attach rows after any absence
     if (!tapeTimer) tapeTimer = setInterval(drainTape, TAPE_DRAIN_MS);
     if (!tickTimer) tickTimer = setInterval(tick, 1000);
@@ -788,6 +647,7 @@ export default {
 
   unmount() {
     mounted = false;
+    unmountDepth();
     clearInterval(tapeTimer);
     tapeTimer = 0;
     clearInterval(tickTimer);

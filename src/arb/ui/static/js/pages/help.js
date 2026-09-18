@@ -39,7 +39,7 @@ const SCROLLABLE = new Set(["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home"
 
 const SCREENS = {
   monitor: {
-    lead: "The default workspace: every market this run is watching, the depth ladder for "
+    lead: "The default workspace: every market this run is watching, the depth panel for "
       + "the selected one, a tape of level changes and the latency panel. Click or arrow to "
       + "select a row; the ladder, the tape highlight and DES all follow the selection.",
     groups: [
@@ -60,16 +60,36 @@ const SCREENS = {
           + "remembered across reloads. Markets with no book yet always sort last.",
       },
       {
-        name: "DEPTH LADDER",
+        name: "DEPTH",
         cols: [
-          ["BID QTY", "resting size at that bid, with a bar scaled to the largest level shown"],
-          ["YES", "the level's YES price"],
-          ["NO", "the same level as a NO price: 10000 − YES, in ticks"],
-          ["ASK QTY", "resting size at that ask"],
+          ["hero", "best bid · mid · best ask. The mid is the YES-implied probability, and it is "
+            + "withheld (—) for a one-sided, crossed or invalid book: it is a number the market is "
+            + "not quoting. WIDE greys it past a 5¢ spread. The chips beside each price are the last "
+            + "move of that touch and how long ago; the bar is size within ±5¢ of the mid, bids:asks"],
+          ["rail", "the whole 0–100¢ range. Every level is a tick (height √size), the bracket is the "
+            + "window the chart below is zoomed to, ▼ is the mid and the line under it its 60s range"],
+          ["CUM DEPTH", "cumulative contracts resting at or better than each price, bids stepping up "
+            + "to the left, asks to the right, on one shared linear scale printed on the axis. A "
+            + "terrain that stops has reached the END of the book; one that runs off the edge "
+            + "continues, and the edge label counts the levels and contracts beyond it"],
+          ["SIZE strip", "each level's own size at its exact price, on the same scale as the "
+            + "ladder bars (SIZE ≤ n in the header)"],
+          ["CUM · QTY", "running total from the touch, and the level's size; fractions set small "
+            + "so the columns stay decimal-aligned"],
+          ["NO · BID ║ ASK · NO", "YES prices hug the spine; NO is the complement, 100 − YES, "
+            + "set dim so it is never read as a second price"],
         ],
-        note: "Asks run down to the MID · SPR seam, bids run below it, best prices closest to "
-          + "the seam. A banner reads QUIET when the book has simply gone quiet, or "
-          + "INVALID · <REASON> when the local state is structurally wrong.",
+        note: "Motion only ever annotates a change the feed reported: size added glows inside its "
+          + "bar and fades; size removed leaves a dashed grey ghost outside it — REMOVED (TRADE OR "
+          + "CANCEL), because the feed cannot tell which; a new touch price lights a column where it "
+          + "now is. Nothing slides between prices or tweens between sizes. The bar scale fits the "
+          + "ordinary levels, so a wall past it CLAMPS with a white-hot cap and its exact size is "
+          + "printed beside it. Hover the chart or a ladder row for the sweep lens: size, levels, "
+          + "average and worst price to take down to that level, ex-fees. Polymarket US is polled, "
+          + "so it reads POLLED, sweeps once when a snapshot lands, and stripes the chart as HELD, "
+          + "NOT OBSERVED once the snapshot is older than a poll cycle. QUIET is a market with no "
+          + "recent updates; INVALID · <REASON> greys everything and states no mid. With reduced "
+          + "motion on, every mark is drawn still for a second instead.",
       },
       {
         name: "TAPE",

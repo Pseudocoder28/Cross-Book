@@ -902,3 +902,45 @@ free while the positions are still open. The honest ways to free room are
 raising the cap through `paper.limits` (audited) or restarting the run; every
 trade already survives in `paper_trades` keyed by `run_id`.
 
+## The DEPTH panel is a probability scope over an exact ladder (2026-09-18)
+
+The centre of MONITOR was a 12-level strip floating in an empty panel, with
+10%-opacity bars and a faint background flash as its only motion. It is now,
+top to bottom: a state strip, a hero (best bid · mid as YES-implied
+probability · best ask), one canvas (the whole 0-100¢ rail with every level as
+a √size barcode and a bracket for the zoomed window; cumulative-depth terrain;
+a size-at-price strip), and the full book as a mirrored DOM ladder. Chosen by a
+judge panel over three alternatives (a Bookmap-style heatmap, a pro DOM ladder,
+an instrument cluster); the full spec is `.context/depth-panel-spec.md`.
+
+- **Motion annotates; it never interpolates.** Bars, terrain and the touch
+  snap to the true state on the frame it arrives. Size added glows inside its
+  bar and fades; size removed leaves a neutral dashed ghost outside the bar;
+  a new touch price lights a column where it now is. A tween between two sizes
+  would draw sizes that never rested, and a price sliding between levels would
+  draw quotes that never existed. The only continuous motion is the camera,
+  and every mark and label is re-projected through the same interpolated scale
+  in every frame, so each frame is a true chart under its own axis.
+- **"REMOVED (TRADE OR CANCEL)", never "trade".** The feed does not
+  distinguish them.
+- **Polymarket US reads POLLED, never LIVE.** A shutter sweeps once when a
+  snapshot lands; past one poll cycle the chart is striped HELD, NOT OBSERVED.
+  Texture, not dimming — dimming reads as smaller size.
+- **No mid for a book that cannot stand behind one**: one-sided, crossed or
+  structurally invalid books show — or INVALID, in the hero, on the rail and in
+  the plot alike. Every level of an untrusted book stays printed, greyed.
+- **The bar scale fits the 85th percentile of the top 20 levels a side, and
+  walls clamp.** The spec's "max capped at 2.5x the second" failed on the
+  first realistic book: one 71,694-contract wall set the scale to 60K and left
+  40 of 43 bars as 1px stubs. A clamped bar gets a white-hot cap and its exact
+  size is printed beside it, so a wall is louder, not hidden. The Y and size
+  scales grow at once and shrink only after holding (4s / 8s), so a maximum
+  that changes every tick never rescales every tick.
+- **The loop idles to zero** and never runs under reduced motion, where every
+  mark is drawn still for a second instead. Fade-only frames draw at 30fps
+  (the camera and shutter get every frame): on a 9-updates/s book this took
+  main-thread time from 18.6% to 12.4%, against 11.5% with no animation.
+- **Everything on the canvas is also text**: in the ladder and hero, and in an
+  aria description that announces state changes at once and throttles only
+  window churn.
+
