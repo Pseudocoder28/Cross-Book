@@ -138,8 +138,9 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
     with terminal(state) as page:
         page.goto("/control", ready='document.getElementById("ctl-minnet") !== null')
         page.wait_ws_live()
-        # The server's value, written in by render() before anyone touched it.
-        assert page.eval('document.getElementById("ctl-minnet").value') == "50"
+        # The server's value, written in by render() before anyone touched it:
+        # 50 ticks, shown in the operator's unit — cents per contract.
+        assert page.eval('document.getElementById("ctl-minnet").value') == "0.50"
 
         # TAB is the documented way into the fields, so use it rather than a
         # programmatic focus(): the focus path is part of what broke.
@@ -150,7 +151,7 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
             ' e.__arbProbe = "tagged"; window.__arbProbeNode = e; e.select(); return true; })()'
         )
 
-        page.type("75")
+        page.type("0.7")
 
         # Drive a real re-render: a control frame is what the live plane
         # broadcasts after every action, and the page repaints on it.
@@ -164,11 +165,11 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
         assert after_frame["same"] is True, "the <input> was replaced by the re-render"
         assert after_frame["probe"] == "tagged"
         assert after_frame["focused"] is True, f"focus fell to {after_frame['active']}"
-        assert after_frame["value"] == "75"
+        assert after_frame["value"] == "0.7"
 
         # Keep typing across the repaint, then wait for the 1 s tick — the
         # other path that used to rebuild the DOM under the caret.
-        page.type("00")
+        page.type("5")
         # Wait for EVIDENCE the tick ran, not for the clock. A wall-clock sleep
         # here made the assertions below vacuous: deleting the setInterval from
         # control.js left this test green, because time passes either way.
@@ -188,16 +189,17 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
         after_tick = page.eval(FIELD_STATE)
         assert after_tick["same"] is True, "the 1 s tick replaced the <input>"
         assert after_tick["focused"] is True, f"focus fell to {after_tick['active']}"
-        assert after_tick["value"] == "7500"
+        assert after_tick["value"] == "0.75"
 
-        # And the edit is what the action sends, not the server's old value.
+        # And the edit is what the action sends, not the server's old value —
+        # converted exactly: 0.75¢ is 75 ticks.
         page.click('button[data-action="paper.limits"]')
         eventually(
             lambda: any(a == "paper.limits" for a, _p, _c in state.controls),
             "APPLY LIMITS to post",
         )
         params = next(p for a, p, _c in state.controls if a == "paper.limits")
-        assert params is not None and params["min_net_ticks"] == 7500
+        assert params is not None and params["min_net_ticks"] == 75
 
 
 # --------------------------------------------------------------------------
@@ -342,7 +344,7 @@ def test_a_blurred_edit_is_not_silently_reverted_by_the_next_frame() -> None:
         page.key("Tab")
         focus_settles(page, "ctl-minnet")
         page.eval('document.getElementById("ctl-minnet").select()')
-        page.type("75")
+        page.type("0.75")
         # Leave the field the way an operator would: on to the next limit.
         page.key("Tab")
         page.wait_for(
@@ -356,7 +358,7 @@ def test_a_blurred_edit_is_not_silently_reverted_by_the_next_frame() -> None:
             "the control frame to repaint the page",
         )
 
-        assert page.eval('document.getElementById("ctl-minnet").value') == "75", (
+        assert page.eval('document.getElementById("ctl-minnet").value') == "0.75", (
             "a blurred-but-edited field was reverted by the next control frame"
         )
 
@@ -493,3 +495,323 @@ def test_the_depth_panel_prints_the_book_it_was_sent_and_never_a_mid_it_cannot_s
 
         errors = [c for c in page.console() if c.level == "error"]
         assert not errors, errors
+
+
+# --------------------------------------------------------------------------
+# 8. SYSTEM gives a verdict, and a problem leads it
+# --------------------------------------------------------------------------
+
+
+@needs_chrome
+def test_system_gives_a_verdict_and_a_dropped_recording_leads_it() -> None:
+    """SYSTEM used to print counters and leave the judgement to the reader.
+    It now has to say, in words, whether anything is wrong — and when the
+    recorder starts losing messages, that must become the headline and the
+    first check, with the fix attached, without anyone hunting for it."""
+    state = TerminalState()
+    # Healthy venues, so the recorder is the only thing that can go wrong.
+    state.kalshi_status = lambda: ("live", "last frame 200ms ago")  # type: ignore[method-assign]
+    state.polymarket_status = lambda: ("polled", "REST polling 3 markets")  # type: ignore[method-assign]
+    stats = {
+        "t": "stats",
+        "msg_total": 500,
+        "msg_rate_1s": 12.0,
+        "parse_errors": 0,
+        "seq_gaps": 0,
+        "ws_clients": 1,
+        "uptime_s": 300.0,
+        "latency_ms": {"last": 40.0, "median": 38.0, "p95": 60.0, "n": 200},
+        "rtt_ms": 70.0,
+        "clock_skew_ms": 3.0,
+        "recorder": {"enqueued": 500, "dropped": 0},
+    }
+    with terminal(state) as page:
+        page.goto("/system")
+        page.wait_ws_live()
+        state.broadcast(stats)
+        page.wait_for(
+            'document.querySelector("#sysc-recorder .sysc-tag").textContent === "OK"',
+            "the recorder check to read OK",
+        )
+        page.wait_for(
+            'document.querySelector("#sysc-kalshi .sysc-tag").textContent === "OK"',
+            "the status poll to land",
+        )
+        assert "PROBLEM" not in page.text(".sysv-head")
+
+        state.broadcast({**stats, "recorder": {"enqueued": 900, "dropped": 25}})
+        page.wait_for(
+            'document.querySelector(".sysv-head").textContent === "1 PROBLEM"',
+            "the verdict to name the problem",
+        )
+        assert "RECORDER" in page.text(".sysv-line")
+        first = page.eval('document.querySelector("#sys-checks .sysc").id')
+        assert first == "sysc-recorder", "problems sort to the top"
+        assert "25 MESSAGES LOST" in page.text("#sysc-recorder .sysc-reading")
+        # Nobody picked a row, so the detail pane follows the worst check.
+        assert page.text(".sysd-name") == "RECORDER"
+        assert page.eval('!document.querySelector(".sysd-fix").hidden')
+
+        errors = [c for c in page.console() if c.level == "error"]
+        assert not errors, errors
+
+
+# --------------------------------------------------------------------------
+# 9. /control: what it sends, and when it asks first
+# --------------------------------------------------------------------------
+
+
+def _with_universe(state: TerminalState) -> None:
+    state.control["universe"] = {
+        "kalshi": {
+            "tickers": ["KXBASE-A", "KXBASE-B", "KXLEG-1"],
+            "base": ["KXBASE-A", "KXBASE-B"],
+            "pairs": ["KXLEG-1"],
+            "attached": True,
+        },
+        "polymarket_us": {
+            "slugs": ["base-a", "leg-1"],
+            "base": ["base-a"],
+            "pairs": ["leg-1"],
+            "attached": True,
+        },
+    }
+
+
+@needs_chrome
+def test_the_universe_box_edits_the_base_list_and_never_writes_pair_legs_into_it() -> None:
+    """The old box showed base markets PLUS the legs of watched pairs, and
+    SUBSCRIBE wrote that whole list back as the base — one press turned every
+    watched pair's leg into a permanent base market. The box now holds the
+    base only, the legs are counted beside it, and what is posted is exactly
+    what is in the box."""
+    state = TerminalState()
+    _with_universe(state)
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-ktickers") !== null')
+        page.wait_ws_live()
+        page.wait_for(
+            'document.getElementById("ctl-ktickers").value === "KXBASE-A\\nKXBASE-B"',
+            "the box to hold the base list, without the pair leg",
+        )
+        assert "1 legs of watched pairs" in page.text("#csec-kalshi .ccount")
+        apply_sel = 'button[data-action="universe.kalshi"]'
+        assert page.eval(f"document.querySelector('{apply_sel}').disabled"), (
+            "APPLY with nothing changed is a dead press"
+        )
+
+        page.eval(
+            '(() => { const e = document.getElementById("ctl-ktickers");'
+            ' e.value += "\\nkxnew-c"; e.dispatchEvent(new Event("input")); })()'
+        )
+        page.wait_for(f"!document.querySelector('{apply_sel}').disabled", "APPLY to enable")
+        assert "+1 added" in page.text("#csec-kalshi .cdraft")
+        page.click(apply_sel)
+        # A set-replacing action is PRICED first: a preview, not an execution.
+        page.wait_for(
+            'document.querySelector("#csec-kalshi .cconfirm") !== null',
+            "the confirm box, inside the section that asked",
+        )
+        assert state.previews == [
+            ("universe.kalshi", {"tickers": ["KXBASE-A", "KXBASE-B", "KXNEW-C"]})
+        ]
+        assert not any(a == "universe.kalshi" for a, _p, _c in state.controls)
+        assert "would universe.kalshi" in page.text("#csec-kalshi .cconfirm-eff")
+
+        page.click("#csec-kalshi .cconfirm .cbtn.primary")
+        eventually(
+            lambda: any(a == "universe.kalshi" for a, _p, _c in state.controls),
+            "CONFIRM to post the real action",
+        )
+        sent = next(p for a, p, _c in state.controls if a == "universe.kalshi")
+        assert sent == {"tickers": ["KXBASE-A", "KXBASE-B", "KXNEW-C"]}, (
+            "the leg must not ride along"
+        )
+
+
+@needs_chrome
+def test_a_pending_confirmation_survives_another_sections_action() -> None:
+    """One pending confirmation, one owner. Running DOCTOR used to clear
+    `armed` wholesale, so a watch-set confirm in another section vanished
+    without a word — and with it the sentence the operator was reading."""
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-pairstop") !== null')
+        page.wait_ws_live()
+        page.click('button[data-action="pairs.top"].primary')
+        page.wait_for(
+            'document.querySelector("#csec-watch .cconfirm") !== null', "the watch-set confirm box"
+        )
+        # The section that is waiting on an answer locks its own buttons.
+        assert page.eval(
+            """document.querySelector('button[data-action="pairs.top"].primary').disabled"""
+        )
+
+        page.click('button[data-action="jobs.doctor"]')
+        eventually(
+            lambda: any(a == "jobs.doctor" for a, _p, _c in state.controls), "DOCTOR to post"
+        )
+        page.wait_for(
+            'document.querySelector("#csec-jobs .creceipt") !== null',
+            "the jobs receipt, in the jobs section",
+        )
+        assert page.eval('document.querySelector("#csec-watch .cconfirm") !== null'), (
+            "another section's action dismissed a pending confirmation"
+        )
+        assert not any(a == "pairs.top" for a, _p, _c in state.controls)
+
+
+@needs_chrome
+def test_an_invalid_limit_cannot_be_applied_and_says_which_field() -> None:
+    """APPLY is a button that writes risk limits to a live trader. It enables
+    only for a valid change, names the field that is wrong, and a value that is
+    not a whole number of ticks is refused — never rounded."""
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-minnet") !== null')
+        page.wait_ws_live()
+        apply_sel = 'button[data-action="paper.limits"]'
+        assert page.eval(f"document.querySelector('{apply_sel}').disabled")
+
+        page.key("Tab")
+        focus_settles(page, "ctl-minnet")
+        page.eval('document.getElementById("ctl-minnet").select()')
+        page.type("0.505")
+        page.wait_for(
+            'document.querySelector("#csec-paper .cform-hint.bad") !== null', "the field error"
+        )
+        assert "nearest 0.01" in page.text("#csec-paper .cform-hint.bad")
+        assert page.eval(f"document.querySelector('{apply_sel}').disabled")
+
+        page.eval('document.getElementById("ctl-minnet").select()')
+        page.type("0.6")
+        page.wait_for(f"!document.querySelector('{apply_sel}').disabled", "APPLY to enable")
+        assert "0.50¢ → 0.60¢" in page.text("#csec-paper .cdraft")
+        assert state.controls == [], "nothing is sent until APPLY is pressed"
+
+
+# --------------------------------------------------------------------------
+# 12. /arb says how current each price is, judged the way its venue delivers it
+# --------------------------------------------------------------------------
+
+K_LEG = "kalshi:KXGAS-4.80"
+P_LEG = "polymarket_us:usgas-gt4pt80"
+
+
+def _leg_book(market_id: str, age_ms: float, **extra: object) -> dict[str, object]:
+    return {
+        **_book([[5000, 20 * C]], [[5100, 258 * C]], age_ms=age_ms, **extra),
+        "market_id": market_id,
+    }
+
+
+def _arb_frame(*, k_reason: str | None = "stale") -> dict[str, object]:
+    def leg(market_id: str, reason: str | None, bid: int, ask: int) -> dict[str, object]:
+        return {
+            "market_id": market_id,
+            "ticker": market_id.split(":", 1)[1],
+            "has_book": True,
+            "valid": reason is None,
+            "reason": reason,
+            "best_bid": [bid, 20 * C],
+            "best_ask": [ask, 258 * C],
+        }
+
+    def edge(direction: str, qty: int) -> dict[str, object]:
+        return {
+            "direction": direction,
+            "qty": qty,
+            "contracts": qty / C,
+            "gross_per_contract_ticks": 1900 if qty else 0,
+            "fee_per_contract_ticks": 325 if qty else 0,
+            "net_per_contract_ticks": 1575 if qty else 0,
+            "net_ticks": 15750 if qty else 0,
+            "fee_ticks": 3250 if qty else 0,
+            "legs": [],
+        }
+
+    return {
+        "t": "arb",
+        "quotes": [
+            {
+                "pair_id": 98,
+                "label": "US gas above $4.80",
+                "score": 0.99,
+                "kalshi": leg(K_LEG, k_reason, 5000, 5100),
+                "polymarket_us": leg(P_LEG, None, 7000, 9800),
+                "fee_info": {},
+                "best": edge("yes_a_no_b", 10 * C),
+                "other": edge("yes_b_no_a", 0),
+                "ts_ms": int(time.time() * 1000),
+            }
+        ],
+    }
+
+
+_AGE_CELL = 'document.querySelector("#arb-rows .ar-books")'
+
+
+@needs_chrome
+def test_arb_reads_a_quiet_kalshi_book_as_live_and_a_polled_quote_by_its_age() -> None:
+    """The old BOOKS column printed K:QUIET over a Kalshi book that matched the
+    venue to the tick, and P:OK over a Polymarket quote a minute old — true,
+    and pointed at the wrong leg. Kalshi is streamed, so seven minutes without
+    a change is a market nobody touched; Polymarket US is polled, so its age
+    IS its freshness, and it has to be a number that moves.
+
+    Amber goes to the half that has the problem: an overdue poll colours the
+    Polymarket age and leaves LIVE alone. And LIVE is never claimed over a
+    socket that is not live — the stub's default Kalshi state is "connecting",
+    which is the second half of this test."""
+    state = TerminalState()
+    state.kalshi_status = lambda: ("live", "last frame 200ms ago")  # type: ignore[method-assign]
+    # 20 targets at 0.5/s: one round-robin is 40s, overdue past 60s
+    stats = {"t": "stats", "polymarket_us": {"targets": 20, "rate_per_s": 0.5}}
+    with terminal(state) as page:
+        page.goto("/arb")
+        page.wait_ws_live()
+        state.broadcast(stats)
+        state.broadcast(_leg_book(K_LEG, 408_300.0, valid=False, reason="stale"))
+        state.broadcast(_leg_book(P_LEG, 34_200.0))
+        state.broadcast(_arb_frame())
+        page.wait_for(
+            f"{_AGE_CELL} && /^LIVE·3[4-9]s$/.test({_AGE_CELL}.textContent)",
+            "the age cell to read LIVE and the quote's age",
+        )
+        assert page.eval(f"{_AGE_CELL}.children[0].className") == "aq ok"
+        assert page.eval(f"{_AGE_CELL}.children[2].className") == "aq num ok"
+        assert "NO CHANGE FOR 6m 4" in _text(page, "ad-kbook")
+        assert _text(page, "ad-kbook").startswith("LIVE · STREAMED")
+        assert _text(page, "ad-pbook").startswith("POLLED 3")
+        assert "RE-READ EVERY 40s" in _text(page, "ad-pbook")
+
+        # an age that does not move is not an age
+        first = page.eval(f"{_AGE_CELL}.textContent")
+        page.wait_for(f'{_AGE_CELL}.textContent !== "{first}"', "the age to tick")
+
+        # the poll falls behind: amber on the Polymarket half, and only there
+        state.broadcast(_leg_book(P_LEG, 70_000.0))
+        page.wait_for(
+            f'{_AGE_CELL}.children[2].className === "aq num bad"', "the overdue poll to go amber"
+        )
+        assert page.eval(f"{_AGE_CELL}.children[0].className") == "aq ok"
+        assert "OVERDUE" in _text(page, "ad-pbook")
+
+        errors = [c for c in page.console() if c.level == "error"]
+        assert not errors, errors
+
+    # The stub's own Kalshi state: "connecting". The book is whatever it was
+    # when the socket dropped, so the cell must not say LIVE.
+    dropped = TerminalState()
+    with terminal(dropped) as page:
+        page.goto("/arb")
+        page.wait_ws_live()
+        dropped.broadcast(_leg_book(K_LEG, 3_000.0))
+        dropped.broadcast(_leg_book(P_LEG, 2_000.0))
+        dropped.broadcast(_arb_frame(k_reason=None))
+        page.wait_for(
+            f'{_AGE_CELL} && {_AGE_CELL}.children[0].textContent === "FROZEN"',
+            "a Kalshi leg on a socket that is not live to read FROZEN",
+        )
+        assert page.eval(f"{_AGE_CELL}.children[0].className") == "aq bad"
+        assert _text(page, "ad-kbook").startswith("FEED CONNECTING · PRICE FROZEN")

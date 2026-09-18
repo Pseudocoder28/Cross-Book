@@ -136,11 +136,17 @@ const SCREENS = {
           ["DIRECTION", "which venue's YES is bought and which venue's NO"],
           ["K BID/ASK", "the Kalshi leg's best bid and ask"],
           ["P BID/ASK", "the Polymarket US leg's best bid and ask"],
-          ["BOOKS", "each leg's book state: valid, quiet, or the structural reason it is not"],
+          ["K · P AGE", "how current each price is, judged the way its venue delivers it. Kalshi is "
+            + "streamed, so it reads LIVE however long ago the book last changed — a market nobody "
+            + "touched for ten minutes is still exact. Polymarket US is polled one market at a "
+            + "time, so it reads the quote's age in seconds: that price is a photograph, and an "
+            + "edge against an old one may already be gone. Amber marks the leg with a problem: "
+            + "FROZEN (Kalshi socket not live), an overdue poll, or the structural reason a book "
+            + "is unusable"],
         ],
-        note: "Selecting a row shows both legs, the fee model in play and the reverse "
-          + "direction's numbers. The screen is empty until pairs are confirmed and "
-          + "`arb ui` is restarted with --pairs-top > 0.",
+        note: "Selecting a row shows both legs, the fee model in play, how current each price "
+          + "is and the reverse direction's numbers. The screen is empty until a pair is "
+          + "confirmed on /pairs and watched with T.",
       },
     ],
   },
@@ -194,58 +200,95 @@ const SCREENS = {
     ],
   },
   control: {
-    lead: "Where you operate the system. Everything that used to be a command-line flag or "
-      + "an `arb` subcommand is a control here, and every one of them goes through one "
-      + "server-side executor that refuses it in read-only mode, asks you to confirm the "
-      + "expensive ones, and writes an audit row recording the exact sentence you were shown.",
+    lead: "Where you operate the system. Every control goes through one server-side executor "
+      + "that refuses it in read-only mode, asks you to confirm the expensive ones, and writes an "
+      + "audit row recording the exact sentence you were shown. Every section reads the same way: "
+      + "its light and STATE, one sentence, its numbers, its controls.",
     groups: [
       {
-        name: "CARDS",
+        name: "SECTIONS",
         cols: [
-          ["RECORDER", "start and stop writing raw messages to Postgres. Off leaves a hole a "
-            + "replay reads straight across, so the audit row is the only sign it was deliberate"],
-          ["PAPER TRADING", "suspend or resume the trader and retune its risk limits live. "
-            + "Suspend keeps positions and the spend already committed — it is not a reset"],
-          ["UNIVERSE", "replace either venue's market list and reload the tracked pairs. The "
-            + "Kalshi change costs a reconnect; the Polymarket one retunes the staleness budget"],
-          ["JOBS", "doctor, pair proposal, slug backfill and replay. Propose takes about three "
-            + "minutes and writes thousands of rows; replay runs as a subprocess"],
-          ["AUDIT TRAIL", "what was done, the effect sentence shown at the time, and how it ended"],
+          ["PAPER TRADING", "one button — SUSPEND or RESUME, whichever applies — beside the state. "
+            + "Suspending is a pause: positions and deployed money are kept. The risk limits are in "
+            + "your units: minimum edge in ¢ per contract after fees, contracts per pair, dollars in "
+            + "total. APPLY enables only for a valid change, and the line above it says what will change"],
+          ["WATCH SET", "watched versus confirmed, how many are quoting, and what the watch set "
+            + "costs: seconds per Polymarket book. If a venue says watched pairs have settled, one "
+            + "button untracks them. SET WATCH SET replaces the whole set, one pair per event first"],
+          ["KALSHI / POLYMARKET US MARKETS", "the BASE list for each venue — markets followed besides "
+            + "the watched pairs' legs, which are counted beside the box and never written into it. "
+            + "One market per line; the line under the box counts what you added and removed"],
+          ["RECORDER", "whether raw venue messages are being saved, how many, and how many were lost"],
+          ["JOBS", "doctor, pair proposal, link backfill and replay (pick the run from the list). "
+            + "A running job shows its progress and a CANCEL; click a job's status to read its output"],
+          ["JOB OUTPUT", "what the selected job printed, live while it runs"],
+          ["AUDIT TRAIL", "what was done, the sentence shown at the time, and how it ended"],
+        ],
+        note: "Answers appear where you asked. A confirmation or a receipt opens inside the section "
+          + "you pressed in, under its buttons. NO CHANGE is a real answer — the action ran and "
+          + "nothing moved — and it stays until you dismiss it. ESC in a field puts the server's "
+          + "value back; REVERT does it for the whole form.",
+      },
+      {
+        name: "WHEN IT ASKS FIRST",
+        cols: [
+          ["AT ONCE", "switches and limits: one value, and the opposite press undoes it"],
+          ["SHOWN FIRST", "anything that REPLACES a set — the watch set, a market list, untracking "
+            + "settled pairs. The server prices it without doing it (rows changed, the new poll "
+            + "cycle) and you confirm that sentence"],
+          ["ARMED", "jobs that write many rows (amber left edge on the button). The server arms "
+            + "them, records that it did, and you confirm the sentence that will be audited"],
         ],
       },
       {
         name: "GRADES",
         cols: [
           ["G0", "read-only — runs even when the server is in read-only mode"],
-          ["G2", "changes this run — one click, audited"],
+          ["G2", "changes this run — audited"],
           ["G3", "writes many rows — arms first, and you confirm a sentence the server wrote"],
         ],
       },
     ],
   },
-
   system: {
-    lead: "The plumbing, one card per subsystem. This is where you look when a number "
-      + "elsewhere stops moving. Read-only diagnostics, live off the one-second stats frame "
-      + "and /api/status.",
+    lead: "Is anything wrong, and what do I do about it. The page gives a verdict, draws the "
+      + "machine as a pipeline, and lists one plain-English check per part — problems first. "
+      + "Select a check to read what it means, the numbers behind it and the fix.",
     groups: [
       {
-        name: "CARDS",
+        name: "LEVELS",
         cols: [
-          ["ENGINE", "inbound messages this run and the last second's rate, plus parse errors "
-            + "and sequence gaps — both should stay at zero, and turn amber when they do not"],
-          ["RECORDER", "whether this run is writing raw messages to Postgres, and how many "
-            + "were enqueued versus dropped"],
-          ["DATABASE", "connection state, total recorded rows and the row count per run id — "
-            + "those ids are what `arb replay` takes"],
-          ["CLOCK & LATENCY", "one-way latency percentiles, keepalive RTT and the clock-skew "
-            + "estimate derived from them"],
-          ["KALSHI · WEBSOCKET", "the streamed venue's transport state"],
-          ["POLYMARKET US", "the polled venue: poll count, 429 rate-limit responses, errors "
-            + "and the age of the last successful book"],
-          ["OBSERVABILITY", "where the same numbers live outside the terminal — the Prometheus "
-            + "metric names and the provisioned Grafana dashboard"],
+          ["OK", "working"],
+          ["LOOK", "working, but something you should look at; the detail pane says what to do"],
+          ["PROBLEM", "broken now: data or results are wrong or missing"],
+          ["OFF", "deliberately not running (paper suspended, nothing watched) — never counts "
+            + "against the verdict"],
+          ["WAIT", "no data yet; normal for the first seconds after start"],
         ],
+      },
+      {
+        name: "CHECKS",
+        cols: [
+          ["THIS SCREEN", "this browser tab's connection to the server"],
+          ["KALSHI FEED", "the WebSocket that pushes every Kalshi book change"],
+          ["POLYMARKET US FEED", "the REST poller; POLLED is its healthy state. Warns when one "
+            + "full cycle takes over a minute — quotes that old are history, not prices"],
+          ["ORDER BOOKS", "books good / watched, books untrusted right now, and sequence gaps. "
+            + "A gap that recovered is routine and stays OK; only a book that is untrusted NOW warns"],
+          ["WATCH SET", "pairs marked to watch versus pairs actually quoting; the difference is "
+            + "markets a venue says have settled"],
+          ["ARB ENGINE", "pairs priced, how many have an edge after fees, how many clear the paper floor"],
+          ["PAPER TRADER", "trading or suspended, trades, budget deployed, and how often it "
+            + "declined a pair because a book was untrusted"],
+          ["RECORDER", "whether raw messages are being saved; messages lost in the last two "
+            + "minutes is a PROBLEM"],
+          ["DATABASE", "Postgres connection, rows stored, and the recorded runs"],
+          ["CLOCK & LATENCY", "venue-to-here message time, and whether this machine's clock "
+            + "agrees with the venue's. A disagreeing clock only distorts the latency display"],
+        ],
+        note: "\u2191\u2193 selects a check, \u23CE opens the page where its fix lives, and clicking a "
+          + "pipeline stage jumps to that stage's check. The bars top-right are messages per "
+          + "second over the last two minutes; the dashes between stages move while data flows.",
       },
     ],
   },

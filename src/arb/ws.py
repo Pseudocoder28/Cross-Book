@@ -104,6 +104,8 @@ class ReconnectingWebSocket:
         self._config = config if config is not None else WSConfig()
         self._on_connected = on_connected
         self._conn: WSConnection | None = None
+        # Connections established this run; 1 is a socket that never dropped.
+        self.connects = 0
 
     @property
     def venue(self) -> str:
@@ -149,6 +151,7 @@ class ReconnectingWebSocket:
                 await asyncio.sleep(backoff.next_delay())
                 continue
             WS_CONNECTS.labels(**labels).inc()
+            self.connects += 1
             connected_mono = time.monotonic()
             self._conn = conn
             try:

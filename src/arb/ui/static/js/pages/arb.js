@@ -25,6 +25,7 @@ import { onMessage } from "../core/ws.js";
 import { SCOPE, focusCommand } from "../core/keys.js";
 import * as cmd from "../core/cmd.js";
 import { nf, fmtCents, fmtQty, fmtSignedCents, fmtDollarsFromTicks } from "../core/format.js";
+import * as M from "./arb-model.js";
 
 const VIEW_KEY = "arb.arb.v1";
 // src/arb/paper.py PaperLimits.min_net_ticks. Only a fallback: the live value
@@ -47,6 +48,10 @@ let paperCtl = null;
 // false = the cursor follows the top of the current ranking (app.js behaviour);
 // true = the operator picked a row and it stays picked.
 let pinned = false;
+// The age cells of the rows on screen, so the 1s tick rewrites two words per
+// row instead of rebuilding the table under the cursor.
+let ageCells = [];
+let ageTimer = null;
 
 // persisted view: minimum net/contract in ticks (null = no filter), sort, dir
 const view = { min: null, sort: "net", dir: -1 };
@@ -389,6 +394,8 @@ function renderArb() {
   renderSummary(vis);
   const c = $("arb-rows");
   c.textContent = "";
+  ageCells = [];
+  const fresh = freshness();
   vis.forEach((q, i) => {
     const b = q.best;
     const has = b.qty > 0;
@@ -407,13 +414,15 @@ function renderArb() {
         : "AT OR ABOVE " + paperMin + " TICKS/CT — THE PAPER TRADER DEFAULT,"
           + " NOT IN FORCE: NO PAPER TRADER ON THIS RUN";
     }
-    // A quiet (stale-only) book on a live feed is still a quotable book;
-    // only structural problems or a missing book are flagged.
-    const legState = (leg) => (!leg.has_book ? "NONE" : leg.valid ? "OK" : leg.reason === "stale" ? "QUIET" : (leg.reason || "?").toUpperCase().slice(0, 7));
-    const ks = legState(q.kalshi), ps = legState(q.polymarket_us);
-    const booksOk = (ks === "OK" || ks === "QUIET") && (ps === "OK" || ps === "QUIET");
-    const books = el("span", "ar-books " + (booksOk ? "ok" : "bad"),
-      ks === "OK" && ps === "OK" ? "OK" : "K:" + ks + " P:" + ps);
+    // How current each price is, judged the way its venue delivers it: Kalshi
+    // is streamed (LIVE, however long since it last changed), Polymarket US is
+    // polled (its age in seconds). pages/arb-model.js has the reasoning.
+    const kAge = el("span", "aq"), pAge = el("span", "aq num");
+    const books = el("span", "ar-books");
+    books.append(kAge, el("span", "aq-sep", "·"), pAge);
+    const cell = { q, books, kAge, pAge };
+    ageCells.push(cell);
+    paintAge(cell, fresh);
     row.append(
       el("span", "ar-net num", has ? fmtSignedCents(b.net_per_contract_ticks) : "—"),
       el("span", "ar-size num", has ? nf.format(Math.round(b.contracts)) : "—"),
@@ -463,13 +472,67 @@ function renderArb() {
   const fi = q.fee_info || {};
   setText("ad-kfee", (fi.kalshi_fee_type || "—") + " × " + (fi.kalshi_fee_multiplier || "—"));
   setText("ad-pfee", "THETA " + (fi.polymarket_fee_coefficient || "—"));
-  const bookLine = (leg) => (leg.has_book ? (leg.valid ? "VALID" : leg.reason === "stale" ? "QUIET (NO RECENT UPDATE)" : "INVALID · " + String(leg.reason || "").toUpperCase()) + " · " + bboText(leg) : "NO BOOK");
-  setText("ad-kbook", bookLine(q.kalshi));
-  setText("ad-pbook", bookLine(q.polymarket_us));
+  paintDetailAges(q, fresh);
   setText("ad-onet", o.qty > 0 ? fmtSignedCents(o.net_per_contract_ticks) : "NONE");
   setText("ad-osize", o.qty > 0 ? fmtQty(o.qty) + " CTS" : "—");
   const selRow = c.children[a.idx];
   if (selRow && selRow.scrollIntoView) selRow.scrollIntoView({ block: "nearest" });
+}
+
+// ---------- quote age ----------
+
+/** What the page knows right now about how prices are arriving. */
+function freshness() {
+  const v = state.status && state.status.venues && state.status.venues.kalshi;
+  return {
+    now: performance.now(),
+    feed: v ? v.state : null,
+    cycleMs: M.pollCycleMs(state.stats && state.stats.polymarket_us),
+  };
+}
+
+function legReadings(q, f) {
+  return {
+    k: M.kalshiLeg(q.kalshi, M.ageNow(state.books.get(q.kalshi.market_id), f.now), f.feed),
+    p: M.polymarketLeg(q.polymarket_us, M.ageNow(state.books.get(q.polymarket_us.market_id), f.now), f.cycleMs),
+  };
+}
+
+function paintAge(cell, f) {
+  const r = legReadings(cell.q, f);
+  const put = (node, base, x) => {
+    const cls = base + " " + x.level;
+    if (node.className !== cls) node.className = cls;
+    if (node.textContent !== x.text) node.textContent = x.text;
+  };
+  put(cell.kAge, "aq", r.k);
+  put(cell.pAge, "aq num", r.p);
+  const tip = "KALSHI: " + r.k.detail + "\nPOLYMARKET US: " + r.p.detail;
+  if (cell.books.title !== tip) cell.books.title = tip;
+}
+
+function paintDetailAges(q, f) {
+  const r = legReadings(q, f);
+  // The prices themselves are in the row and under LEGS; this block is only
+  // about how far to trust them, and a line that clips is a line unread.
+  const put = (id, x) => {
+    const node = $(id);
+    if (node.textContent !== x.detail) { node.textContent = x.detail; node.title = x.detail; }
+    const cls = "v aq " + x.level;
+    if (node.className !== cls) node.className = cls;
+  };
+  put("ad-kbook", r.k);
+  put("ad-pbook", r.p);
+}
+
+/** Once a second while the page is up: an age is only a reading if it moves.
+    Touches the age words and the detail's two lines, nothing else. */
+function tickAges() {
+  if (!mounted) return;
+  const f = freshness();
+  for (const cell of ageCells) paintAge(cell, f);
+  const q = visibleQuotes()[state.arb.idx];
+  if (q) paintDetailAges(q, f);
 }
 
 function moveArb(d) {
@@ -513,11 +576,14 @@ export default {
     state.arb.open = true;
     loadPaperMin();
     schedule("arb");
+    if (ageTimer == null) ageTimer = setInterval(tickAges, 1000);
   },
 
   unmount() {
     mounted = false;
     state.arb.open = false;
+    if (ageTimer != null) { clearInterval(ageTimer); ageTimer = null; }
+    ageCells = [];
     if (paperCtl) {
       try { paperCtl.abort(); } catch (err) { /* already settled */ }
       paperCtl = null;

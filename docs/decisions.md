@@ -977,3 +977,140 @@ new connection gets the current quotes even when nothing is watched — /arb
 only heard about quotes when a watched book moved, so an emptied watch set
 left stale rows on screen for good.
 
+## A paper fill consumes the liquidity it took (2026-09-18)
+
+A paper fill never reaches the venue, so the size it took keeps sitting in the
+book, and the trader re-read the raw book on every change. Live: a 16-contract
+Polymarket bid was filled against six times in a minute — 100 contracts out of
+16, stopped only by the per-pair cap — and the ledger's expected net was
+inflated by the same factor.
+
+`arb.taken` keeps, per (market, side, price), what paper fills have consumed;
+the trader is quoted off ladders net of it, while /arb still shows the market
+as it is. The rules are wrong only against the book: available = displayed −
+taken; taken shrinks when the venue shows less (so a later increase is
+genuinely new); a price that leaves the ladder is forgotten, but an empty side
+is a resync, not a pulled market. It assumes a maker would NOT have
+replenished a level we really hit, which undercounts fills; the alternative
+overcounts them. `PaperTrader.trade_pair` is the single entry point for live
+and replay — quote net, take, record — and it also declines any pair with a
+missing or structurally invalid book (`stale` alone is not structural).
+
+## A Kalshi seq that goes backwards is a new subscription, not a gap (2026-09-18)
+
+Kalshi restarts at `sid=1, seq=1` on every connection (verified in the
+recorder; docs/venue-notes.md). The adapter outlives the connection and
+compared that seq=1 with the old connection's last seq, called it a gap, and
+asked for a resync — which is a reconnect, which restarts at seq=1. From the
+first reconnect of a run (a 30s stall on quiet markets is enough) the socket
+was torn down within a second of every connect, forever, and every Kalshi book
+sat at `seq_gap`. Earlier in the week this was misread as Kalshi rate-limiting
+rapid watch-set changes. Only `seq > last + 1` is a gap now.
+
+## SYSTEM gives a verdict, not counters (2026-09-18)
+
+The page was seven cards of raw counters with a paragraph under each, and
+never said whether anything was wrong: the reconnect loop above ran under a
+green "KALSHI LIVE" for days. It is now a verdict line, a pipeline picture
+(feeds → books → engine → paper; recorder → database) and one plain-English
+check per part, problems first; the selected check explains what it is, the
+numbers behind it and the fix, and ⏎ opens the page where the fix lives. Every
+judgement is a pure function in `pages/system-model.js`, tested in node.
+
+- A level is a judgement about NOW: a sequence gap that recovered stays OK
+  ("6 gaps recovered"), only a book untrusted right now warns. Counters that
+  only ever grow are read as a two-minute delta.
+- OFF (paper suspended, nothing watched) is a choice and never counts against
+  the verdict.
+- The Kalshi check reads the connection count, because "last frame 2s ago"
+  looks healthy in a reconnect loop — every reconnect delivers snapshots.
+- Sentence case for the explanation and the fix: they are read, not scanned.
+
+## /control is sections that read alike, with the answer where you asked (2026-09-18)
+
+The page was five cards of uneven height with an uppercase paragraph under every
+control, START and STOP both always on screen, raw ticks in the limit fields,
+the audit trail below the fold, confirmations and receipts in a band at the top
+of the page, and DOCTOR's output nowhere at all. The five rules it was built on
+(descriptors from the server, no optimistic state, the server owns the confirm
+copy, build once and update in place, a no-op is not a success) are unchanged.
+What changed, and why:
+
+- **One anatomy per section** — light · TITLE · STATE, one sentence, numbers,
+  controls — ordered by use: PAPER and WATCH SET, the two universes, RECORDER
+  as a strip. JOBS, JOB OUTPUT and the AUDIT TRAIL share the right rail: work,
+  and its record, always on screen.
+- **State is loud; the button is a verb.** One button per switch, in the
+  header beside the state it changes. START+STOP always had one dead button; a
+  slider would imply the instant local flip that "no optimistic state" forbids.
+  A 700 ms lock after a flip stops a double-click flipping it back.
+- **The operator's units.** ¢ per contract, contracts, dollars — what /arb and
+  /paper print. Conversion lives in `pages/control-model.js` and is exact or
+  refused: 0.505¢ is not a whole number of ticks, so it is an error, never a
+  silent round. APPLY enables only for a valid change, and the line above it
+  lists the change ("min edge 0.50¢ → 0.75¢"): no dead presses.
+- **The answer appears where the question was asked.** A section's confirm box
+  and its receipt open inside that section, under its buttons. One pending
+  confirmation, owned by its action: finishing some other action used to clear
+  it wholesale.
+- **A confirm step is a tax, spent where a slip is expensive.** Switches and
+  limits apply at once — one value, and the inverse is one press away. Anything
+  that REPLACES a set is priced first through the new read-only
+  `{"preview": true}` on the control route: the server's own sentence, rows
+  changed and resulting poll cycle included, with nothing done and nothing
+  audited. `pairs.top` was deliberately NOT made a confirm-action on the server:
+  eight tests pin its one-call contract, and a preview gives the same sentence
+  without changing what `execute` means. G3 jobs still arm on the server.
+- **The universe boxes edit the base list only.** They showed base + watched-
+  pair legs and wrote the union back as the base, so one press of SUBSCRIBE made
+  every watched pair's leg a permanent base market.
+- **The bind warning is a header chip, not a red band.** Non-loopback is only
+  possible with `ARB_ALLOW_REMOTE_BIND=1`, i.e. on purpose; a full-width red bar
+  on every visit for a deliberate state teaches the operator to ignore red. It
+  stays on screen, in amber, with the explanation on hover.
+- **Settled pairs can be untracked in one action**, and the engine's memory of
+  them accumulates (it was overwritten by every reload, so the watch set
+  alternated between right and half-dead on every press).
+- **Explanations are one sentence in sentence case.** Labels are scanned;
+  sentences are read.
+
+
+## /arb says how current each price is, judged the way its venue delivers it (2026-09-18)
+
+The BOOKS column printed `K:QUIET P:OK` on 20 of 21 rows. It was true and it
+pointed at the wrong leg. Both legs were judged by one rule — "updated within
+the staleness limit" — with a 5s limit for Kalshi and three poll cycles (193s
+at 29 targets) for Polymarket US. Checked against the venues on the day: all 21
+"quiet" Kalshi books matched Kalshi's own REST bid/ask to the tick (most of
+those markets had zero 24h volume; nobody had touched them in seven minutes),
+while the Polymarket quotes reading OK were 0.8s to 63s old.
+
+- **Kalshi is streamed, so age is not freshness.** A gapless book on a live
+  socket is exact however long ago it changed. It reads `LIVE`; the detail line
+  adds "NO CHANGE FOR 6m 48s", which is a fact about the market, not a warning
+  about the feed. `LIVE` is never claimed over a socket `/api/status` does not
+  call live: that reads `FROZEN`, because the book is whatever it was when the
+  socket dropped. (The status poll is 10s, the same lag the header chip has.)
+- **Polymarket US is polled, so age IS freshness.** The cell prints the quote's
+  age in seconds and it ticks. Amber once the age passes 1.5 poll cycles or the
+  server calls the book stale — the poll is overdue, which is the one state
+  where something is wrong rather than merely slow. 1.0 cycles would flap on a
+  slow response or a single rate-limit retry.
+- **Colour is spent on the exception, on the half that has it.** Healthy is the
+  quiet ink: a column that is green on every row teaches the eye to skip it.
+  The two halves colour independently, so amber says which leg.
+- **No threshold pretends to know when an old quote is too old.** That is the
+  paper trader's `max_book_age_ms` question (PROGRESS.md), not a display
+  constant. The column shows the number; measured over 685 recorded paper
+  trades the Polymarket quote behind a fill was a median 17s old (p90 45s), and
+  all 720 trades went the same direction — buy YES on Kalshi, sell into a
+  Polymarket bid — which is what a stale-high polled bid against a live
+  streamed ask produces.
+- **Client only.** Every book frame already carries `age_ms` and the page keeps
+  `recvAt`, the same source MONITOR and DES age from, so the arb payload did not
+  change. A 1s timer rewrites the age words in place; it does not rebuild the
+  table under the cursor. The judgement is `pages/arb-model.js`, pinned by
+  `tests/js/arb-model.test.mjs` and one browser test.
+- The server-side model is untouched: `stale` is still a `Book` invalid reason
+  and the SYSTEM check and the DEPTH banner still say QUIET, where the words
+  "last update 6m ago" sit right next to it.

@@ -188,7 +188,7 @@ async def replay_run(
                     )
                     ps.max_qty = max(ps.max_qty, best.qty)
                 if trader is not None:
-                    trader.consider(pair, best, ts_ms=ts_ms)
+                    trader.trade_pair(arbmon, pair, ts_ms=ts_ms, now_mono_ns=raw.recv_mono_ns)
     report.books = len(books.books)
     last_mono = max(
         (m for m in (books.last_update_mono_ns(mid) for mid in books.books) if m), default=0

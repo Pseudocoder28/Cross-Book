@@ -45,6 +45,7 @@ class StubState:
         self.removed = 0
         self.control = no_control_payload(run_id="testrun", recording=True)
         self.controls: list[tuple[str, dict[str, Any] | None, str | None]] = []
+        self.previews: list[tuple[str, dict[str, Any] | None]] = []
         self.audit: list[dict[str, Any]] = []
 
     def uptime_s(self) -> float:
@@ -95,6 +96,10 @@ class StubState:
 
     def control_payload(self) -> dict[str, Any]:
         return self.control
+
+    async def preview_control(self, action: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        self.previews.append((action, params))
+        return {"action": action, "effect": f"would {action}", "grade": "G2", "preview": True}
 
     def job_payload(self, job_id: str) -> dict[str, Any] | None:
         return {"job_id": job_id, "status": "ok", "lines": ["done"]} if job_id == "j1" else None
@@ -682,3 +687,20 @@ def test_a_fresh_connection_learns_the_watch_set_is_empty() -> None:
     state = ServerState(run_id="t", recording=False, books=BookManager(staleness_limit_ns=10**12))
     arb = [p for p in state.book_payloads() if p["t"] == "arb"]
     assert arb == [{"t": "arb", "quotes": []}]
+
+
+def test_a_preview_request_is_answered_without_executing() -> None:
+    """`{"preview": true}` on the one write route returns the effect sentence
+    and must never reach the executor."""
+    state = StubState()
+    client = TestClient(create_app(state))
+    r = client.post("/api/control/pairs.top", json={"params": {"n": 3}, "preview": True})
+    assert r.status_code == 200
+    assert r.json() == {
+        "action": "pairs.top",
+        "effect": "would pairs.top",
+        "grade": "G2",
+        "preview": True,
+    }
+    assert state.previews == [("pairs.top", {"n": 3})]
+    assert state.controls == [], "a preview must not execute"

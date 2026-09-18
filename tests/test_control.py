@@ -1372,3 +1372,65 @@ async def test_a_rejection_during_an_in_flight_reload_is_not_undone_by_it(
     assert _live_ids(host) == [1], "the in-flight reload must not put a rejected pair back"
     assert _arb_frames(host)[-1] == [1]
     await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# preview, and the memory of settled pairs
+# ---------------------------------------------------------------------------
+
+
+async def test_preview_prices_a_change_and_does_nothing(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """/control shows what a set-replacing action will cost BEFORE the press
+    that does it. The sentence is the executor's own — same validation, same
+    arithmetic — and asking for it changes nothing and records nothing."""
+    engine = await pairs_engine()
+    reloads = stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [1, 2, 3], "tracked": True})
+    rows_before = len(await list_control_actions(engine))
+    reloads_before = len(reloads)
+
+    shown = await control.preview("pairs.top", {"n": 1})
+
+    assert "2 untracked" in shown["effect"] and "watching 1 of 6" in shown["effect"]
+    assert shown["preview"] is True
+    tracked = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert tracked == {1, 2, 3}, "a preview must not move a single row"
+    assert len(await list_control_actions(engine)) == rows_before, "and leaves no audit row"
+    assert len(reloads) == reloads_before
+    # The real thing then says the same sentence.
+    done = await control.execute("pairs.top", {"n": 1})
+    assert done.effect == shown["effect"]
+    with pytest.raises(InvalidParams):
+        await control.preview("pairs.top", {"n": -1})
+    with pytest.raises(UnknownAction):
+        await control.preview("pairs.nope", {})
+    await engine.dispose()
+
+
+async def test_settled_pairs_are_remembered_across_a_clean_reload(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The memory of settled pairs used to be OVERWRITTEN by each reload. So
+    once a selection had skipped them, the next reload saw nothing expired,
+    wiped the list — and the selection after that picked the dead pairs
+    straight back up. The watch set alternated between right and half-dead
+    on every press. A settled market never un-settles: the memory accumulates,
+    while `pairs.settled` stays the narrower, current fact."""
+    engine = await events_engine()
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    control.note_settled([11])  # the venue said pair 11's market is over
+    assert control.pairs_payload()["settled"] == [11]
+
+    await control.execute("pairs.top", {"n": 2})  # skips 11; its reload expires nothing
+    assert control.pairs_payload()["settled"] == [], "nothing settled is tracked any more"
+    await control.execute("pairs.top", {"n": 3})  # ...and must STILL skip 11
+
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert 11 not in watched, "a clean reload must not make the engine forget a settled pair"
+    assert watched == {1, 2, 12}
+    await engine.dispose()

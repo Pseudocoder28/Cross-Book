@@ -17,8 +17,9 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any
 
-from arb.arbmon import TrackedPair
+from arb.arbmon import ArbMonitor, TrackedPair
 from arb.edge import EdgeQuote, Leg
+from arb.taken import TakenLiquidity
 from arb.types import QTY_PER_CONTRACT, Qty, Ticks
 
 
@@ -115,6 +116,10 @@ class PaperTrader:
     _next_id: int = 1
     _suspended: bool = False
     skipped_suspended: int = 0
+    # Edges declined because a leg's book was missing or structurally invalid.
+    skipped_invalid: int = 0
+    # Displayed size this book's fills have already consumed (see arb.taken).
+    taken: TakenLiquidity = field(default_factory=TakenLiquidity)
 
     # -- runtime control -----------------------------------------------------
 
@@ -244,6 +249,32 @@ class PaperTrader:
         self.notional_ticks += cost_ticks
         return trade
 
+    def trade_pair(
+        self, monitor: ArbMonitor, pair: TrackedPair, *, ts_ms: int, now_mono_ns: int
+    ) -> PaperTrade | None:
+        """Quote ``pair`` and take the edge if there is one. THE entry point.
+
+        Live and replay both come through here, because the three steps only
+        mean anything together: quote off ladders NET of what earlier paper
+        fills consumed, take the edge, then record what this fill consumed.
+        Skipping the first or last is how one 16-contract bid got filled
+        against six times. A pair with a missing or structurally invalid book
+        is declined and counted — a ladder behind a sequence gap is not a
+        price.
+        """
+        if self._suspended:
+            self.skipped_suspended += 1
+            return None
+        if monitor.untradable(pair, now_mono_ns=now_mono_ns) is not None:
+            self.skipped_invalid += 1
+            return None
+        d1, d2 = monitor.best_quotes(pair, taken=self.taken)
+        best = d1 if d1.net_per_contract_ticks >= d2.net_per_contract_ticks else d2
+        trade = self.consider(pair, best, ts_ms=ts_ms)
+        if trade is not None:
+            monitor.consume(pair, trade.direction, trade.qty, self.taken)
+        return trade
+
     def totals(self) -> dict[str, Any]:
         return {
             "trades": len(self.trades),
@@ -260,6 +291,8 @@ class PaperTrader:
             "enabled": self.enabled if enabled is None else enabled,
             "suspended": self._suspended,
             "skipped_suspended": self.skipped_suspended,
+            "skipped_invalid": self.skipped_invalid,
+            "liquidity_taken": {"levels": self.taken.levels, "qty": self.taken.qty},
             "limits": self.limits.payload(),
             "totals": self.totals(),
             "positions": [p.payload() for p in self.positions.values()],

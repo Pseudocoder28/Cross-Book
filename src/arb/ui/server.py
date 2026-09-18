@@ -175,6 +175,10 @@ def no_control_payload(*, run_id: str, recording: bool) -> dict[str, Any]:
             "limits": PaperLimits().payload(),
             "notional_ticks": 0,
             "skipped_suspended": 0,
+            "trades": 0,
+            "positions": 0,
+            "skipped_invalid": 0,
+            "taken_levels": 0,
         },
         "pairs_top": 0,
         "tracked_pairs": 0,
@@ -185,6 +189,7 @@ def no_control_payload(*, run_id: str, recording: bool) -> dict[str, Any]:
             "tracked": None,
             "total": None,
             "live": 0,
+            "settled": [],
             "poll": {
                 "attached": False,
                 "targets": 0,
@@ -270,6 +275,10 @@ class UIState(Protocol):
         self, action: str, params: dict[str, Any] | None, *, confirm: str | None
     ) -> ControlResult:
         """Run one control action. Raises the ControlError the route maps."""
+        ...
+
+    async def preview_control(self, action: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        """The effect sentence an action would record, with nothing done."""
         ...
 
     async def control_log(self, limit: int) -> list[dict[str, Any]]:
@@ -400,6 +409,16 @@ def create_app(state: UIState, *, static_dir: Path | None = None) -> FastAPI:
         confirm = payload.get("confirm")
         if confirm is not None and not isinstance(confirm, str):
             return JSONResponse({"error": "confirm must be a string"}, status_code=400)
+        if payload.get("preview") is True:
+            # "What would this do?" — validated and priced exactly as the real
+            # thing would be, and then not done. Never writes, so it is
+            # answered even on a read-only server.
+            try:
+                return JSONResponse(await state.preview_control(action, params))
+            except ControlError as exc:
+                return JSONResponse(
+                    {"error": str(exc), "action": action}, status_code=exc.status_code
+                )
         try:
             result = await state.execute_control(action, params, confirm=confirm)
         except ConfirmRequired as exc:
@@ -515,6 +534,7 @@ class ServerState:
         # process that has no controls (control_payload still answers).
         self.control: ControlPlane | None = None
         self.rtt_fn: Callable[[], float | None] | None = None
+        self.kalshi_connects_fn: Callable[[], int] | None = None
         self._clients: dict[WebSocket, asyncio.Queue[str]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
         self._dirty: set[str] = set()
@@ -729,6 +749,11 @@ class ServerState:
             raise NotAvailable("this process has no control plane")
         return await self.control.execute(action, params, confirm=confirm)
 
+    async def preview_control(self, action: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        if self.control is None:
+            raise NotAvailable("this process has no control plane")
+        return await self.control.preview(action, params)
+
     async def control_log(self, limit: int) -> list[dict[str, Any]]:
         if self.control is None:
             return []
@@ -896,6 +921,9 @@ class ServerState:
                 "n": n,
             },
             "rtt_ms": rtt_ms,
+            # 1 is a socket that never dropped; a number that keeps climbing is
+            # a reconnect loop, which "last frame 2s ago" cannot show.
+            "kalshi_connects": self.kalshi_connects_fn() if self.kalshi_connects_fn else None,
             "clock_skew_ms": clock_skew_ms,
             "parse_errors": self.parse_errors,
             "seq_gaps": self.seq_gaps,
@@ -1074,9 +1102,11 @@ async def run_ui(
         # a confirmed pair is a judgement about the world, tracking it is an
         # operational choice bounded by the Polymarket poll budget. `--pairs-top`
         # is gone as a selector; the set is whatever /control last chose.
+        settled_at_start: list[int] = []
         if True:
             try:
                 load = await load_tracked_pairs(config, run, engine, sink=record_raw)
+                settled_at_start = [pid for pid, _ in load.expired]
                 tracked = load.tracked
                 pair_pm_slugs = load.polymarket_slugs
                 pair_pm_markets = load.polymarket_markets
@@ -1203,6 +1233,7 @@ async def run_ui(
 
         source = KalshiWSSource(config=config, run=run, market_tickers=tickers)
         state.rtt_fn = source.rtt_ms
+        state.kalshi_connects_fn = lambda: source.connects
         adapter = KalshiMarketDataAdapter()
 
         # Everything mutable is now built: hand the control plane its handles.
@@ -1215,6 +1246,9 @@ async def run_ui(
             bind=bind,
             pairs_top=pairs_top,
         )
+        # The startup load already asked the venues which watched pairs are
+        # over; without this /control would not know until the first reload.
+        control.note_settled(settled_at_start)
         control.attach_kalshi(source)
         control.attach_polymarket(pm_source)
         control.seed_markets(state.hello_markets())
@@ -1330,14 +1364,15 @@ async def run_ui(
                     state.broadcast({"t": "arb", "quotes": monitor.snapshot()})
                     if trader is not None:
                         ts_ms = time.time_ns() // 1_000_000
+                        now_mono_ns = time.monotonic_ns()
                         new_trades = []
                         for pair in monitor.affected(dirty_ids):
-                            d1, d2 = monitor.best_quotes(pair)
-                            best = (
-                                d1 if d1.net_per_contract_ticks >= d2.net_per_contract_ticks else d2
+                            # Quotes net of what paper already took, the fill,
+                            # and the record of what it consumed: one call,
+                            # so none of the three can be skipped.
+                            trade = trader.trade_pair(
+                                monitor, pair, ts_ms=ts_ms, now_mono_ns=now_mono_ns
                             )
-                            # A suspended trader declines everything itself.
-                            trade = trader.consider(pair, best, ts_ms=ts_ms)
                             if trade is not None:
                                 new_trades.append(trade)
                         if new_trades:

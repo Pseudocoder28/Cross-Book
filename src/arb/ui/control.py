@@ -887,6 +887,9 @@ class ControlPlane:
         # pairs and spends half the watch set on them. Live: six settled
         # esports maps took six of twelve slots on every press.
         self._settled_pairs: set[int] = set()
+        # The subset of those that still carry the tracked flag: watch slots
+        # spent on markets that are over. /control offers to untrack them.
+        self._settled_tracked: list[int] = []
         # One reload at a time: a reload reads the watch set from the database
         # and then spends seconds on venue calls before installing it, so two
         # of them interleaving would let the older read win.
@@ -971,6 +974,12 @@ class ControlPlane:
                 "limits": (trader.limits if trader is not None else PaperLimits()).payload(),
                 "notional_ticks": trader.notional_ticks if trader is not None else 0,
                 "skipped_suspended": trader.skipped_suspended if trader is not None else 0,
+                # What SYSTEM's paper check reads: how much the book has done,
+                # and how often it refused a pair for a broken book.
+                "trades": len(trader.trades) if trader is not None else 0,
+                "positions": len(trader.positions) if trader is not None else 0,
+                "skipped_invalid": trader.skipped_invalid if trader is not None else 0,
+                "taken_levels": trader.taken.levels if trader is not None else 0,
             },
             "pairs_top": self.pairs_top,
             "tracked_pairs": len(self._host.arbmon.pairs) if self._host.arbmon else 0,
@@ -1020,6 +1029,28 @@ class ControlPlane:
     @property
     def actions(self) -> Mapping[str, ActionSpec]:
         return self._actions
+
+    async def preview(self, action: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The sentence ``execute`` would record, with nothing done.
+
+        Same lookup, same validation, same effect sentence as the executor's
+        first three steps — and then it stops: no state changes, no token, no
+        audit row. It exists so the page can show what a set-replacing action
+        (``pairs.top``, the universes) will cost BEFORE the press that does
+        it: the row count and the resulting poll cycle are the server's
+        arithmetic, not a guess made in the browser.
+        """
+        spec = self._actions.get(action)
+        if spec is None:
+            raise UnknownAction(f"unknown control action {action!r}")
+        clean = spec.validate(params or {})
+        try:
+            effect = await spec.sentence(clean)
+        except ControlError:
+            raise
+        except Exception as exc:
+            raise ControlError(f"{action}: its effect could not be stated ({exc})") from exc
+        return {"action": action, "effect": effect, "grade": spec.grade, "preview": True}
 
     async def execute(
         self,
@@ -1565,6 +1596,8 @@ class ControlPlane:
             "tracked": counts["tracked"] if counts else None,
             "total": counts["total"] if counts else None,
             "live": len(self._host.arbmon.pairs) if self._host.arbmon else 0,
+            # Tracked pairs a venue says are over: slots that quote nothing.
+            "settled": list(self._settled_tracked),
             "poll": {
                 "attached": pm is not None,
                 "targets": targets,
@@ -1886,9 +1919,7 @@ class ControlPlane:
                 },
             )
         self._set_pair_universe_from(tracked)
-        # Remember what the venues just said, so the next selection does not
-        # hand a slot back to a market that has finished.
-        self._settled_pairs = {pid for pid, _ in load.expired}
+        self.note_settled(pid for pid, _ in load.expired)
         polymarket = await self._apply_polymarket_universe() if self.polymarket else {}
         # An empty union would be an illegal Kalshi subscription; with no base
         # markets and no watched pairs there is nothing to subscribe to, so the
@@ -1904,6 +1935,21 @@ class ControlPlane:
             "kalshi": kalshi,
             "polymarket_us": polymarket,
         }
+
+    def note_settled(self, pair_ids: Iterable[int]) -> None:
+        """Record which watched pairs a venue says are over.
+
+        The memory ACCUMULATES: a settled market never un-settles, and
+        overwriting it on each reload meant a clean reload (nothing expired,
+        because the last selection had skipped them) wiped the list — so the
+        selection after that picked the dead pairs straight back up, and the
+        watch set alternated between right and half-dead on every press.
+        ``_settled_tracked`` is the narrower, current fact: settled pairs that
+        still hold the tracked flag right now.
+        """
+        ids = sorted(set(pair_ids))
+        self._settled_pairs |= set(ids)
+        self._settled_tracked = ids
 
     def _set_pair_universe_from(self, pairs: Sequence[TrackedPair]) -> None:
         self.set_pair_universe(

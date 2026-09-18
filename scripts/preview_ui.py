@@ -27,12 +27,14 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import uvicorn
 from tests.browser import BrowserError, TerminalState, guarded_app
+
+from arb.ui.control import ConfirmRequired, ControlResult, InvalidParams
 
 C = 10_000  # Qty units per contract
 POLL_GAP_S = (5.0, 9.0)  # Polymarket US: seconds between polls, per market
@@ -274,6 +276,262 @@ class PreviewState(TerminalState):
         ]
         self.msg_total = 0
         self.lat: list[float] = []
+        self._seed_control()
+
+    # -- a pretend control plane, so /control can be driven end to end --------
+    #
+    # Nothing here is the real executor: it flips values in the payload the
+    # page renders from, prices a preview, arms G3 jobs and prints a DOCTOR
+    # report, which is everything the page's interaction design needs to be
+    # judged. The real rules (audit, read-only, single-flight) are tested
+    # against the real ControlPlane in tests/test_control.py.
+
+    def _seed_control(self) -> None:
+        k = [m["ticker"] for m in self._markets if m["venue"] == "kalshi"]
+        pm = [m["ticker"] for m in self._markets if m["venue"] == "polymarket_us"]
+        legs_k, legs_pm = (
+            ["KXMUSKNW-26DEC31-T900", "KXSCOURT-29-NR"],
+            ["pnwpc-elonmusk-2026-12-31-gt900b"],
+        )
+        c = self.control
+        c["bind"] = {"host": "0.0.0.0", "loopback": False, "remote_allowed": True}
+        c["paper"].update(
+            notional_ticks=960_000,
+            trades=7,
+            positions=1,
+            skipped_invalid=3,
+            skipped_suspended=0,
+            taken_levels=2,
+        )
+        c["pairs_top"] = 10
+        c["pairs"] = {
+            "confirmed": 69,
+            "tracked": 14,
+            "total": 11967,
+            "live": 11,
+            "settled": [136, 137, 138],
+            "poll": {
+                "attached": True,
+                "targets": len(pm) + len(legs_pm),
+                "interval_s": 2.222,
+                "cycle_s": 2.222 * (len(pm) + len(legs_pm)),
+                "per_pair_s": 2.2,
+            },
+        }
+        c["tracked_pairs"] = 11
+        c["universe"] = {
+            "kalshi": {"tickers": k + legs_k, "base": k, "pairs": legs_k, "attached": True},
+            "polymarket_us": {
+                "slugs": pm + legs_pm,
+                "base": pm,
+                "pairs": legs_pm,
+                "attached": True,
+                "interval_s": 2.222,
+                "cycle_s": 2.222 * (len(pm) + len(legs_pm)),
+            },
+        }
+        c["jobs"] = []
+        self._tokens: dict[str, str] = {}
+        self.audit = []
+
+    def _effect(self, action: str, params: dict[str, Any]) -> str:
+        if action == "pairs.top":
+            n = params.get("n")
+            if not isinstance(n, int) or n < 0:
+                raise InvalidParams("n must be a whole number, 0 or more")
+            pr = self.control["pairs"]
+            targets = len(self.control["universe"]["polymarket_us"]["base"]) + n
+            poll = pr["poll"]
+            return (
+                f"replace the watch set with {n} confirmed pairs, dealt one at a time "
+                f"across Kalshi events: {abs(n - pr['tracked']) + 2} rows change, "
+                f"watching {n} of {pr['confirmed']} confirmed pairs; "
+                f"Polymarket US {poll['targets']} \u2192 {targets} poll targets, "
+                f"{poll['cycle_s']:.1f}s \u2192 {targets * 2.222:.1f}s per book"
+            )
+        if action == "pairs.track":
+            ids = params.get("ids") or []
+            return f"stop watching {len(ids)} pairs: {len(ids)} rows change ({len(ids)} untracked)"
+        if action == "universe.kalshi":
+            n_k = len(params.get("tickers") or [])
+            return (
+                f"subscribe to {n_k} Kalshi markets: the socket reconnects (seconds of "
+                "gap, every book resnapshots) and dropped books are evicted"
+            )
+        if action == "universe.polymarket":
+            n_pm = len(params.get("slugs") or [])
+            return f"poll {n_pm} Polymarket US markets besides the watched pairs' legs"
+        if action == "jobs.propose":
+            return (
+                "fetch both venues' catalogues, score every candidate and upsert the "
+                "proposals (thousands of rows)"
+            )
+        if action == "jobs.backfill":
+            return "fill in missing event slugs on already-proposed pairs"
+        return action.replace(".", " ")
+
+    async def preview_control(self, action: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        return {
+            "action": action,
+            "effect": self._effect(action, params or {}),
+            "grade": "G2",
+            "preview": True,
+        }
+
+    async def execute_control(
+        self, action: str, params: dict[str, Any] | None, *, confirm: str | None
+    ) -> ControlResult:
+        p = params or {}
+        c = self.control
+        effect = self._effect(action, p)
+        armed = self._tokens.get(action)
+        if action in ("jobs.propose", "jobs.backfill") and (confirm is None or armed != confirm):
+            self._tokens[action] = token = f"tok-{action}-{time.time_ns()}"
+            raise ConfirmRequired(action, token, effect, 30.0)
+        changed, message, detail = True, "", {}
+        if action in ("paper.suspend", "paper.resume"):
+            want = action == "paper.suspend"
+            changed = c["paper"]["suspended"] != want
+            c["paper"].update(suspended=want, enabled=not want)
+            message = (
+                ("paper trading suspended" if want else "paper trading resumed")
+                if changed
+                else ("already suspended" if want else "already trading")
+            )
+        elif action in ("recording.start", "recording.stop"):
+            want = action == "recording.start"
+            changed = c["recording"] != want
+            c["recording"] = self.recording = want
+            message = (
+                ("recording on" if want else "recording off")
+                if changed
+                else "already " + ("on" if want else "off")
+            )
+        elif action == "paper.limits":
+            lim = c["paper"]["limits"]
+            new = {
+                "min_net_ticks": p.get("min_net_ticks", lim["min_net_ticks"]),
+                "max_qty_per_pair": p.get("max_cts_per_pair", lim["max_qty_per_pair"] // C) * C,
+                "max_notional_ticks": p.get("max_notional_ticks", lim["max_notional_ticks"]),
+            }
+            changed = new != lim
+            c["paper"]["limits"] = new
+            message = (
+                "limits applied" if changed else "nothing changed: those are already the limits"
+            )
+        elif action == "pairs.top":
+            n = p["n"]
+            changed = n != c["pairs"]["tracked"] or bool(c["pairs"]["settled"])
+            c["pairs"].update(tracked=n, live=n, settled=[])
+            c["pairs_top"], c["tracked_pairs"] = n, n
+            message = (
+                f"watching {n} pairs"
+                if changed
+                else f"nothing changed: the top {n} are already the watch set"
+            )
+        elif action == "pairs.track":
+            gone = len(p.get("ids") or [])
+            c["pairs"]["tracked"] -= gone
+            c["pairs"]["settled"] = []
+            message = f"0 tracked, {gone} untracked; watching {c['pairs']['live']} pairs"
+        elif action == "universe.kalshi":
+            u = c["universe"]["kalshi"]
+            u["base"] = list(p["tickers"])
+            u["tickers"] = u["base"] + u["pairs"]
+            message = f"subscribed to {len(u['tickers'])} Kalshi markets; the socket reconnected"
+        elif action == "universe.polymarket":
+            u = c["universe"]["polymarket_us"]
+            u["base"] = list(p["slugs"])
+            u["slugs"] = u["base"] + u["pairs"]
+            c["pairs"]["poll"].update(targets=len(u["slugs"]), cycle_s=2.222 * len(u["slugs"]))
+            message = f"polling {len(u['slugs'])} Polymarket US markets"
+        elif action.startswith("jobs.") and action != "jobs.cancel":
+            name = action.split(".", 1)[1]
+            job_id = f"{name}-{time.time_ns()}"
+            threading.Thread(target=self._run_job, args=(job_id, name), daemon=True).start()
+            message, detail = f"{name} started", {"job_id": job_id}
+        elif action == "jobs.cancel":
+            for j in c["jobs"]:
+                if j["job_id"] == p.get("job_id") and j["status"] == "running":
+                    j["status"] = "cancelled"
+            message = "cancelled"
+        self.audit.insert(
+            0,
+            {
+                "id": len(self.audit) + 1,
+                "ts_ns": time.time_ns(),
+                "action": action,
+                "effect": effect,
+                "result": "ok",
+                "error": None,
+                "params": p,
+            },
+        )
+        self.send({"t": "control", "control": c})
+        return ControlResult(
+            action, effect, changed, {"message": message, **detail}, len(self.audit)
+        )
+
+    DOCTOR: ClassVar[list[str]] = [
+        "[ok  ] kalshi keys          key id set, key file at secrets/kalshi_private_key.pem",
+        "[warn] polymarket_us keys   not provisioned (WS market data needs them)",
+        "[ok  ] kalshi               HTTP 200 in 102 ms",
+        "[ok  ] polymarket_us        HTTP 200 in 55 ms",
+        "[ok  ] ntp clock            offset -0.3 ms vs pool.ntp.org (rtt 10.8 ms)",
+        "[ok  ] database             connected",
+        "[ok  ] migrations           at revision 0005",
+        "[ok  ] disk                 440.7 GB free",
+    ]
+
+    def _run_job(self, job_id: str, name: str) -> None:
+        lines = (
+            self.DOCTOR if name == "doctor" else [f"{name}: step {i + 1} of 12" for i in range(12)]
+        )
+        job = {
+            "job_id": job_id,
+            "name": name,
+            "group": name,
+            "params": {},
+            "status": "running",
+            "phase": "start",
+            "message": "",
+            "step": 0,
+            "total": len(lines),
+            "started_ts_ns": time.time_ns(),
+            "finished_ts_ns": None,
+            "elapsed_s": 0.0,
+            "error": None,
+            "result": None,
+            "lines_total": 0,
+            "lines_dropped": 0,
+        }
+        self.control["jobs"].insert(0, job)
+        self._job_lines = getattr(self, "_job_lines", {})
+        self._job_lines[job_id] = []
+        t0 = time.monotonic()
+        for i, line in enumerate(lines):
+            time.sleep(0.35 if name == "doctor" else 1.0)
+            if job["status"] != "running":
+                break
+            self._job_lines[job_id].append(line)
+            job.update(
+                step=i + 1,
+                phase="checks" if name == "doctor" else "scoring",
+                elapsed_s=time.monotonic() - t0,
+                lines_total=i + 1,
+            )
+            self.send({"t": "job", "job": dict(job), "tail": self._job_lines[job_id][-20:]})
+        if job["status"] == "running":
+            job["status"] = "ok"
+        job.update(finished_ts_ns=time.time_ns(), elapsed_s=time.monotonic() - t0)
+        self.send({"t": "job", "job": dict(job), "tail": self._job_lines[job_id][-20:]})
+        self.send({"t": "control", "control": self.control})
+
+    def job_payload(self, job_id: str) -> dict[str, Any] | None:
+        for j in self.control["jobs"]:
+            if j["job_id"] == job_id:
+                return {**j, "lines": list(getattr(self, "_job_lines", {}).get(job_id, []))}
+        return None
 
     def hello_markets(self) -> list[dict[str, Any]]:
         return self._markets
@@ -297,8 +555,11 @@ class PreviewState(TerminalState):
 def run_sim(st: PreviewState) -> None:
     kalshi = [s for s in st.sims if s.venue == "kalshi"]
     poly = [s for s in st.sims if s.venue == "polymarket_us"]
+    last_poll = time.monotonic()
     next_poll = {s.market_id: time.monotonic() + rng.uniform(1, 6) for s in poly}
-    last_stats = time.monotonic()
+    last_stats = started = time.monotonic()
+    last_total = 0
+    polls = 0
     total_rate = sum(s.rate for s in kalshi)
     while True:
         time.sleep(rng.expovariate(total_rate))
@@ -332,6 +593,8 @@ def run_sim(st: PreviewState) -> None:
         for ps in poly:
             if now >= next_poll[ps.market_id]:
                 next_poll[ps.market_id] = now + rng.uniform(*POLL_GAP_S)
+                polls += 1
+                last_poll = now
                 deltas = ps.repoll()
                 st.send(ps.payload())
                 for side, p, dq in deltas:
@@ -349,21 +612,24 @@ def run_sim(st: PreviewState) -> None:
                     )
         if now - last_stats >= 1.0:
             last_stats = now
-            ctl = dict(st.control)
-            uni = dict(ctl.get("universe") or {})
-            uni["polymarket_us"] = {
-                **(uni.get("polymarket_us") or {}),
-                "cycle_s": CYCLE_S,
-                "slugs": [s.market_id.split(":", 1)[1] for s in poly],
-            }
-            ctl["universe"] = uni
-            st.send({"t": "control", "control": ctl})
+            st.send({"t": "control", "control": st.control})
             w = sorted(st.lat[-LATENCY_KEEP:])
             n = len(w)
+            rate, last_total = float(st.msg_total - last_total), st.msg_total
             st.send(
                 {
                     "t": "stats",
                     "msg_total": st.msg_total,
+                    "msg_rate_1s": rate,
+                    "recorder": {"enqueued": st.msg_total, "dropped": 0},
+                    "polymarket_us": {
+                        "polls": polls,
+                        "rate_limited": 0,
+                        "errors": 0,
+                        "targets": len(poly),
+                        "rate_per_s": round(len(poly) / CYCLE_S, 2),
+                        "last_poll_age_ms": (now - last_poll) * 1000,
+                    },
                     "latency_ms": {
                         "last": st.lat[-1] if st.lat else None,
                         "median": w[n // 2] if n else None,
@@ -375,7 +641,7 @@ def run_sim(st: PreviewState) -> None:
                     "parse_errors": 0,
                     "seq_gaps": 0,
                     "ws_clients": 1,
-                    "uptime_s": now,
+                    "uptime_s": now - started,
                 }
             )
 

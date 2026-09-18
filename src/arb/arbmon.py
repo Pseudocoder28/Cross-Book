@@ -13,9 +13,10 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from arb.book import Book
+from arb.book import Book, Level
 from arb.books import BookManager
 from arb.edge import EdgeQuote, FeeFn, best_edge
+from arb.taken import TakenLiquidity
 from arb.types import QTY_PER_CONTRACT
 
 
@@ -61,22 +62,74 @@ class ArbMonitor:
                 seen[pair.pair_id] = pair
         return list(seen.values())
 
-    def best_quotes(self, pair: TrackedPair) -> tuple[EdgeQuote, EdgeQuote]:
-        """Both directions for one pair off the current books."""
+    def best_quotes(
+        self, pair: TrackedPair, *, taken: TakenLiquidity | None = None
+    ) -> tuple[EdgeQuote, EdgeQuote]:
+        """Both directions for one pair off the current books.
+
+        With ``taken``, the ladders are first netted of the size paper fills
+        have already consumed: /arb shows the market as it is, the paper
+        trader is shown the market as it would be had its fills been real.
+        """
         kb = self._books.get(pair.kalshi_market_id)
         pb = self._books.get(pair.polymarket_market_id)
+        k, p = pair.kalshi_market_id, pair.polymarket_market_id
+
+        def side(book: Book | None, market_id: str, which: str) -> Sequence[Level]:
+            if book is None:
+                return ()
+            levels = book.bids() if which == "bid" else book.asks()
+            return taken.net(market_id, which, levels) if taken is not None else levels
+
         return best_edge(
             venue_a="kalshi",
-            market_a=pair.kalshi_market_id,
-            bids_a=kb.bids() if kb else (),
-            asks_a=kb.asks() if kb else (),
+            market_a=k,
+            bids_a=side(kb, k, "bid"),
+            asks_a=side(kb, k, "ask"),
             fee_a=pair.kalshi_fee,
             venue_b="polymarket_us",
-            market_b=pair.polymarket_market_id,
-            bids_b=pb.bids() if pb else (),
-            asks_b=pb.asks() if pb else (),
+            market_b=p,
+            bids_b=side(pb, p, "bid"),
+            asks_b=side(pb, p, "ask"),
             fee_b=pair.polymarket_fee,
         )
+
+    def consume(self, pair: TrackedPair, direction: str, qty: int, taken: TakenLiquidity) -> None:
+        """Record a paper fill against the levels it took, on both legs.
+
+        ``yes_a_no_b`` lifts Kalshi's asks and hits Polymarket's YES bids;
+        ``yes_b_no_a`` is the mirror.
+        """
+        ask_mid, bid_mid = (
+            (pair.kalshi_market_id, pair.polymarket_market_id)
+            if direction == "yes_a_no_b"
+            else (pair.polymarket_market_id, pair.kalshi_market_id)
+        )
+        ask_book, bid_book = self._books.get(ask_mid), self._books.get(bid_mid)
+        if ask_book is not None:
+            taken.consume(ask_mid, "ask", ask_book.asks(), qty)
+        if bid_book is not None:
+            taken.consume(bid_mid, "bid", bid_book.bids(), qty)
+
+    def untradable(self, pair: TrackedPair, *, now_mono_ns: int) -> str | None:
+        """Why this pair must not be traded right now, or None.
+
+        A missing book, or one that is structurally wrong — a sequence gap, a
+        crossed book, a bad level — is a ladder nobody should price off until
+        it resyncs. ``stale`` alone is not structural: on a streamed venue a
+        quiet book is still the book.
+        """
+        for venue, market_id in (
+            ("kalshi", pair.kalshi_market_id),
+            ("polymarket_us", pair.polymarket_market_id),
+        ):
+            book = self._books.get(market_id)
+            if book is None:
+                return f"{venue}: no book"
+            status = book.status(now_mono_ns=now_mono_ns)
+            if not status.valid and status.reason is not None and status.reason.value != "stale":
+                return f"{venue}: {status.reason.value}"
+        return None
 
     def quote(self, pair: TrackedPair, *, now_mono_ns: int | None = None) -> dict[str, Any]:
         now = now_mono_ns if now_mono_ns is not None else time.monotonic_ns()

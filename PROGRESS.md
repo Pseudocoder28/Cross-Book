@@ -497,6 +497,25 @@ exists; the other half is the part with money in it:
 - A JS test harness, or an explicit written decision to keep verifying the
   browser by hand.
 
+## Since the watch-set milestone (2026-09-18)
+
+- **MONITOR depth panel redesigned** as a probability scope over an exact
+  ladder (`pages/depth.js`, `pages/depth-model.js`); motion annotates changes
+  and never interpolates. `scripts/preview_ui.py` + `scripts/snap.py` serve and
+  screenshot the UI against simulated books.
+- **A /pairs rejection stops the pair trading at once** (synchronous prune,
+  veto against in-flight reloads, background reconcile).
+- **Paper fills consume liquidity** (`arb.taken`); invalid books are never
+  traded; `PaperTrader.trade_pair` is the one entry point.
+- **Kalshi reconnect loop fixed**: a seq that restarts is a new subscription.
+- **SYSTEM redesigned** as verdict → pipeline → checks (`pages/system-model.js`).
+- **CONTROL redesigned**: uniform sections, switches as verbs, limits in ¢/contracts/$,
+  in-section confirm and receipt, preview-before-replace (`{"preview": true}`), base-only
+  universe boxes, jobs + live output + audit in the rail (`pages/control-model.js`).
+- **/arb's BOOKS column became K · P AGE**: Kalshi reads LIVE (streamed — a quiet
+  book is an exact book), Polymarket US reads its quote's age in seconds (polled — age
+  is freshness), amber only on the leg with a problem (`pages/arb-model.js`).
+
 ## Open questions
 
 - **The confirmed inventory is exhausted, and that is now the binding
@@ -513,6 +532,9 @@ exists; the other half is the part with money in it:
   false positives were confirmed at 1.000. Re-scoring changes every stored row
   and only takes effect after a re-propose; deferred, but it is the next real
   pair-quality fix.
+- **Paper fills assume no replenishment.** A level paper has taken stays taken until it
+  leaves the book, which undercounts fills against a maker who would have
+  re-quoted. Deliberate (see decisions.md); revisit with real fill data.
 - **`max_book_age_ms` on the paper trader is designed but not landed.** The
   gate belongs in `PaperTrader.consider`, comparing monotonic clocks only (the
   wall-clock skew that made a latency metric read negative would poison a
@@ -520,6 +542,12 @@ exists; the other half is the part with money in it:
   per book and every pair has a Polymarket leg, so any honest default refuses
   every edge and empties /paper. Land it after the cycle is shorter, defaulting
   to 0 = off.
+  **Evidence it matters (2026-09-18):** all 720 recorded paper trades went one
+  direction (buy YES on Kalshi, sell into a Polymarket bid). Both books were
+  checked against the venues and are right; the Polymarket quote behind a fill
+  was a median 17s old (p90 45s; 196 of 685 over 30s), and one bid was seen
+  standing at 74¢ for ~90s after the venue had moved to 60¢. Paper P&L to date is
+  an upper bound. /arb now shows the age per row so it can at least be seen.
 - **`/api/pairs` ships ~18.5 MB to render 500 rows,** and `GZipMiddleware` is
   absent from the app entirely. Lean rows plus gzip is roughly a 94% reduction.
   Unrelated to anything above; its own PR.
