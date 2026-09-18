@@ -1669,6 +1669,7 @@ class ControlPlane:
             # unbounded, so N is always filled if the inventory allows it —
             # a hard per-event cap would silently return fewer pairs than asked.
             now = datetime.now(UTC)
+
             def over(f: PairFlags) -> bool:
                 # Two nets: the close time recorded at proposal, and whatever
                 # the venue said last time we actually asked.
