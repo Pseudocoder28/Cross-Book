@@ -24,6 +24,22 @@ def market_id(ticker: str) -> str:
     return f"{VENUE}:{ticker}"
 
 
+def event_ticker_of(market_ticker: str) -> str:
+    """FALLBACK ONLY: the event a market ticker probably belongs to.
+
+    The authoritative value is ``event_ticker``, which the proposer already
+    records on every Kalshi leg as ``detail.kalshi.event_slug`` (see
+    ``venues/kalshi/discovery.py``) and ``jobs.backfill`` repairs on older rows.
+    Prefer that. The docs describe ``event_ticker`` as a field ON a market and
+    nowhere promise the market ticker embeds it, so this string rule is a
+    guess — ``KXBTCY-27JAN0100-B22500`` → ``KXBTCY-27JAN0100`` holds for the
+    common shapes, but tickers whose final segment itself contains a dash do
+    not round-trip. Use it only when ``event_slug`` is empty, and never to
+    decide anything a venue call could answer.
+    """
+    return market_ticker.rsplit("-", 1)[0] or market_ticker
+
+
 class KalshiMarket(BaseModel):
     """The slice of a Kalshi market object the system uses; extras ignored.
 

@@ -5,6 +5,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -715,3 +716,111 @@ async def test_the_watch_set_is_the_flag_not_the_top_of_the_score_order(
         assert (await load_tracked_pairs(AppConfig(), RunContext("r"), engine)).tracked == []
     finally:
         await engine.dispose()
+
+
+async def test_a_settled_leg_is_not_watched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A market the venue says is over must not keep a watch slot.
+
+    The stored ``close_time`` that selection filters on is a snapshot from
+    proposal time, so it misses a market that closed early. Three of the live
+    watch set were esports maps that had resolved days before; they held poll
+    budget, showed no movement, and nothing said why. This is the second net,
+    and it costs no extra request — both objects are already fetched for fees.
+    """
+    live = KalshiMarket(ticker="K", event_ticker="E", market_type="binary", status="active")
+    settled = KalshiMarket(ticker="K", event_ticker="E", market_type="binary", status="finalized")
+    event = KalshiEvent(event_ticker="E", series_ticker="")
+    by_ticker = {"K11": live, "K46": settled}
+
+    async def fake_market(_c: object, _r: object, ticker: str, **_k: object) -> KalshiMarket:
+        return by_ticker[ticker]
+
+    async def fake_event(*_a: object, **_k: object) -> KalshiEvent:
+        return event
+
+    async def fake_pm(*_a: object, **_k: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr("arb.pairs.tracked.fetch_market", fake_market)
+    monkeypatch.setattr("arb.pairs.tracked.fetch_event", fake_event)
+    monkeypatch.setattr("arb.pairs.tracked.fetch_markets_by_slug", fake_pm)
+
+    engine = await _tied_engine(46, confirmed=46)
+    try:
+        await store.set_tracked(engine, [11, 46], True)
+        load = await load_tracked_pairs(AppConfig(), RunContext("r"), engine)
+
+        assert [p.pair_id for p in load.tracked] == [11]
+        assert load.expired == [(46, "kalshi finalized")]
+        # It must also stop COSTING anything — the whole point is poll budget.
+        assert load.polymarket_slugs == ["p11"]
+        assert load.kalshi_tickers == ["K11"]
+        # The flag itself is untouched: a read path does not mutate operator
+        # state. Clearing it is a control action with an audit row.
+        assert {r["id"] for r in await store.list_pairs(engine, tracked=True)} == {11, 46}
+    finally:
+        await engine.dispose()
+
+
+async def test_an_unreachable_polymarket_market_is_kept_not_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown means keep. A gateway hiccup must never empty the watch set."""
+    market = KalshiMarket(ticker="K", event_ticker="E", market_type="binary", status="active")
+    event = KalshiEvent(event_ticker="E", series_ticker="")
+
+    async def fake_market(*_a: object, **_k: object) -> KalshiMarket:
+        return market
+
+    async def fake_event(*_a: object, **_k: object) -> KalshiEvent:
+        return event
+
+    async def fake_pm(*_a: object, **_k: object) -> list[object]:
+        return []  # every Polymarket leg resolves to None
+
+    monkeypatch.setattr("arb.pairs.tracked.fetch_market", fake_market)
+    monkeypatch.setattr("arb.pairs.tracked.fetch_event", fake_event)
+    monkeypatch.setattr("arb.pairs.tracked.fetch_markets_by_slug", fake_pm)
+
+    engine = await _tied_engine(46, confirmed=46)
+    try:
+        await store.set_tracked(engine, [11, 46], True)
+        load = await load_tracked_pairs(AppConfig(), RunContext("r"), engine)
+        assert [p.pair_id for p in load.tracked] == [11, 46] and load.expired == []
+    finally:
+        await engine.dispose()
+
+
+def test_pair_flags_carry_the_event_key_and_the_earlier_close() -> None:
+    """The two fields the watch-set selection needs, and their fallbacks."""
+    stored = store.PairFlags(
+        1,
+        "confirmed",
+        False,
+        1.0,
+        "kalshi:KXBTCY-27JAN0100-B22500",
+        "polymarket_us:p",
+        kalshi_event="KXBTCY-27JAN0100",
+        kalshi_close="2026-12-31T23:00:00+00:00",
+        polymarket_close="2026-09-15T11:00:00Z",
+    )
+    # The stored event ticker wins, and the EARLIER leg governs the close: a
+    # pair stops being tradable as a pair the moment either side settles.
+    assert stored.event_key == "KXBTCY-27JAN0100"
+    assert stored.close_time == datetime(2026, 9, 15, 11, 0, tzinfo=UTC)
+    assert stored.is_closed(datetime(2026, 9, 17, tzinfo=UTC)) is True
+    assert stored.is_closed(datetime(2026, 9, 14, tzinfo=UTC)) is False
+
+    # No stored slug: fall back to the ticker rule, which is a guess and is
+    # documented as one. It only has to bucket, not to be authoritative.
+    guessed = store.PairFlags(
+        2, "confirmed", False, 1.0, "kalshi:KXSCOURT-29-AT", "polymarket_us:p"
+    )
+    assert guessed.event_key == "KXSCOURT-29"
+
+    # Unknown and unparseable close times both mean OPEN. Failing the other way
+    # would let one missing field silently empty the watch set.
+    assert guessed.close_time is None
+    assert guessed.is_closed(datetime(2026, 9, 17, tzinfo=UTC)) is False
+    junk = store.PairFlags(3, "confirmed", False, 1.0, "kalshi:K", "p:p", kalshi_close="soon")
+    assert junk.close_time is None and junk.is_closed(datetime(2026, 9, 17, tzinfo=UTC)) is False

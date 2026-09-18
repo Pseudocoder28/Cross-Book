@@ -966,6 +966,124 @@ async def test_pairs_top_is_a_bulk_setter_not_a_selector(
     await engine.dispose()
 
 
+async def events_engine() -> AsyncEngine:
+    """The shape that broke the live system: one huge event and two small ones.
+
+    Ten pairs on the Bitcoin ladder, one on each of two other events, every
+    score exactly 1.000. Ordered by (score desc, id) — the old selection — the
+    first ten rows are all Bitcoin, so any top-N under 11 was one bet.
+    """
+    engine = await sqlite_engine()
+    rows = [(i, "KXBTCY-27JAN0100", f"KXBTCY-27JAN0100-B{i}") for i in range(1, 11)]
+    rows.append((11, "KXSCOURT-29", "KXSCOURT-29-AT"))
+    rows.append((12, "KXMUSKNW-26DEC31", "KXMUSKNW-26DEC31-T600"))
+    async with engine.begin() as conn:
+        await conn.execute(
+            insert(PairRow),
+            [
+                {
+                    "kalshi_market_id": f"kalshi:{ticker}",
+                    "polymarket_market_id": f"polymarket_us:p{i}",
+                    "status": "confirmed",
+                    "score": 1.0,
+                    "detail": {
+                        "kalshi": {
+                            "market_id": f"kalshi:{ticker}",
+                            "ticker": ticker,
+                            "event_slug": event,
+                        },
+                        "polymarket_us": {
+                            "market_id": f"polymarket_us:p{i}",
+                            "ticker": f"p{i}",
+                        },
+                    },
+                }
+                for i, event, ticker in rows
+            ],
+        )
+    return engine
+
+
+async def test_pairs_top_spreads_across_kalshi_events(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The regression test for the all-Bitcoin watch set.
+
+    Every score is 1.000, so the old ``flags[:n]`` was ``ORDER BY id``, and ids
+    cluster by event because a proposal run inserts one event's markets
+    together. Ten of ten slots went to consecutive strike bands of one Bitcoin
+    ladder — ten rows, one bet — and /arb sat still. Selection now deals one
+    pair per event before it deals a second from any.
+    """
+    engine = await events_engine()
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    await control.execute("pairs.top", {"n": 3})
+
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {1, 11, 12}, "one per event, not the first three Bitcoin strikes"
+
+    # Asking for more than there are events keeps filling: round two takes the
+    # second-best row of each event, so N is still honoured.
+    await control.execute("pairs.top", {"n": 5})
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {1, 2, 3, 11, 12}, "rounds are unbounded; N is never silently shrunk"
+    await engine.dispose()
+
+
+async def test_pairs_top_skips_a_pair_whose_leg_has_already_closed(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """A settled market must not win a watch slot, and must be said out loud.
+
+    Three of the live watch set were esports maps that had resolved days
+    earlier; nothing filtered them, so they burned poll budget and showed no
+    movement. The skip is counted in the sentence that goes to the audit row —
+    a selection quietly returning fewer pairs than asked is how this started.
+    """
+    engine = await sqlite_engine()
+    async with engine.begin() as conn:
+        await conn.execute(
+            insert(PairRow),
+            [
+                {
+                    "kalshi_market_id": f"kalshi:K{i}",
+                    "polymarket_market_id": f"polymarket_us:p{i}",
+                    "status": "confirmed",
+                    "score": 1.0,
+                    "detail": {
+                        "kalshi": {
+                            "market_id": f"kalshi:K{i}",
+                            "ticker": f"K{i}",
+                            "event_slug": f"EV{i}",
+                            "close_time": close,
+                        },
+                        "polymarket_us": {"market_id": f"polymarket_us:p{i}", "ticker": f"p{i}"},
+                    },
+                }
+                for i, close in (
+                    (1, "2020-01-01T00:00:00+00:00"),  # long settled
+                    (2, "2099-01-01T00:00:00+00:00"),  # far future
+                    (3, None),  # unknown: must fail OPEN, not closed
+                )
+            ],
+        )
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    result = await control.execute("pairs.top", {"n": 3})
+
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {2, 3}, "the settled pair is skipped; an unknown close time is not"
+    assert "1 confirmed pair already closed and is skipped" in result.effect
+    assert result.detail["skipped_expired"] == [1]
+    # And the operator's own record says so, not just the screen.
+    rows = await list_control_actions(engine)
+    assert "already closed" in rows[-1]["effect"]
+    await engine.dispose()
+
+
 async def test_the_effect_sentence_prices_the_change_before_it_happens(
     monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
 ) -> None:
@@ -1049,4 +1167,208 @@ async def test_a_zero_row_write_still_repairs_a_drifted_watch_set(
     assert "drifted" in result.detail["message"]
     assert reloads == [[3], []], "the reload actually ran and resolved to nothing"
     assert host.arbmon is None or [p.pair_id for p in host.arbmon.pairs] == []
+    await engine.dispose()
+
+
+async def test_a_venue_settlement_is_remembered_by_the_next_selection(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """What the venue said last time must not be forgotten on the next press.
+
+    The chooser filters on ``close_time`` recorded at proposal, which misses a
+    market that closed early — so the load-time check catches it, but only
+    after it has taken a watch slot. Live, six settled esports maps took six
+    of twelve slots on every single bulk set, and re-pressing never helped.
+    """
+    engine = await events_engine()
+    stub_tracked_load(monkeypatch)
+    control = wired(FakeHost(), engine, polymarket_source)
+
+    # The venue reports that the whole Bitcoin ladder has settled.
+    control._settled_pairs = set(range(1, 11))
+
+    await control.execute("pairs.top", {"n": 3})
+
+    watched = {r["id"] for r in await pairs_store.list_pairs(engine, tracked=True)}
+    assert watched == {11, 12}, "a slot must not go back to a market known to be over"
+    await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# a decision on /pairs reaches the running engine
+# ---------------------------------------------------------------------------
+
+
+def _live_ids(host: FakeHost) -> list[int]:
+    return sorted(p.pair_id for p in host.arbmon.pairs) if host.arbmon else []
+
+
+def _arb_frames(host: FakeHost) -> list[list[int]]:
+    return [sorted(q["pair_id"] for q in f["quotes"]) for f in host.frames if f["t"] == "arb"]
+
+
+async def test_rejecting_a_watched_pair_stops_it_being_quoted_at_once(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The reported bug: move a pair from confirmed to rejected on /pairs and
+    it stayed on /arb. The store cleared the flag in SQL and nothing told the
+    running monitor, so the pair kept being quoted, subscribed, polled and
+    offered to the paper trader until some other watch-set action happened
+    to reload. A decision now takes the pair off the live watch set at once,
+    /arb is told in the same moment, and the audit trail says what stopped."""
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [1, 2], "tracked": True})
+    assert _live_ids(host) == [1, 2]
+
+    await pairs_store.decide(engine, 1, "rejected")
+    result = await control.after_decision([1], "rejected")
+
+    # Immediately — before any venue call — not after the reload.
+    assert result["stopped"] == [1]
+    assert _live_ids(host) == [2], "a rejected pair must leave the running monitor"
+    assert _arb_frames(host)[-1] == [2], "/arb must be told now, not on the next book change"
+    await control.settle()
+    assert _live_ids(host) == [2]
+    newest = (await list_control_actions(engine))[0]  # listed newest first
+    assert newest["action"] == "pairs.decide"
+    assert "stopped watching 1 that was being quoted (id 1)" in newest["effect"]
+    await engine.dispose()
+
+
+async def test_rejecting_the_last_watched_pair_empties_arb(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """With nothing watched there is no monitor and so no book ever triggers
+    another arb frame: without an explicit empty frame, /arb would show the
+    rejected pair's last quote for the rest of the session."""
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [3], "tracked": True})
+
+    await pairs_store.decide(engine, 3, "rejected")
+    await control.after_decision([3], "rejected")
+
+    assert host.arbmon is None
+    assert _arb_frames(host)[-1] == []
+    await control.settle()
+    assert host.arbmon is None
+    await engine.dispose()
+
+
+async def test_deciding_a_pair_nobody_was_watching_goes_nowhere_near_the_venues(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """Most decisions are on proposals that were never watched. They must not
+    reload the watch set: a reload fetches every watched market from the
+    venues, and rejecting a queue of proposals would hammer them."""
+    engine = await pairs_engine()
+    reloads = stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [1], "tracked": True})
+    before = len(reloads)
+
+    await pairs_store.decide(engine, 5, "rejected")
+    assert await control.after_decision([5], "rejected") == {"stopped": []}
+    await pairs_store.decide(engine, 1, "confirmed")
+    assert await control.after_decision([1], "confirmed") == {"stopped": []}, (
+        "confirming is not watching"
+    )
+    await control.settle()
+
+    assert len(reloads) == before
+    assert _live_ids(host) == [1]
+    await engine.dispose()
+
+
+async def test_a_failed_reload_still_stops_the_rejected_pair_trading(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The reload fetches from the venues and can fail. The decision is already
+    committed, and the one outcome that must not happen is a rejected pair
+    going on being quoted and paper-traded — so it is dropped from the
+    running monitor directly, and the audit row says the reload failed."""
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [1, 2], "tracked": True})
+
+    async def venue_down(*_a: Any, **_k: Any) -> TrackedLoad:
+        raise RuntimeError("venue unreachable")
+
+    monkeypatch.setattr("arb.ui.control.load_tracked_pairs", venue_down)
+    await pairs_store.decide(engine, 2, "rejected")
+    await control.after_decision([2], "rejected")
+    assert _live_ids(host) == [1], "dropped before the reload is even tried"
+    await control.settle()
+
+    assert _live_ids(host) == [1]
+    assert _arb_frames(host)[-1] == [1]
+    newest = (await list_control_actions(engine))[0]  # listed newest first
+    assert "the reload failed" in newest["effect"]
+    await engine.dispose()
+
+
+async def test_watching_nothing_clears_arb_at_once(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The same stale-/arb hole, reached from /control: WATCH NOTHING left the
+    last quotes on screen because no watched book would ever change again."""
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [1, 2], "tracked": True})
+
+    await control.execute("pairs.top", {"n": 0})
+
+    assert host.arbmon is None
+    assert _arb_frames(host)[-1] == []
+    await engine.dispose()
+
+
+async def test_a_rejection_during_an_in_flight_reload_is_not_undone_by_it(
+    monkeypatch: pytest.MonkeyPatch, polymarket_source: Any
+) -> None:
+    """The race the review found. A reload reads the watch set from the
+    database, then spends seconds on venue calls before installing it. Reject
+    a pair inside that window and the reload — holding a read from before the
+    rejection — would install it straight back, live and paper-trading. The
+    rejection vetoes the pair and every install drops vetoed ids."""
+    import arb.ui.control as control_module
+
+    engine = await pairs_engine()
+    stub_tracked_load(monkeypatch)
+    host = FakeHost()
+    control = wired(host, engine, polymarket_source)
+    await control.execute("pairs.track", {"ids": [1], "tracked": True})
+
+    read_db = control_module.load_tracked_pairs
+    has_read = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_venues(*args: Any, **kwargs: Any) -> TrackedLoad:
+        load = await read_db(*args, **kwargs)  # the database read: pairs 1 and 2
+        has_read.set()
+        await release.wait()  # ...then the venue calls take their time
+        return load
+
+    monkeypatch.setattr("arb.ui.control.load_tracked_pairs", slow_venues)
+    in_flight = asyncio.create_task(control.execute("pairs.track", {"ids": [2], "tracked": True}))
+    await has_read.wait()
+
+    await pairs_store.decide(engine, 2, "rejected")  # lands mid-reload
+    await control.after_decision([2], "rejected")
+    release.set()
+    await in_flight
+    await control.settle()
+
+    assert _live_ids(host) == [1], "the in-flight reload must not put a rejected pair back"
+    assert _arb_frames(host)[-1] == [1]
     await engine.dispose()

@@ -53,11 +53,12 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from arb.arbmon import ArbMonitor
+from arb.arbmon import ArbMonitor, TrackedPair
 from arb.books import BookManager
 from arb.config import AppConfig
 from arb.doctor import exit_code as doctor_exit_code
@@ -117,8 +118,8 @@ JOB_CANCELLED = "cancelled"
 
 type Sink = Callable[[RawMessage], object]
 type Broadcast = Callable[[dict[str, Any]], None]
-# Confirmed rows (score desc) -> (the watch set wanted, the ids refused).
-type Chooser = Callable[[list[PairFlags]], tuple[list[int], list[int]]]
+# Confirmed rows (score desc) -> (watch set wanted, ids refused, ids already closed).
+type Chooser = Callable[[list[PairFlags]], tuple[list[int], list[int], list[int]]]
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +612,7 @@ class TrackPlan:
     add: list[int]
     remove: list[int]
     refused: list[int]  # asked to track, not confirmed — the precondition
+    skipped_expired: list[int]  # confirmed, but a leg already closed
     tracked_before: int
     confirmed: int
     targets_before: int
@@ -644,6 +646,7 @@ class TrackPlan:
             return (
                 f"{head}: nothing changes — the watch set is already "
                 f"{self.tracked_after} of {self.confirmed} confirmed pairs{tail}"
+                f"{self._expired_clause()}"
             )
         moves = []
         if self.add:
@@ -660,7 +663,22 @@ class TrackPlan:
         )
         if self.refused:
             text += f"; {len(self.refused)} ids are not confirmed and are refused"
+        text += self._expired_clause()
         return text
+
+    def _expired_clause(self) -> str:
+        """Its own clause, not folded into ``refused``.
+
+        ``refused`` means "you named a pair that is not confirmed" and the
+        sentence says exactly that; an expired pair was never named by anyone.
+        Sharing the slot would put a false sentence in the audit row.
+        """
+        n = len(self.skipped_expired)
+        if not n:
+            return ""
+        plural = "" if n == 1 else "s"
+        verb = "is" if n == 1 else "are"
+        return f"; {n} confirmed pair{plural} already closed and {verb} skipped"
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -668,6 +686,7 @@ class TrackPlan:
             "add": list(self.add),
             "remove": list(self.remove),
             "refused": list(self.refused),
+            "skipped_expired": list(self.skipped_expired),
             "tracked_before": self.tracked_before,
             "tracked_after": self.tracked_after,
             "confirmed": self.confirmed,
@@ -861,6 +880,27 @@ class ControlPlane:
         self._market_meta: dict[str, dict[str, Any]] = {}
         # Confirmed/tracked row counts for the synchronous payload, plus the
         # background refresh that keeps them honest. See PAIR_COUNTS_TTL_S.
+        # Pairs the venues reported as finished on the last reload. The
+        # stored close_time the chooser filters on is a proposal-time snapshot,
+        # so it lets a market that closed early through; without remembering
+        # what the venue actually said, every bulk set re-picks the same dead
+        # pairs and spends half the watch set on them. Live: six settled
+        # esports maps took six of twelve slots on every press.
+        self._settled_pairs: set[int] = set()
+        # One reload at a time: a reload reads the watch set from the database
+        # and then spends seconds on venue calls before installing it, so two
+        # of them interleaving would let the older read win.
+        self._reload_lock = asyncio.Lock()
+        # Pairs a /pairs decision took off the watch set while a reload was in
+        # flight, keyed to a decision counter. That reload read the database
+        # before the decision committed, so it would install the pair again;
+        # every install drops vetoed ids, and a veto is cleared once a reload
+        # that started after it has installed (its read cannot contain it).
+        self._vetoed: dict[int, int] = {}
+        self._decision_seq = 0
+        # Background reconciles started by decisions. Held so they are not
+        # collected mid-flight, and so tests (and shutdown) can wait on them.
+        self._reconciles: set[asyncio.Task[None]] = set()
         self._pair_counts: dict[str, int] | None = None
         self._pair_counts_at = 0.0
         self._pair_counts_task: asyncio.Task[None] | None = None
@@ -1201,7 +1241,7 @@ class ControlPlane:
             ActionSpec(
                 name="pairs.top",
                 grade="G2",
-                summary="replace the whole watch set with the top N confirmed pairs by score",
+                summary="replace the whole watch set with N confirmed pairs, spread across events",
                 validate=lambda p: {"n": _int_param(p, "n", minimum=0, maximum=200, default=None)},
                 effect=self._effect_pairs_top,
                 apply=self._apply_pairs_top,
@@ -1578,15 +1618,15 @@ class ControlPlane:
         """Price a change to the watch set against the confirmed rows.
 
         ``choose`` maps the confirmed rows (score desc, the display order) to
-        ``(the watch set it wants, the ids it had to refuse)``. One path, so
-        the sentence the operator reads and the write that follows cannot
-        disagree about what is about to happen.
+        ``(the watch set it wants, the ids it refused, the ids it skipped as
+        already closed)``. One path, so the sentence the operator reads and the
+        write that follows cannot disagree about what is about to happen.
         """
         engine = self._require_engine()
         flags = await pairs_store.pair_flags(engine, status="confirmed")
         by_id = {f.id: f for f in flags}
         now = [f.id for f in flags if f.tracked]
-        wanted, refused = choose(flags)
+        wanted, refused, skipped_expired = choose(flags)
         base = set(self._base_polymarket)
         before, after = set(now), set(wanted)
         return TrackPlan(
@@ -1594,6 +1634,7 @@ class ControlPlane:
             add=[i for i in wanted if i not in before],
             remove=[i for i in now if i not in after],
             refused=list(refused),
+            skipped_expired=list(skipped_expired),
             tracked_before=len(now),
             confirmed=len(flags),
             # Before: what the poller is actually polling. After: the base set
@@ -1608,26 +1649,62 @@ class ControlPlane:
         ids: list[int] = params["ids"]
         want: bool = params["tracked"]
 
-        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int]]:
+        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int], list[int]]:
             confirmed = {f.id for f in flags}
             now = [f.id for f in flags if f.tracked]
             asked, tracked_now = set(ids), set(now)
             if not want:
                 # Untracking is never refused: a pair that is not confirmed
                 # cannot be tracked in the first place.
-                return [i for i in now if i not in asked], []
+                return [i for i in now if i not in asked], [], []
             refused = [i for i in ids if i not in confirmed]
             add = [i for i in ids if i in confirmed and i not in tracked_now]
-            return [*now, *add], refused
+            # Deliberately NOT expiry-filtered. Naming a pair by id is an
+            # operator saying "this one", and /pairs is where they can see its
+            # close time. Only the bulk setter guesses, so only it declines.
+            return [*now, *add], refused, []
 
         return await self._plan(choose)
 
     async def _plan_pairs_top(self, params: dict[str, Any]) -> TrackPlan:
         top_n: int = params["n"]
 
-        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int]]:
-            # ``flags`` is already score desc, id — the display order.
-            return [f.id for f in flags[:top_n]], []
+        def choose(flags: list[PairFlags]) -> tuple[list[int], list[int], list[int]]:
+            # ``flags`` arrives score desc, id. That order ranks rows WITHIN an
+            # event, and means nothing across events: a whole proposal run can
+            # sit at score 1.000, which turns "top N by score" into "the N
+            # lowest ids" — and ids cluster by event, because a proposal run
+            # inserts one event's markets together. Observed live: all ten
+            # slots went to consecutive strike bands of one Bitcoin ladder,
+            # which is ten rows but one bet, and /arb sat still for a day.
+            #
+            # So deal round-robin instead: the best row of every event, then
+            # the second-best of every event, until N is full. Rounds are
+            # unbounded, so N is always filled if the inventory allows it —
+            # a hard per-event cap would silently return fewer pairs than asked.
+            now = datetime.now(UTC)
+
+            def over(f: PairFlags) -> bool:
+                # Two nets: the close time recorded at proposal, and whatever
+                # the venue said last time we actually asked.
+                return f.is_closed(now) or f.id in self._settled_pairs
+
+            skipped = [f.id for f in flags if over(f)]
+            buckets: dict[str, list[PairFlags]] = {}
+            for f in flags:
+                if not over(f):
+                    buckets.setdefault(f.event_key, []).append(f)
+            events = list(buckets.values())  # first seen = best ranked, kept
+            picked: list[int] = []
+            depth = 0
+            while len(picked) < top_n and any(len(b) > depth for b in events):
+                for bucket in events:
+                    if depth < len(bucket):
+                        picked.append(bucket[depth].id)
+                        if len(picked) == top_n:
+                            break
+                depth += 1
+            return picked, [], skipped
 
         return await self._plan(choose)
 
@@ -1642,7 +1719,10 @@ class ControlPlane:
         head = (
             "watch nothing (clear the whole watch set)"
             if top_n == 0
-            else f"replace the watch set with the top {top_n} confirmed pairs by score"
+            else (
+                f"replace the watch set with {top_n} confirmed pairs, "
+                "dealt one at a time across Kalshi events"
+            )
         )
         return (await self._plan_pairs_top(params)).sentence(head)
 
@@ -1729,6 +1809,11 @@ class ControlPlane:
             "rows_changed": rows,
             "plan": plan.payload(),
             "pairs": self.pairs_payload(),
+            # Lifted out of the plan blob: a pair skipped because its market
+            # already settled is the difference between "you asked for 10 and
+            # got 10" and "you asked for 10 and got 7", and a caller should not
+            # have to go digging to find that out.
+            "skipped_expired": list(plan.skipped_expired),
             **(extra or {}),
         }
         live = sorted(p.pair_id for p in self._host.arbmon.pairs) if self._host.arbmon else []
@@ -1753,8 +1838,17 @@ class ControlPlane:
         # make and hides the one the system just corrected.
         drift_note = f"{no_op}, but the live watch set had drifted — re-resolved it"
         lead = drift_note if rows == 0 else done
+        # The selection filters on a close time recorded at proposal time; the
+        # venues are asked again at load. When the second answer differs, the
+        # flag count and the quoting count diverge, and saying nothing leaves
+        # "TRACKED 12" sitting above six live pairs with no explanation.
+        settled = detail.get("settled_pairs") or []
+        settled_text = (
+            f" ({len(settled)} skipped — the venue says they have settled)" if settled else ""
+        )
         detail["message"] = (
-            f"{lead}; watching {detail['tracked_pairs']} pairs{cycle_text}"  # live, post-apply
+            f"{lead}; watching {detail['tracked_pairs']} pairs"  # live, post-apply
+            f"{settled_text}{cycle_text}"
         )
         return detail
 
@@ -1766,10 +1860,21 @@ class ControlPlane:
         evicting, retuning the staleness budget and the fresh hello are not
         reimplemented here.
         """
+        async with self._reload_lock:
+            return await self._reload_tracked_locked()
+
+    async def _reload_tracked_locked(self) -> dict[str, Any]:
         engine = self._require_engine()
+        started = self._decision_seq
         load = await load_tracked_pairs(self._config, self._run, engine, sink=self._sink)
-        self._host.arbmon = ArbMonitor(self._host.books, load.tracked) if load.tracked else None
-        for pair in load.tracked:
+        # The read above is seconds old by now. A decision that landed since
+        # took its pairs off the watch set; this install must not put them back.
+        tracked = [p for p in load.tracked if p.pair_id not in self._vetoed]
+        self._host.arbmon = ArbMonitor(self._host.books, tracked) if tracked else None
+        self._publish_quotes()
+        # Vetoes recorded before this reload started are in its read already.
+        self._vetoed = {i: seq for i, seq in self._vetoed.items() if seq > started}
+        for pair in tracked:
             self._market_meta.setdefault(
                 pair.kalshi_market_id,
                 {
@@ -1780,10 +1885,10 @@ class ControlPlane:
                     "venue": "kalshi",
                 },
             )
-        self.set_pair_universe(
-            kalshi=[p.kalshi_ticker for p in load.tracked],
-            polymarket=load.polymarket_slugs,
-        )
+        self._set_pair_universe_from(tracked)
+        # Remember what the venues just said, so the next selection does not
+        # hand a slot back to a market that has finished.
+        self._settled_pairs = {pid for pid, _ in load.expired}
         polymarket = await self._apply_polymarket_universe() if self.polymarket else {}
         # An empty union would be an illegal Kalshi subscription; with no base
         # markets and no watched pairs there is nothing to subscribe to, so the
@@ -1791,10 +1896,140 @@ class ControlPlane:
         kalshi = await self._apply_kalshi_universe() if self.kalshi and self.kalshi_tickers else {}
         return {
             "pairs_top": self.pairs_top,
-            "tracked_pairs": len(load.tracked),
+            "tracked_pairs": len(tracked),
+            # Pairs the venues said were over. The flag is still set on them,
+            # so /control would otherwise read "TRACKED 12" against six pairs
+            # actually quoting and give the operator no way to tell why.
+            "settled_pairs": [{"pair_id": pid, "reason": why} for pid, why in load.expired],
             "kalshi": kalshi,
             "polymarket_us": polymarket,
         }
+
+    def _set_pair_universe_from(self, pairs: Sequence[TrackedPair]) -> None:
+        self.set_pair_universe(
+            kalshi=[p.kalshi_ticker for p in pairs],
+            polymarket=list(dict.fromkeys(p.polymarket_ticker for p in pairs)),
+        )
+
+    def _publish_quotes(self) -> None:
+        """Send /arb the quotes for the watch set as it now stands.
+
+        The flush loop only sends an arb frame when a watched book changes —
+        up to a poll cycle away for a Polymarket leg, and never again once the
+        watch set is empty. So a pair taken off the watch set stayed on /arb
+        until something else happened to move, or for good if it was the last
+        one. Every change to the monitor publishes its quotes at once.
+        """
+        monitor = self._host.arbmon
+        self._host.broadcast({"t": "arb", "quotes": monitor.snapshot() if monitor else []})
+
+    async def after_decision(self, pair_ids: Sequence[int], status: str) -> dict[str, Any]:
+        """Make the running engine follow a decision made on /pairs.
+
+        Confirming is a judgement, not a watch, so it changes nothing live.
+        Any other decision clears ``tracked`` in the database — confirmed is
+        the precondition for watching — and until now that was all it did:
+        the running monitor kept the pair, so a rejected pair went on being
+        quoted on /arb, subscribed, polled and offered to the paper trader.
+
+        The guarantee now is that a rejected pair stops trading the moment
+        the decision commits, whatever else is happening:
+
+        1. Synchronously, before this coroutine awaits anything, the pair is
+           dropped from the running monitor and /arb is told. The flush loop
+           rebinds ``host.arbmon`` every tick, so the paper trader never sees
+           it again. No venue call stands between the click and the stop.
+        2. If a reload is in flight, it read the database before this
+           decision committed and would install the pair again: the pair is
+           vetoed, and every install drops vetoed ids.
+        3. In the background, the watch set is re-resolved through the usual
+           reload so subscriptions and poll targets follow, and an audit row
+           says what stopped. If that reload fails, the stopped pairs' legs
+           are dropped from the pair universe directly, best effort.
+
+        The decide route returns after step 1, so a slow venue cannot hold up
+        the /pairs page or reorder its responses.
+        """
+        ids = sorted(set(pair_ids))
+        if status == "confirmed":
+            for i in ids:
+                self._vetoed.pop(i, None)
+            await self.refresh_pair_counts()
+            self.broadcast_state()
+            return {"stopped": []}
+        # --- step 1 and 2: no await until the monitor no longer has them ---
+        if self._reload_lock.locked():
+            self._decision_seq += 1
+            for i in ids:
+                self._vetoed[i] = self._decision_seq
+        monitor = self._host.arbmon
+        stopped = [p.pair_id for p in monitor.pairs if p.pair_id in ids] if monitor else []
+        if stopped:
+            assert monitor is not None
+            keep = [p for p in monitor.pairs if p.pair_id not in stopped]
+            self._host.arbmon = ArbMonitor(self._host.books, keep) if keep else None
+            self._publish_quotes()
+        # --- step 3 ---
+        if stopped:
+            task = asyncio.create_task(self._reconcile_after_decision(ids, stopped, status))
+            self._reconciles.add(task)
+            task.add_done_callback(self._reconciles.discard)
+        else:
+            await self.refresh_pair_counts()
+            self.broadcast_state()
+        return {"stopped": stopped}
+
+    async def settle(self) -> None:
+        """Wait for every background reconcile a decision started."""
+        while self._reconciles:
+            await asyncio.gather(*list(self._reconciles), return_exceptions=True)
+
+    async def _reconcile_after_decision(
+        self, ids: list[int], stopped: list[int], status: str
+    ) -> None:
+        try:
+            applied = await self._reload_tracked()
+            watching = applied["tracked_pairs"]
+            fallback = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("watch-set reload after a %s decision failed", status, exc_info=True)
+            monitor = self._host.arbmon
+            keep = list(monitor.pairs) if monitor else []
+            watching = len(keep)
+            fallback = " (the reload failed; they were dropped from the running monitor"
+            try:
+                # The legs they alone used stop being subscribed and polled.
+                self._set_pair_universe_from(keep)
+                if self.polymarket:
+                    await self._apply_polymarket_universe()
+                if self.kalshi and self.kalshi_tickers:
+                    await self._apply_kalshi_universe()
+                fallback += " and the universe)"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("universe apply after a failed reload also failed", exc_info=True)
+                fallback += "; their markets stay subscribed until the next reload)"
+        await self.refresh_pair_counts()
+        self.broadcast_state()
+        n = len(stopped)
+        listed = ", ".join(str(i) for i in stopped[:10]) + ("…" if n > 10 else "")
+        effect = (
+            f"{status} {len(ids)} pair{'' if len(ids) == 1 else 's'}: stopped watching "
+            f"{n} that {'was' if n == 1 else 'were'} being quoted (id{'' if n == 1 else 's'} "
+            f"{listed}){fallback}; watching {watching} pair{'' if watching == 1 else 's'}"
+        )
+        log.info("control %s", effect)
+        await self._audit(
+            "pairs.decide",
+            {"ids": ids, "status": status},
+            effect,
+            result="ok",
+            actor="ui",
+            required=False,
+        )
 
     # -- jobs --------------------------------------------------------------
 

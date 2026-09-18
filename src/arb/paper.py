@@ -12,6 +12,7 @@ Nothing here talks to a venue. Day 1's read-only rule holds.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any
@@ -195,8 +196,16 @@ class PaperTrader:
         if qty <= 0:
             return None
         frac = Fraction(qty, quote.qty)
-        cost_ticks = int(Fraction(cost_tq, QTY_PER_CONTRACT) * frac)
-        fee_ticks = int(quote.fee_ticks * frac)
+        # Cost and fees round UP, net rounds DOWN — every rounding goes against
+        # the book, never toward it. That is not fastidiousness, it is what
+        # stops the simulator minting contracts for free: a fill small enough
+        # that its true cost is a fraction of a tick used to truncate to
+        # ``cost_ticks = 0``, so ``notional_ticks`` never advanced and a book
+        # sitting one tick under its cap admitted dust trades forever. Observed
+        # live at 99,999,999 of 100,000,000 ticks: 163 trades in one minute,
+        # 1 Qty unit each, $0.00 apiece, and the spend meter frozen.
+        cost_ticks = math.ceil(Fraction(cost_tq, QTY_PER_CONTRACT) * frac)
+        fee_ticks = math.ceil(Fraction(quote.fee_ticks) * frac)
         net_ticks = int(Fraction(quote.net_tq, QTY_PER_CONTRACT) * frac)
         legs = tuple(
             Leg(
@@ -205,8 +214,8 @@ class PaperTrader:
                 side=leg.side,
                 worst_price=leg.worst_price,
                 qty=qty,
-                cost_tq=int(leg.cost_tq * frac),
-                fee_ticks=int(leg.fee_ticks * frac),
+                cost_tq=math.ceil(Fraction(leg.cost_tq) * frac),
+                fee_ticks=math.ceil(Fraction(leg.fee_ticks) * frac),
             )
             for leg in quote.legs
         )

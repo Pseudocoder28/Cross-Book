@@ -15,6 +15,21 @@
   --blue: #569cd6;      /* latency sparkline only */
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
   --ease: cubic-bezier(0.2, 0, 0, 1);
+  /* DEPTH panel. Alpha variants of the two side hues, and the only "light"
+     in the terminal: glow is reserved for size that has just changed. */
+  --bid-fill: rgba(47, 224, 160, 0.22);   /* terrain top stop */
+  --ask-fill: rgba(255, 79, 94, 0.22);
+  --bid-bar: rgba(47, 224, 160, 0.34);    /* ladder bars: no text sits on them */
+  --ask-bar: rgba(255, 79, 94, 0.34);
+  --bid-glow: rgba(47, 224, 160, 0.55);   /* fresh size, ignition, outline glow */
+  --ask-glow: rgba(255, 79, 94, 0.55);
+  --bid-hot: #c8ffe8;                     /* a bar clamped at its scale: white-hot */
+  --ask-hot: #ffd4d8;
+  --ghost: rgba(230, 230, 230, 0.28);     /* removed size: neutral, no longer liquidity */
+  --grid: #121212;                        /* 1c minor gridlines, below --hair */
+  --held: rgba(10, 10, 10, 0.55);         /* stripe = held, not observed */
+  --amber-hatch: rgba(255, 176, 46, 0.18);/* crossed overlap only */
+  --ease-io: cubic-bezier(0.4, 0, 0.2, 1);/* camera moves: both ends matter */
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -333,72 +348,13 @@ body {
   padding: 0 3px; justify-self: start; max-width: 100%;
 }
 
-/* ---------- depth ---------- */
+/* ---------- depth ----------
+   The DEPTH panel's own rules live in css/monitor.css. Two things stay here
+   because other pages lean on them: the stale pulse keyframes, and .mid-row,
+   whose layout the PAPER ledger rows borrow so select-to-copy (main.js
+   ROW_SEL) rebuilds them as TSV. */
 
-#depth { border-left: 2px solid transparent; }
-body.has-sel #depth { border-left-color: var(--amber); }
-
-.depth-banner {
-  flex: none;
-  height: 16px; line-height: 16px;
-  padding: 0 8px;
-  color: var(--amber);
-  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-  white-space: nowrap; overflow: hidden;
-}
-.depth-banner.quiet { color: var(--dim); }
-.depth-banner.pulse { animation: stalepulse 1.2s linear infinite; }
 @keyframes stalepulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-
-.depth-cols {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 56px 40px minmax(0, 1fr);
-  padding: 0 8px;
-  height: 16px; line-height: 16px;
-  color: var(--ink2);
-  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-  flex: none;
-}
-.h-bq, .h-aq { text-align: right; padding-right: 4px; }
-.h-yes { text-align: right; padding-right: 4px; }
-.h-no { text-align: right; }
-
-.ladder {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 0 8px 8px;
-  /* Center the ladder block vertically when the panel is taller than the
-     book; "safe" keeps the top reachable when it isn't. */
-  display: flex;
-  flex-direction: column;
-  justify-content: safe center;
-}
-
-.ladder-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 56px 40px minmax(0, 1fr);
-  height: 16px; line-height: 16px;
-}
-.ladder-row.best { height: 24px; line-height: 24px; }
-.ladder-row.best .l-yes { font-size: 13px; font-weight: 700; }
-
-.l-yes { text-align: right; padding-right: 4px; }
-.l-no { text-align: right; color: var(--ink2); font-size: 10px; }
-
-.l-qty { position: relative; min-width: 0; }
-.l-qty .track { position: absolute; top: 3px; bottom: 3px; left: 0; right: 0; background: var(--hair); }
-.ladder-row.best .l-qty .track { top: 5px; bottom: 5px; }
-.l-qty .fill { position: absolute; top: 3px; bottom: 3px; width: 0; }
-.ladder-row.best .l-qty .fill { top: 5px; bottom: 5px; }
-.bid-q .fill { right: 0; background: rgba(47, 224, 160, 0.10); border-left: 1px solid var(--bid); }
-.ask-q .fill { left: 0; background: rgba(255, 79, 94, 0.10); border-right: 1px solid var(--ask); }
-.l-qty .qtxt {
-  position: relative; display: block;
-  text-align: right; padding: 0 4px;
-  overflow: hidden; white-space: nowrap;
-}
 
 .mid-row {
   display: flex; justify-content: center; align-items: baseline; gap: 8px;
@@ -407,14 +363,6 @@ body.has-sel #depth { border-left-color: var(--amber); }
   border-bottom: 1px solid var(--hair);
   color: var(--ink2);
   font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-}
-.mid-v { color: var(--ink); font-size: 11px; letter-spacing: 0; }
-
-/* stale / invalid: ink flips to gray — grayed, never hidden */
-.ladder.dim, .ladder.dim .l-no, .ladder.dim .mid-v { color: var(--dim); }
-.ladder.dim .bid-q .fill, .ladder.dim .ask-q .fill {
-  background: rgba(107, 114, 128, 0.10);
-  border-color: var(--dim);
 }
 
 /* ---------- tape column: TAPE 62% / LATENCY 38% ---------- */

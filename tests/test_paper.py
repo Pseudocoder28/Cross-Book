@@ -122,3 +122,35 @@ def test_limits_retune_live_and_tightening_is_a_hard_stop() -> None:
     trader.set_limits(PaperLimits(min_net_ticks=50, max_notional_ticks=400 * 10_000))
     resumed = trader.consider(other, quote(2, 100), ts_ms=4)
     assert resumed is not None and resumed.qty == 100 * C
+
+
+def test_a_nearly_full_book_stops_instead_of_minting_free_contracts() -> None:
+    """A book one tick under its cap must stop, not fill forever at $0.00.
+
+    Regression for a live failure: the trader sat at 99,999,999 of 100,000,000
+    ticks and kept admitting trades. With one tick of room it sized the fill at
+    a single Qty unit (1e-4 contracts), whose true cost is 0.98 ticks — and
+    ``int()`` truncated that to 0. ``notional_ticks`` never advanced, so the cap
+    was never reached and the same dust trade repeated indefinitely: 163 of them
+    in one minute, each costing nothing, with the spend meter frozen.
+    """
+    trader = PaperTrader(PaperLimits(min_net_ticks=50, max_notional_ticks=100 * 10_000))
+    first = trader.consider(pair(), quote(2, 100), ts_ms=1)
+    assert first is not None
+    # 98¢/contract against $100 of room: 100 contracts would be $98, and the
+    # remaining $2 is what the next trade has to work with.
+    assert trader.notional_ticks == 100 * 9800
+
+    # Tighten to exactly one tick of headroom. The next fill is one Qty unit,
+    # costing a fraction of a tick — which must still be charged as a whole one.
+    trader.set_limits(PaperLimits(min_net_ticks=50, max_notional_ticks=100 * 9800 + 1))
+    other = TrackedPair(2, 1.0, "kalshi:K2", "polymarket_us:p2", zero_fee, zero_fee, "BTC — 30k")
+    dust = trader.consider(other, quote(2, 100), ts_ms=2)
+    assert dust is not None
+    assert dust.cost_ticks >= 1, "a fill that costs a fraction of a tick must be charged one"
+    assert trader.notional_ticks > 100 * 9800, "the spend meter has to advance"
+
+    # ...and now the book really is full, and stays that way.
+    for ts in range(3, 13):
+        assert trader.consider(other, quote(5, 100), ts_ms=ts) is None
+    assert trader.totals()["trades"] == 2

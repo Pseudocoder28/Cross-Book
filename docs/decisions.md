@@ -838,3 +838,142 @@ Design choices and why. Newest first.
   `secrets/` (gitignored); env vars point at them.
 - **Deferred to later prompts:** venue endpoints/auth (must be read from docs
   first), docker-compose infra, and all order placement code (Day 1 is read-only).
+
+## A watch set is chosen per EVENT, not per row (2026-09-17)
+
+`pairs.top` took the first N rows of `ORDER BY score DESC, id`. Every confirmed
+pair scored exactly 1.000 — 64 of 64 on the live table — so that was `ORDER BY
+id`, and ids cluster by event because a proposal run inserts one event's markets
+together. Ten of ten slots went to consecutive strike bands of one Bitcoin
+year-end ladder: ten rows, but one bet, all far out of the money and all still.
+
+The selection now deals round-robin — the best row of every event, then the
+second of every event, until N is full. Considered and rejected:
+
+- **A hard per-event cap.** With three live events and N=10, a cap of one
+  returns three pairs. Silently giving back fewer than asked is the same class
+  of failure, wearing different clothes. Round-robin with unbounded rounds
+  fills N *and* maximises spread.
+- **Fixing the scorer so scores stop tying.** The right long-term answer, and it
+  changes nothing until a re-propose runs. It also would not have untracked the
+  ten Bitcoin strikes already holding the watch set.
+- **Ordering by `decided_at`.** It is the only column with real variance
+  (`created_at` has one distinct value across every confirmed row), but top-10
+  by `decided_at DESC` is just a different single-event clump. It refines
+  ranking *within* a bucket; it does not create buckets.
+
+## Expiry is checked twice, in the order the checks cost (2026-09-17)
+
+Three of thirteen watched pairs were esports maps that had resolved days
+earlier. They held poll budget, showed no movement, and nothing said why.
+
+1. **Selection** filters on the `close_time` recorded at proposal. Free, no
+   I/O, and it runs *before* the operator arms — so the armed sentence can say
+   how many pairs it skipped.
+2. **Load** asks the venues, using the predicates the adapters already use:
+   Kalshi tested positively against `"active"` so an unlisted future value fails
+   closed, Polymarket on `closed` and never on `active`, which stays true after
+   settlement. Both objects are already fetched to resolve fees, so this costs
+   no extra request.
+
+The first misses a market that closed early; the second catches it but only
+after it has taken a slot. So the control plane remembers what the venues
+reported and feeds it back into the next selection. Without that, every bulk
+set re-picked the same dead pairs: asking for 12 produced 6 quoting, forever.
+
+The load-time check SKIPS rather than clearing the `tracked` flag. A read path
+must not mutate operator state; untracking is a control action with an audit
+row.
+
+## A paper fill's cost rounds up, its edge rounds down (2026-09-17)
+
+The trader sat one tick under its notional cap and kept trading. It sized each
+fill at a single Qty unit — 1e-4 contracts, true cost 0.98 ticks — and `int()`
+truncated that to zero, so `notional_ticks` never advanced and the cap was
+never reached. 163 free trades in one minute, spend meter frozen.
+
+Cost and fees round up, net rounds down: every rounding goes against the book
+and none toward it. A simulator is allowed to be wrong in exactly one
+direction.
+
+No notional reset control was added. `notional_ticks` is capital *deployed*,
+not spent, and nothing models settlement — zeroing it would assert capital is
+free while the positions are still open. The honest ways to free room are
+raising the cap through `paper.limits` (audited) or restarting the run; every
+trade already survives in `paper_trades` keyed by `run_id`.
+
+## The DEPTH panel is a probability scope over an exact ladder (2026-09-18)
+
+The centre of MONITOR was a 12-level strip floating in an empty panel, with
+10%-opacity bars and a faint background flash as its only motion. It is now,
+top to bottom: a state strip, a hero (best bid · mid as YES-implied
+probability · best ask), one canvas (the whole 0-100¢ rail with every level as
+a √size barcode and a bracket for the zoomed window; cumulative-depth terrain;
+a size-at-price strip), and the full book as a mirrored DOM ladder. Chosen by a
+judge panel over three alternatives (a Bookmap-style heatmap, a pro DOM ladder,
+an instrument cluster); the full spec is `.context/depth-panel-spec.md`.
+
+- **Motion annotates; it never interpolates.** Bars, terrain and the touch
+  snap to the true state on the frame it arrives. Size added glows inside its
+  bar and fades; size removed leaves a neutral dashed ghost outside the bar;
+  a new touch price lights a column where it now is. A tween between two sizes
+  would draw sizes that never rested, and a price sliding between levels would
+  draw quotes that never existed. The only continuous motion is the camera,
+  and every mark and label is re-projected through the same interpolated scale
+  in every frame, so each frame is a true chart under its own axis.
+- **"REMOVED (TRADE OR CANCEL)", never "trade".** The feed does not
+  distinguish them.
+- **Polymarket US reads POLLED, never LIVE.** A shutter sweeps once when a
+  snapshot lands; past one poll cycle the chart is striped HELD, NOT OBSERVED.
+  Texture, not dimming — dimming reads as smaller size.
+- **No mid for a book that cannot stand behind one**: one-sided, crossed or
+  structurally invalid books show — or INVALID, in the hero, on the rail and in
+  the plot alike. Every level of an untrusted book stays printed, greyed.
+- **The bar scale fits the 85th percentile of the top 20 levels a side, and
+  walls clamp.** The spec's "max capped at 2.5x the second" failed on the
+  first realistic book: one 71,694-contract wall set the scale to 60K and left
+  40 of 43 bars as 1px stubs. A clamped bar gets a white-hot cap and its exact
+  size is printed beside it, so a wall is louder, not hidden. The Y and size
+  scales grow at once and shrink only after holding (4s / 8s), so a maximum
+  that changes every tick never rescales every tick.
+- **The loop idles to zero** and never runs under reduced motion, where every
+  mark is drawn still for a second instead. Fade-only frames draw at 30fps
+  (the camera and shutter get every frame): on a 9-updates/s book this took
+  main-thread time from 18.6% to 12.4%, against 11.5% with no animation.
+- **Everything on the canvas is also text**: in the ladder and hero, and in an
+  aria description that announces state changes at once and throttles only
+  window churn.
+
+## A /pairs decision stops a pair trading the moment it commits (2026-09-18)
+
+Rejecting a watched pair on /pairs cleared `tracked` in the database and did
+nothing else: the running ArbMonitor kept the pair, so it stayed on /arb,
+stayed subscribed and polled, and stayed in front of the paper trader until
+some unrelated watch-set action happened to reload.
+
+The first fix — re-run the watch-set reload after the decision — was reviewed
+adversarially and was not enough: the reload makes one venue call per watched
+market (10s timeout each), so the rejected pair traded for that whole window;
+and a reload already in flight had read the database before the rejection and
+installed the pair straight back.
+
+What holds now:
+
+1. **Synchronous prune.** Right after the decision commits, before the
+   decide route awaits anything, the pair is dropped from the running monitor
+   and /arb is sent the new quotes. The flush loop rebinds the monitor every
+   tick, so the trader never sees it again.
+2. **Veto.** If a reload is in flight when the decision lands, the pair is
+   vetoed; every install drops vetoed ids, and a veto clears once a reload
+   that started after it has installed.
+3. **Reconcile in the background.** The usual reload then runs so
+   subscriptions and poll targets follow, and an audit row (`pairs.decide`)
+   says what stopped. If it fails, the stopped legs are dropped from the pair
+   universe directly. The decide route does not wait for it, so a slow venue
+   cannot stall /pairs or reorder its responses.
+
+Also: every change to the monitor publishes an arb frame at once, and every
+new connection gets the current quotes even when nothing is watched — /arb
+only heard about quotes when a watched book moved, so an emptied watch set
+left stale rows on screen for good.
+

@@ -86,3 +86,312 @@
 .mon-ven { text-align: left; padding-right: 4px; }
 
 .mon-row.quiet-line { display: block; padding-left: 8px; }
+
+/* =========================================================================
+   DEPTH — the centre panel. A probability scope over an exact ladder.
+
+   Top to bottom: a state strip, a hero readout (best bid · mid as implied
+   probability · best ask), the scope canvas (0-100¢ rail, cumulative-depth
+   terrain, size-at-price strip) and the mirrored ladder. The canvas is
+   illustration; every number it draws is also text in the ladder or hero.
+
+   Width tiers are container queries on #depth, so the panel adapts to the
+   column it is given, not to the viewport: S < 820px ≤ M < 1100px ≤ L.
+   ========================================================================= */
+
+#depth {
+  container: depth / inline-size;
+  --lcols: 84px 84px minmax(40px, 1fr) 40px 46px 10px 46px 40px minmax(40px, 1fr) 84px 84px;
+}
+
+/* ---------- strip: state words (live) · numbers (not live) ---------- */
+
+.dp-strip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 16px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.depth-banner { color: var(--amber); flex: none; }
+.depth-banner.quiet { color: var(--dim); }
+.depth-banner.live { color: var(--ink); }
+.depth-banner.pulse { animation: stalepulse 1.2s linear infinite; }
+.dp-dot { color: var(--bid); }
+.dp-stats {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--ink2);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.dp-polled { color: var(--amber); }
+.dp-pollbar {
+  display: inline-block; position: relative;
+  width: 60px; height: 4px; margin: 0 6px 1px;
+  background: var(--hair);
+  vertical-align: middle;
+}
+.dp-pollbar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ink2); }
+.dp-pollbar.over i { background: var(--amber); }
+
+/* ---------- hero ---------- */
+
+.dp-hero {
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  column-gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--hair);
+  background:
+    radial-gradient(ellipse 40% 90% at 50% 40%, rgba(230, 230, 230, 0.035), transparent 70%),
+    var(--panel);
+}
+.dp-hs { min-width: 0; }
+.dp-hb { box-shadow: inset 2px 0 0 var(--bid); padding-left: 10px; }
+.dp-ha { box-shadow: inset -2px 0 0 var(--ask); padding-right: 10px; text-align: right; }
+.dp-hero .lbl {
+  height: 12px; line-height: 12px;
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dp-hp { height: 24px; line-height: 24px; white-space: nowrap; }
+.dp-px {
+  font-size: 18px; font-weight: 700; letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 0 1px;
+}
+.dp-hb .dp-px { color: var(--bid); }
+.dp-ha .dp-px { color: var(--ask); }
+.dp-u { color: var(--ink2); font-size: 11px; margin-left: 1px; }
+.dp-mv { color: var(--ink2); font-size: 10px; margin: 0 8px; }
+.dp-mv .mvg { color: var(--ink); font-weight: 700; }
+.dp-hsub {
+  height: 12px; line-height: 12px;
+  color: var(--ink2); font-size: 10px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dp-hsub .qv { color: var(--ink); font-size: 11px; }
+
+.dp-hm { text-align: center; min-width: 280px; }
+.dp-midrow { height: 30px; line-height: 30px; white-space: nowrap; }
+.dp-mid {
+  color: var(--ink);
+  font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 0 2px;
+}
+.dp-mid.wide, .dp-mid.dim { color: var(--ink2); }
+.dp-mid.bad { color: var(--amber); font-size: 20px; letter-spacing: 0.04em; }
+.dp-pct { color: var(--ink2); font-size: 14px; margin-left: 1px; }
+.dp-imbrow {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  height: 12px;
+  color: var(--ink2); font-size: 10px;
+  white-space: nowrap;
+}
+.dp-imb {
+  position: relative;
+  display: flex;
+  width: 150px; height: 4px;
+  background: var(--hair);
+}
+.dp-imb i { display: block; height: 100%; }
+.dp-imb .b { background: var(--bid); opacity: 0.65; }
+.dp-imb .a { background: var(--ask); opacity: 0.65; margin-left: auto; }
+.dp-imb::after {
+  content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px;
+  width: 1px; background: var(--ink2);
+}
+.dp-imbrow.off .dp-imb { visibility: hidden; }
+
+.dp-hero.untrusted .dp-px { color: var(--dim); }
+
+/* ---------- the scope ---------- */
+
+.dp-scope {
+  flex: 0 0 clamp(240px, 44%, 440px);
+  position: relative;
+  min-height: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hair);
+  overflow: hidden;
+}
+#dp-cv, #dp-ov { position: absolute; inset: 0; width: 100%; height: 100%; }
+#dp-ov { cursor: crosshair; }
+.dp-cap, .dp-tag {
+  position: absolute;
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em; line-height: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.dp-tag { text-align: right; }
+.dp-tag .held { color: var(--ink); }
+.dp-empty {
+  position: absolute; left: 0; right: 0; top: 50%;
+  transform: translateY(-50%);
+  text-align: center;
+  color: var(--dim);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.12em;
+  pointer-events: none;
+}
+.dp-empty:empty { display: none; }
+.dp-tip { top: 0; left: 0; }
+
+/* ---------- the ladder ---------- */
+
+.dp-lhead {
+  flex: none;
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--lcols);
+  column-gap: 4px;
+  height: 16px; line-height: 16px;
+  padding: 0 8px;
+  background: var(--raised);
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.dp-lhead > span { overflow: hidden; }
+.dp-lhead .c-b { text-align: right; }
+.dp-lhead .c-a { text-align: left; }
+.dp-lhead .c-a:nth-last-child(-n+3) { text-align: right; } /* ask QTY, CUM (+ reset tag) */
+.dp-lhead .dp-scale { text-align: center; color: var(--dim); }
+.dp-lhead .h-no { color: var(--dim); }
+.dp-reset {
+  position: absolute; right: 8px; top: 0;
+  padding-left: 8px;
+  background: var(--raised);
+  color: var(--amber);
+}
+
+.ladder {
+  flex: 1;
+  min-height: 96px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 8px 8px;
+}
+
+.ladder-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--lcols);
+  column-gap: 4px;
+  height: 16px; line-height: 16px;
+}
+.ladder-row > span { min-width: 0; overflow: hidden; white-space: nowrap; }
+.ladder-row.hl { background: var(--raised); }
+
+.ladder-row .yes.c-b, .ladder-row .no.c-b { text-align: right; }
+.ladder-row .yes.c-a, .ladder-row .no.c-a { text-align: left; }
+.ladder-row .no { color: var(--dim); font-size: 10px; }
+.ladder-row .cum { color: var(--ink2); font-size: 10px; }
+
+/* Decimal-aligned quantities: the fraction always takes the last 5ch of the
+   cell, so every integer part ends at the same x down the column. */
+.ladder-row .qty, .ladder-row .cum { display: flex; justify-content: flex-end; }
+.q { display: inline-grid; grid-template-columns: auto 5ch; }
+.qi { text-align: right; }
+.qf { text-align: left; font-size: 9px; color: var(--ink2); }
+.cum .qf { color: var(--dim); }
+
+/* the touch row */
+.ladder-row.r0 { height: 22px; line-height: 22px; }
+.ladder-row.r0 .yes { font-size: 13px; font-weight: 700; }
+.ladder-row.r0 .yes.c-b { box-shadow: inset -2px 0 0 var(--bid); padding-right: 5px; }
+.ladder-row.r0 .yes.c-a { box-shadow: inset 2px 0 0 var(--ask); padding-left: 5px; }
+
+.dp-seam {
+  background: linear-gradient(var(--hair), var(--hair)) center / 1px 100% no-repeat;
+}
+
+/* bars grow outward from the spine; no text ever sits on one */
+.lb { position: relative; height: 100%; }
+.lf, .ld, .lcap { position: absolute; top: 4px; bottom: 4px; }
+.r0 .lf, .r0 .ld, .r0 .lcap { top: 5px; bottom: 5px; }
+.lf { left: 0; right: 0; transform: scaleX(0); will-change: transform; }
+.lb.c-b .lf { transform-origin: right center; background: var(--bid-bar); }
+.lb.c-a .lf { transform-origin: left center; background: var(--ask-bar); }
+.ld { opacity: 0; pointer-events: none; }
+.lb.c-b .ld.fr { background: var(--bid-glow); box-shadow: 0 0 6px var(--bid-glow); }
+.lb.c-a .ld.fr { background: var(--ask-glow); box-shadow: 0 0 6px var(--ask-glow); }
+.ld.gh { background: var(--ghost); outline: 1px dashed rgba(230, 230, 230, 0.5); outline-offset: -1px; }
+.lcap { width: 2px; display: none; }
+.lb.c-b .lcap { left: 0; background: var(--bid-hot); box-shadow: 1px 0 0 #000; }
+.lb.c-a .lcap { right: 0; background: var(--ask-hot); box-shadow: -1px 0 0 #000; }
+.lb.clamp .lcap { display: block; }
+
+/* chart edge: the last row whose price is inside the scope's window */
+.ladder-row.edge-b > .c-b,
+.ladder-row.edge-a > .c-a {
+  background-image: linear-gradient(90deg, var(--ink2) 50%, transparent 0);
+  background-position: bottom; background-size: 4px 1px; background-repeat: repeat-x;
+}
+
+/* end of a side, and "NO ASKS / NO BIDS": pseudo-content, so neither is
+   copied as data nor counted as a level */
+.ladder-row[data-end-b]::before,
+.ladder-row[data-end-a]::after {
+  position: absolute; top: 0;
+  width: calc(50% - 9px);
+  color: var(--dim);
+  font-size: 9px; letter-spacing: 0.08em;
+  text-align: center;
+  pointer-events: none;
+}
+.ladder-row[data-end-b]::before { content: attr(data-end-b); left: 0; }
+.ladder-row[data-end-a]::after { content: attr(data-end-a); right: 0; }
+
+/* INVALID: grayed, never hidden */
+.ladder.dim .ladder-row,
+.ladder.dim .ladder-row .no,
+.ladder.dim .ladder-row .cum,
+.ladder.dim .qf { color: var(--dim); }
+.ladder.dim .lb .lf { background: rgba(107, 114, 128, 0.30); }
+.ladder.dim .r0 .yes { box-shadow: none; }
+
+#depth .rm-up::before, #depth .rm-down::before { color: var(--ink); }
+
+.sr-only {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------- width tiers ---------- */
+
+@container depth (max-width: 819px) {
+  .ladder-row, .dp-lhead {
+    grid-template-columns: 76px minmax(32px, 1fr) 46px 10px 46px minmax(32px, 1fr) 76px;
+  }
+  .ladder-row .cum, .ladder-row .no, .dp-lhead .h-cum, .dp-lhead .h-no { display: none; }
+  .dp-px { font-size: 15px; }
+  .dp-mid { font-size: 24px; }
+  .dp-hm { min-width: 220px; }
+  .dp-h4, .dp-hno { display: none; }
+  .dp-imb { width: 110px; }
+}
+
+@container depth (min-width: 1100px) {
+  .ladder-row, .dp-lhead {
+    grid-template-columns: 96px 96px minmax(60px, 1fr) 48px 56px 12px 56px 48px minmax(60px, 1fr) 96px 96px;
+  }
+  .dp-mid { font-size: 32px; }
+  .dp-px { font-size: 20px; }
+  .dp-imb { width: 200px; }
+}
+
+/* the amber selection thread: the panel is bordered while it shows a pick */
+#depth { border-left: 2px solid transparent; }
+body.has-sel #depth { border-left-color: var(--amber); }

@@ -92,24 +92,55 @@
       <div id="mon-rows" class="mon-rows" data-keyregion="list" role="listbox" aria-label="Markets" tabindex="0"></div>
     </section>
 
-    <section id="depth" class="panel" aria-label="Depth ladder">
+    <section id="depth" class="panel" aria-label="Depth">
       <div class="panel-head">
         <span class="title" id="depth-title">DEPTH &#8212; &#8212;</span>
         <span id="depth-stat" class="head-stat">&#8212;</span>
       </div>
-      <div id="depth-banner" class="depth-banner quiet" aria-live="polite">NO SELECTION</div>
-      <div class="depth-cols" aria-hidden="true">
-        <span class="h-bq">BID QTY</span><span class="h-yes">YES</span><span class="h-no">NO</span><span class="h-aq">ASK QTY</span>
+      <!-- State words only in the live region; the per-second numbers sit in a
+           separate, non-live span so a screen reader is not read a counter. -->
+      <div class="dp-strip">
+        <span id="depth-banner" class="depth-banner quiet" aria-live="polite">NO SELECTION</span>
+        <span id="depth-stats" class="dp-stats"></span>
       </div>
-      <div id="ladder" class="ladder">
-        <div id="ask-rows"></div>
-        <div class="mid-row">
-          <span>MID</span><span id="mid-val" class="mid-v num">&#8212;</span>
-          <span class="mid-sep" aria-hidden="true">&#183;</span>
-          <span>SPR</span><span id="spr-val" class="mid-v num">&#8212;</span>
+      <div class="dp-hero">
+        <div class="dp-hs dp-hb">
+          <div class="lbl" id="dp-bblbl">BEST BID &#183; YES</div>
+          <div class="dp-hp"><span id="dp-bb" class="dp-px">&#8212;</span><span class="dp-u">&#162;</span><span id="dp-bbmv" class="dp-mv"></span></div>
+          <div class="dp-hsub" id="dp-bbsub"></div>
+          <div class="dp-hsub dp-h4" id="dp-bbimb"></div>
         </div>
-        <div id="bid-rows"></div>
+        <div class="dp-hm">
+          <div class="lbl" id="dp-midlbl">MID &#183; YES IMPLIED</div>
+          <div class="dp-midrow"><span id="dp-mid" class="dp-mid">&#8212;</span><span id="dp-pct" class="dp-pct">%</span></div>
+          <div class="dp-hsub" id="dp-midsub"></div>
+          <div class="dp-imbrow" id="dp-imbrow">
+            <span id="dp-imbl" class="dp-imbn"></span>
+            <div id="dp-imb" class="dp-imb" aria-hidden="true"><i class="b"></i><i class="a"></i></div>
+            <span id="dp-imbr" class="dp-imbn"></span>
+          </div>
+        </div>
+        <div class="dp-hs dp-ha">
+          <div class="lbl" id="dp-balbl">BEST ASK &#183; YES</div>
+          <div class="dp-hp"><span id="dp-bamv" class="dp-mv"></span><span id="dp-ba" class="dp-px">&#8212;</span><span class="dp-u">&#162;</span></div>
+          <div class="dp-hsub" id="dp-basub"></div>
+          <div class="dp-hsub dp-h4" id="dp-baimb"></div>
+        </div>
       </div>
+      <div id="dp-scope" class="dp-scope" role="img" aria-label="Cumulative depth: no selection">
+        <canvas id="dp-cv" aria-hidden="true"></canvas>
+        <canvas id="dp-ov" aria-hidden="true"></canvas>
+        <div id="dp-cap" class="dp-cap"></div>
+        <div id="dp-tag" class="dp-tag"></div>
+        <div id="dp-empty" class="dp-empty">NO SELECTION</div>
+        <div id="dp-tip" class="spark-tip dp-tip" hidden></div>
+      </div>
+      <div class="dp-lhead" aria-hidden="true">
+        <span class="c-b h-cum">CUM</span><span class="c-b">QTY</span><span class="c-b dp-scale" id="dp-scale-b">SIZE</span><span class="c-b h-no">NO</span><span class="c-b">BID</span><span class="dp-seam"></span><span class="c-a">ASK</span><span class="c-a h-no">NO</span><span class="c-a dp-scale" id="dp-scale-a">SIZE</span><span class="c-a">QTY</span><span class="c-a h-cum">CUM</span>
+        <span id="dp-reset" class="dp-reset" hidden>&#916; RESET &#183; RESYNC</span>
+      </div>
+      <div id="ladder" class="ladder" role="table" aria-label="Order book, YES prices, best first"></div>
+      <div id="dp-sr" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     </section>
 
     <div id="tape-col" class="tape-col">
