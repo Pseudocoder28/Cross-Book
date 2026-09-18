@@ -6,28 +6,12 @@
      fail  red        broken now
      off   grey       deliberately not running
      wait  dim grey   no data yet
-   A level sets --lv on its element; lights, tags and edges all read it. */
+   A level sets --lv on its element; lights, tags and edges all read it.
+   The levels and the light itself live in style.css: /control uses them too. */
 
 .sys-page { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--panel); }
 
-.lv-ok   { --lv: var(--bid); }
-.lv-warn { --lv: var(--amber); }
-.lv-fail { --lv: var(--ask); }
-.lv-off  { --lv: var(--dim); }
-.lv-wait { --lv: #3a3f47; }
-
 .sys-headstat { max-width: 60%; }
-
-/* the light: a lit dot. OK breathes faintly, a problem blinks. */
-.sl {
-  flex: none;
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--lv);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lv) 22%, transparent), 0 0 8px color-mix(in srgb, var(--lv) 55%, transparent);
-}
-.lv-off .sl, .lv-wait .sl { box-shadow: none; }
-.lv-fail .sl { animation: sl-blink 1s steps(2, jump-none) infinite; }
-@keyframes sl-blink { 50% { opacity: 0.25; } }
 
 /* ---------- verdict ---------- */
 

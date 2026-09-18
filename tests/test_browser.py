@@ -138,8 +138,9 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
     with terminal(state) as page:
         page.goto("/control", ready='document.getElementById("ctl-minnet") !== null')
         page.wait_ws_live()
-        # The server's value, written in by render() before anyone touched it.
-        assert page.eval('document.getElementById("ctl-minnet").value') == "50"
+        # The server's value, written in by render() before anyone touched it:
+        # 50 ticks, shown in the operator's unit — cents per contract.
+        assert page.eval('document.getElementById("ctl-minnet").value') == "0.50"
 
         # TAB is the documented way into the fields, so use it rather than a
         # programmatic focus(): the focus path is part of what broke.
@@ -150,7 +151,7 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
             ' e.__arbProbe = "tagged"; window.__arbProbeNode = e; e.select(); return true; })()'
         )
 
-        page.type("75")
+        page.type("0.7")
 
         # Drive a real re-render: a control frame is what the live plane
         # broadcasts after every action, and the page repaints on it.
@@ -164,11 +165,11 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
         assert after_frame["same"] is True, "the <input> was replaced by the re-render"
         assert after_frame["probe"] == "tagged"
         assert after_frame["focused"] is True, f"focus fell to {after_frame['active']}"
-        assert after_frame["value"] == "75"
+        assert after_frame["value"] == "0.7"
 
         # Keep typing across the repaint, then wait for the 1 s tick — the
         # other path that used to rebuild the DOM under the caret.
-        page.type("00")
+        page.type("5")
         # Wait for EVIDENCE the tick ran, not for the clock. A wall-clock sleep
         # here made the assertions below vacuous: deleting the setInterval from
         # control.js left this test green, because time passes either way.
@@ -188,16 +189,17 @@ def test_control_field_survives_live_rerenders_and_reaches_the_wire() -> None:
         after_tick = page.eval(FIELD_STATE)
         assert after_tick["same"] is True, "the 1 s tick replaced the <input>"
         assert after_tick["focused"] is True, f"focus fell to {after_tick['active']}"
-        assert after_tick["value"] == "7500"
+        assert after_tick["value"] == "0.75"
 
-        # And the edit is what the action sends, not the server's old value.
+        # And the edit is what the action sends, not the server's old value —
+        # converted exactly: 0.75¢ is 75 ticks.
         page.click('button[data-action="paper.limits"]')
         eventually(
             lambda: any(a == "paper.limits" for a, _p, _c in state.controls),
             "APPLY LIMITS to post",
         )
         params = next(p for a, p, _c in state.controls if a == "paper.limits")
-        assert params is not None and params["min_net_ticks"] == 7500
+        assert params is not None and params["min_net_ticks"] == 75
 
 
 # --------------------------------------------------------------------------
@@ -342,7 +344,7 @@ def test_a_blurred_edit_is_not_silently_reverted_by_the_next_frame() -> None:
         page.key("Tab")
         focus_settles(page, "ctl-minnet")
         page.eval('document.getElementById("ctl-minnet").select()')
-        page.type("75")
+        page.type("0.75")
         # Leave the field the way an operator would: on to the next limit.
         page.key("Tab")
         page.wait_for(
@@ -356,7 +358,7 @@ def test_a_blurred_edit_is_not_silently_reverted_by_the_next_frame() -> None:
             "the control frame to repaint the page",
         )
 
-        assert page.eval('document.getElementById("ctl-minnet").value') == "75", (
+        assert page.eval('document.getElementById("ctl-minnet").value') == "0.75", (
             "a blurred-but-edited field was reverted by the next control frame"
         )
 
@@ -552,3 +554,137 @@ def test_system_gives_a_verdict_and_a_dropped_recording_leads_it() -> None:
 
         errors = [c for c in page.console() if c.level == "error"]
         assert not errors, errors
+
+
+# --------------------------------------------------------------------------
+# 9. /control: what it sends, and when it asks first
+# --------------------------------------------------------------------------
+
+
+def _with_universe(state: TerminalState) -> None:
+    state.control["universe"] = {
+        "kalshi": {
+            "tickers": ["KXBASE-A", "KXBASE-B", "KXLEG-1"],
+            "base": ["KXBASE-A", "KXBASE-B"],
+            "pairs": ["KXLEG-1"],
+            "attached": True,
+        },
+        "polymarket_us": {
+            "slugs": ["base-a", "leg-1"],
+            "base": ["base-a"],
+            "pairs": ["leg-1"],
+            "attached": True,
+        },
+    }
+
+
+@needs_chrome
+def test_the_universe_box_edits_the_base_list_and_never_writes_pair_legs_into_it() -> None:
+    """The old box showed base markets PLUS the legs of watched pairs, and
+    SUBSCRIBE wrote that whole list back as the base — one press turned every
+    watched pair's leg into a permanent base market. The box now holds the
+    base only, the legs are counted beside it, and what is posted is exactly
+    what is in the box."""
+    state = TerminalState()
+    _with_universe(state)
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-ktickers") !== null')
+        page.wait_ws_live()
+        page.wait_for(
+            'document.getElementById("ctl-ktickers").value === "KXBASE-A\\nKXBASE-B"',
+            "the box to hold the base list, without the pair leg",
+        )
+        assert "1 legs of watched pairs" in page.text("#csec-kalshi .ccount")
+        apply_sel = 'button[data-action="universe.kalshi"]'
+        assert page.eval(f"document.querySelector('{apply_sel}').disabled"), (
+            "APPLY with nothing changed is a dead press"
+        )
+
+        page.eval(
+            '(() => { const e = document.getElementById("ctl-ktickers");'
+            ' e.value += "\\nkxnew-c"; e.dispatchEvent(new Event("input")); })()'
+        )
+        page.wait_for(f"!document.querySelector('{apply_sel}').disabled", "APPLY to enable")
+        assert "+1 added" in page.text("#csec-kalshi .cdraft")
+        page.click(apply_sel)
+        # A set-replacing action is PRICED first: a preview, not an execution.
+        page.wait_for(
+            'document.querySelector("#csec-kalshi .cconfirm") !== null',
+            "the confirm box, inside the section that asked",
+        )
+        assert state.previews == [
+            ("universe.kalshi", {"tickers": ["KXBASE-A", "KXBASE-B", "KXNEW-C"]})
+        ]
+        assert not any(a == "universe.kalshi" for a, _p, _c in state.controls)
+        assert "would universe.kalshi" in page.text("#csec-kalshi .cconfirm-eff")
+
+        page.click("#csec-kalshi .cconfirm .cbtn.primary")
+        eventually(
+            lambda: any(a == "universe.kalshi" for a, _p, _c in state.controls),
+            "CONFIRM to post the real action",
+        )
+        sent = next(p for a, p, _c in state.controls if a == "universe.kalshi")
+        assert sent == {"tickers": ["KXBASE-A", "KXBASE-B", "KXNEW-C"]}, (
+            "the leg must not ride along"
+        )
+
+
+@needs_chrome
+def test_a_pending_confirmation_survives_another_sections_action() -> None:
+    """One pending confirmation, one owner. Running DOCTOR used to clear
+    `armed` wholesale, so a watch-set confirm in another section vanished
+    without a word — and with it the sentence the operator was reading."""
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-pairstop") !== null')
+        page.wait_ws_live()
+        page.click('button[data-action="pairs.top"].primary')
+        page.wait_for(
+            'document.querySelector("#csec-watch .cconfirm") !== null', "the watch-set confirm box"
+        )
+        # The section that is waiting on an answer locks its own buttons.
+        assert page.eval(
+            """document.querySelector('button[data-action="pairs.top"].primary').disabled"""
+        )
+
+        page.click('button[data-action="jobs.doctor"]')
+        eventually(
+            lambda: any(a == "jobs.doctor" for a, _p, _c in state.controls), "DOCTOR to post"
+        )
+        page.wait_for(
+            'document.querySelector("#csec-jobs .creceipt") !== null',
+            "the jobs receipt, in the jobs section",
+        )
+        assert page.eval('document.querySelector("#csec-watch .cconfirm") !== null'), (
+            "another section's action dismissed a pending confirmation"
+        )
+        assert not any(a == "pairs.top" for a, _p, _c in state.controls)
+
+
+@needs_chrome
+def test_an_invalid_limit_cannot_be_applied_and_says_which_field() -> None:
+    """APPLY is a button that writes risk limits to a live trader. It enables
+    only for a valid change, names the field that is wrong, and a value that is
+    not a whole number of ticks is refused — never rounded."""
+    state = TerminalState()
+    with terminal(state) as page:
+        page.goto("/control", ready='document.getElementById("ctl-minnet") !== null')
+        page.wait_ws_live()
+        apply_sel = 'button[data-action="paper.limits"]'
+        assert page.eval(f"document.querySelector('{apply_sel}').disabled")
+
+        page.key("Tab")
+        focus_settles(page, "ctl-minnet")
+        page.eval('document.getElementById("ctl-minnet").select()')
+        page.type("0.505")
+        page.wait_for(
+            'document.querySelector("#csec-paper .cform-hint.bad") !== null', "the field error"
+        )
+        assert "nearest 0.01" in page.text("#csec-paper .cform-hint.bad")
+        assert page.eval(f"document.querySelector('{apply_sel}').disabled")
+
+        page.eval('document.getElementById("ctl-minnet").select()')
+        page.type("0.6")
+        page.wait_for(f"!document.querySelector('{apply_sel}').disabled", "APPLY to enable")
+        assert "0.50¢ → 0.60¢" in page.text("#csec-paper .cdraft")
+        assert state.controls == [], "nothing is sent until APPLY is pressed"

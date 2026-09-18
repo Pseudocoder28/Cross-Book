@@ -1,240 +1,316 @@
-/* CONTROL page. Same amber-on-black terminal idiom as the rest; the only new
-   visual language is the consequence grade on a button and the confirm band,
-   because those are the two things a user must not misread. */
+/* css/control.css — /control, the page whose buttons write.
 
-#control-page {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+   The visual rules, each for a reason (the behavioural ones are in control.js):
+   - One section anatomy everywhere: a coloured top edge and light for the
+     section's level, TITLE left, STATE right, one sentence, numbers, controls.
+   - Colour means level (style.css .lv-*), amber additionally means "yours,
+     unsaved" on a draft line — never decoration.
+   - Sentence case for anything that is read (explanations, confirm sentences,
+     receipts, audit effects); uppercase for labels that are scanned.
+   - A primary button is outlined amber; a button that will ask for
+     confirmation carries an amber left edge; a disabled button looks disabled. */
+
+#control-page { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+
+/* ---------- header chips ---------- */
+
+.cchips { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cchip {
+  padding: 0 6px;
+  font: 700 9px/13px var(--mono); letter-spacing: 0.08em;
+  border: 1px solid var(--amber); color: var(--amber);
+  white-space: nowrap;
+}
+.cchip-ro { border-color: var(--ink2); color: var(--ink2); }
+.cchip-bind { cursor: help; }
+
+.cro {
+  flex: none;
+  padding: 5px 12px;
+  background: var(--raised); color: var(--ink2);
+  font-size: 11px; line-height: 16px;
+  border-bottom: 1px solid var(--hair);
 }
 
-.cbanner { flex: none; }
+/* ---------- layout: sections | what happened ---------- */
 
-.cbody {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding: 8px;
+.clayout {
+  flex: 1; min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 1px;
+  background: var(--hair);
 }
-
+.cmain { min-height: 0; overflow-y: auto; background: var(--bg); padding: 10px; }
 .cgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 8px;
-  align-items: start;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: stretch;
 }
+/* The recorder is one switch and two numbers: a full-width strip, with its
+   sentence and its numbers side by side. */
+.csec.csec-strip { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 32px; align-items: end; }
+.csec-strip .csec-head, .csec-strip .csec-slot { grid-column: 1 / -1; }
+.csec-strip .csec-blurb { grid-column: 1; }
+.csec-strip .cstats { grid-column: 2; margin-top: 0; flex-wrap: nowrap; }
 
-.cwide {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-  gap: 8px;
-  margin-top: 8px;
-}
+/* ---------- a section ---------- */
 
-.cblock {
+.csec {
+  min-width: 0;
+  display: flex; flex-direction: column;
+  padding: 9px 12px 11px;
   background: var(--panel);
   border: 1px solid var(--hair);
-  padding: 8px 10px 10px;
-  min-width: 0;
+  border-top: 2px solid var(--lv);
+}
+.csec-head { display: flex; align-items: center; gap: 9px; min-height: 22px; }
+.csec-head .cbtn { padding: 2px 9px; }
+.csec-head .cbtn[hidden] { display: none; }
+.csec-title { flex: none; color: var(--ink); font-size: 11px; font-weight: 700; letter-spacing: 0.1em; white-space: nowrap; }
+.csec-state {
+  margin-left: auto;
+  color: var(--lv);
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+  white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.csec-head .cbtn { flex: none; }
+.lv-off .csec-state, .lv-wait .csec-state { color: var(--ink2); }
+.csec-blurb {
+  margin: 5px 0 0;
+  color: var(--ink2);
+  font-size: 11.5px; line-height: 16px;
+  text-transform: none; letter-spacing: 0;
+}
+.csub {
+  margin-top: 12px;
+  color: var(--ink2);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em; line-height: 14px;
 }
 
-/* a second heading inside one card */
-.cs2 { margin-top: 10px; }
-
-.cnote {
-  margin-top: 6px;
-  font-size: 10px;
-  line-height: 14px;
-  letter-spacing: 0.04em;
+/* numbers */
+.cstats { display: flex; flex-wrap: wrap; gap: 6px 26px; margin-top: 10px; }
+.cstat { min-width: 0; }
+.cstat-k { color: var(--dim); font-size: 9px; font-weight: 700; letter-spacing: 0.1em; line-height: 12px; }
+.cstat-v {
+  color: var(--ink);
+  font-size: 15px; font-weight: 700; line-height: 20px;
+  font-variant-numeric: tabular-nums slashed-zero;
+  white-space: nowrap;
 }
+.cstat-v.warn { color: var(--amber); }
+.cstat-v.bad { color: var(--ask); }
+.cstat-sub { color: var(--dim); font-size: 10px; line-height: 13px; white-space: nowrap; }
+.cmeter { width: 100%; min-width: 150px; height: 3px; margin-top: 2px; background: var(--hair); }
+.cmeter i { display: block; height: 100%; width: 0; background: var(--bid); }
+.cmeter.full i { background: var(--amber); }
 
 /* ---------- buttons ---------- */
 
-.cbtns {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
+.cbtns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.cbtns-gap { flex: 1; }
 .cbtn {
   appearance: none;
-  background: var(--raised);
-  color: var(--ink);
-  border: 1px solid var(--hair);
-  padding: 3px 10px;
-  font: 700 10px/16px var(--mono);
-  letter-spacing: 0.08em;
+  padding: 4px 11px;
+  background: var(--raised); color: var(--ink);
+  border: 1px solid #2a2a2a; border-radius: 0;
+  font: 700 10px/16px var(--mono); letter-spacing: 0.08em;
+  white-space: nowrap;
   cursor: pointer;
   transition: background-color 160ms var(--ease), color 160ms var(--ease);
 }
 .cbtn:hover:not(:disabled) { background: var(--bg); color: var(--amber); }
-.cbtn:focus-visible { outline: 1px solid var(--amber); outline-offset: -2px; }
-.cbtn:disabled { color: var(--dim); cursor: not-allowed; }
+.cbtn:focus-visible { outline: 1px solid var(--amber); outline-offset: 1px; }
 .cbtn.primary { border-color: var(--amber); color: var(--amber); }
-.cbtn.tiny { padding: 1px 6px; margin-left: 8px; }
+.cbtn:disabled { color: #4a4f57; border-color: var(--hair); background: transparent; cursor: not-allowed; }
+.cbtn.busy { color: var(--amber); cursor: progress; }
+.cbtn.g-g3 { border-left: 3px solid var(--amber); }   /* will ask before it writes */
+.cbtn.tiny { padding: 0 6px; line-height: 14px; }
+.cbtn-note { flex: 1 1 220px; min-width: 0; color: var(--ink2); font-size: 11px; line-height: 15px; }
 
-/* The grade is the server's, and it is the one thing on the button that says
-   how much it costs to be wrong. G3 writes many rows; G4 is irreversible. */
-.cbtn.g-g3 { border-left: 3px solid var(--amber); }
-.cbtn.g-g4 { border-left: 3px solid var(--ask); color: var(--ask); }
+/* ---------- forms ---------- */
 
-/* ---------- inputs ---------- */
-
-.cnum, .clist {
-  background: var(--bg);
-  color: var(--ink);
-  border: 1px solid var(--hair);
-  font: 400 11px/16px var(--mono);
-  font-variant-numeric: tabular-nums slashed-zero;
-  padding: 1px 6px;
-  text-align: right;
+.cform { margin-top: 2px; }
+.cform-row {
+  display: grid;
+  grid-template-columns: 148px auto minmax(0, 1fr);
+  column-gap: 10px; align-items: center;
+  min-height: 23px;
 }
-.cnum:focus, .clist:focus { outline: 1px solid var(--amber); outline-offset: -1px; }
-.crun { text-align: left; width: 24ch; }
+.cform-k { color: var(--ink2); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; white-space: nowrap; }
+.cform-in { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.cform-unit { color: var(--dim); font-size: 10.5px; }
+.cform-hint { color: var(--dim); font-size: 10.5px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cform-hint.chg { color: var(--amber); }
+.cform-hint.bad { color: var(--ask); }
 
+.cin, .clist {
+  background: var(--bg); color: var(--ink);
+  border: 1px solid #2a2a2a; border-radius: 0;
+  font: 400 12px/18px var(--mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  padding: 1px 7px;
+}
+.cin { width: 9ch; text-align: right; }
+.cin-n { width: 6ch; }
+.csel { width: auto; max-width: 190px; text-align: left; font-size: 11px; padding: 2px 4px; }
+.cin:focus, .clist:focus { outline: 1px solid var(--amber); outline-offset: -1px; }
+.cin[data-dirty], .clist[data-dirty] { border-color: var(--amber); }
 .clist {
-  display: block;
-  width: 100%;
-  margin-top: 6px;
-  text-align: left;
-  resize: vertical;
-  white-space: pre;
-  overflow-x: auto;
+  display: block; width: 100%; margin-top: 7px;
+  font-size: 11px; line-height: 16px;
+  resize: vertical; white-space: pre; overflow-x: auto;
 }
 
-/* ---------- the watch set ----------
-   TRACKED n OF m CONFIRMED is the headline number of this page: its absence
-   is what let ten pairs own the watch set while forty-six were confirmed. It
-   is set larger than the rows around it because it is the one line that has
-   to be legible from across the desk. */
+/* the line that says what APPLY will do */
+.cdraft { margin-top: 8px; min-height: 15px; color: var(--dim); font-size: 11px; line-height: 15px; }
+.cdraft.chg { color: var(--amber); }
+.cdraft.warn { color: var(--amber); }
+.cdraft.bad { color: var(--ask); }
 
-.cbig {
-  color: var(--amber);
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  font-variant-numeric: tabular-nums slashed-zero;
+.ccount { margin-top: 9px; color: var(--ink2); font-size: 11px; line-height: 15px; font-variant-numeric: tabular-nums; }
+
+/* watch set */
+.cwarnline {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 10px; padding: 5px 9px;
+  border-left: 2px solid var(--amber);
+  background: rgba(255, 176, 46, 0.06);
 }
-/* Nothing watched while pairs are confirmed: the engine is quoting nothing. */
-.cbig.warn { color: var(--ask); }
+.cwarnline[hidden] { display: none; }
+.cwarnline-t { flex: 1; min-width: 0; color: var(--ink); font-size: 11.5px; line-height: 16px; }
+.cbulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.cbulk-t { color: var(--ink2); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; }
+.cbulk .cform-hint { text-align: left; flex: 1; }
 
-/* ---------- banners ---------- */
+/* ---------- the slot: a confirm box, or the last receipt ---------- */
 
-.cbind, .cro {
-  padding: 4px 10px;
-  font: 700 10px/18px var(--mono);
-  letter-spacing: 0.08em;
+/* Last in its section, under the buttons: the confirm box and the receipt
+   open where the pointer already is. (`order`, because sections are built
+   head-first and the slot is created with the head.) */
+.csec-slot { order: 99; margin-top: 10px; }
+.cconfirm {
+  padding: 8px 10px 9px;
+  border: 1px solid var(--amber);
+  background: rgba(255, 176, 46, 0.08);
 }
-.cbind { background: var(--ask); color: #000; }
-.cro { background: var(--raised); color: var(--dim); }
-
-/* The confirm band: reversed video, because agreeing to a G3 write should not
-   look like the rest of the page. */
-.carm {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 10px;
-  background: var(--amber);
-  color: #000;
-  font: 700 10px/20px var(--mono);
-  letter-spacing: 0.06em;
-}
-.carm-tag { font-weight: 700; letter-spacing: 0.12em; }
-.carm-eff {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0.02em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.carm .cbtn { background: #000; color: var(--amber); border-color: #000; }
-.carm .cbtn:hover { background: var(--bg); }
-.carm-ttl { margin-left: auto; }
-
-/* The receipt band. Three outcomes, three colours on the left edge, and the
-   server's own sentence in full — this is the band that has to be able to say
-   "nothing changed" loudly enough that ten more presses do not happen. It
-   wraps rather than clips for the same reason the audit trail does. */
-.cres {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 4px 10px;
-  background: var(--raised);
+.cconfirm-k { color: var(--amber); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; line-height: 14px; }
+.cconfirm-eff { margin-top: 3px; color: var(--ink); font-size: 12px; line-height: 17px; overflow-wrap: anywhere; }
+.cconfirm .cbtns { margin-top: 8px; }
+.creceipt {
+  display: flex; align-items: baseline; gap: 9px;
+  padding: 4px 9px;
   border-left: 3px solid var(--hair);
-  font: 700 10px/16px var(--mono);
-  letter-spacing: 0.06em;
+  background: var(--raised);
 }
-.cres-done { border-left-color: var(--bid); }
-.cres-noop { border-left-color: var(--amber); background: #241d05; }
-.cres-fail { border-left-color: var(--ask); }
-.cres-tag { flex: none; letter-spacing: 0.12em; }
-.cres-done .cres-tag { color: var(--bid); }
-.cres-noop .cres-tag { color: var(--amber); }
-.cres-fail .cres-tag { color: var(--ask); }
-.cres-act { flex: none; color: var(--ink2); font-weight: 400; }
-.cres-msg {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--ink);
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0.02em;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.cres .cbtn { flex: none; margin-left: auto; }
+.creceipt-tag { flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.1em; }
+.creceipt-msg { flex: 1; min-width: 0; color: var(--ink); font-size: 11.5px; line-height: 16px; overflow-wrap: anywhere; }
+.cr-done { border-left-color: var(--bid); } .cr-done .creceipt-tag { color: var(--bid); }
+.cr-noop { border-left-color: var(--amber); } .cr-noop .creceipt-tag { color: var(--amber); }
+.cr-fail { border-left-color: var(--ask); } .cr-fail .creceipt-tag { color: var(--ask); }
 
 /* ---------- jobs ---------- */
 
-.cjob .k { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
-.cj-name { color: var(--ink); font-weight: 700; }
-.cj-st { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; }
-.cj-v { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
-.cj-phase { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cj-el { margin-left: auto; color: var(--dim); }
-.cj-err { color: var(--ask); }
-
-.st-running { color: var(--amber); }
-.st-ok { color: var(--bid); }
-.st-error { color: var(--ask); }
-.st-cancelled { color: var(--dim); }
-.st-refused { color: var(--ask); }
-.st-armed { color: var(--amber); }
-
-/* ---------- audit ---------- */
-
-/* The effect sentence IS the audit record — it is what the operator was shown
-   and agreed to, which is why it is stored rather than re-derived from the
-   parameters later. So it wraps and is never clipped: measured at 1600px it
-   was losing 47% of itself to an ellipsis, which left rows reading "…the
-   ledger are kept, so re…" with the outcome cut off. `.kv` pins a 16px row
-   height and `nowrap`, so an audit row has to opt out of both. */
-.caud {
-  height: auto;
-  min-height: 16px;
-  align-items: baseline;
-  padding: 1px 0;
+.cjobs { margin-top: 8px; }
+.cjob {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px; align-items: start;
+  padding: 7px 0 6px;
+  border-top: 1px solid var(--hair);
 }
-.caud .k { display: flex; gap: 8px; align-items: baseline; flex: none; }
-.caud .v { white-space: normal; }
-.ca-when { color: var(--dim); font-size: 10px; white-space: nowrap; }
-.ca-res { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; }
-.ca-v { display: flex; gap: 8px; align-items: baseline; min-width: 0; flex-wrap: wrap; }
-.ca-act { color: var(--amber); font-weight: 700; white-space: nowrap; }
-.ca-eff {
-  color: var(--ink2);
-  min-width: 0;
-  white-space: normal;
-  overflow-wrap: anywhere;
+.cjob-info { grid-column: 1; grid-row: 1; min-width: 0; }
+.cjob-act { grid-column: 2; grid-row: 1; }
+.cjob-mid { grid-column: 1 / -1; grid-row: 2; margin-top: 3px; min-width: 0; }
+.cjob .csel { display: block; margin-top: 5px; max-width: 100%; }
+.cjob-name { color: var(--ink); font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+.cjob-what { color: var(--ink2); font-size: 11px; line-height: 15px; }
+.cjob-status {
+  appearance: none; display: block; width: 100%;
+  padding: 0; background: none; border: 0;
+  color: var(--ink2); font: 700 10px/15px var(--mono); letter-spacing: 0.06em;
+  text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
 }
-.ca-err { color: var(--ask); }
+.cjob-status:disabled { color: var(--dim); cursor: default; font-weight: 400; }
+.cjob-status:hover:not(:disabled) { text-decoration: underline; }
+.cjob-status.sel::before { content: "\25B8 "; color: var(--amber); }
+.cjob-status.st-running { color: var(--amber); }
+.cjob-status.st-ok { color: var(--bid); }
+.cjob-status.st-error { color: var(--ask); }
+.cjob-status.st-cancelled { color: var(--dim); }
+.cjob-bar { height: 3px; margin-top: 3px; background: var(--hair); overflow: hidden; }
+.cjob-bar[hidden] { display: none; }
+.cjob-bar i { display: block; height: 100%; background: var(--amber); transition: width 300ms var(--ease); }
+.cjob-bar.indet i { width: 30% !important; animation: cjob-indet 1.2s linear infinite; }
+@keyframes cjob-indet { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.cjob-act { display: flex; align-items: center; gap: 6px; }
+
+/* ---------- the rail: what happened ---------- */
+
+.crail { min-height: 0; display: flex; flex-direction: column; gap: 1px; background: var(--hair); }
+.crail-box { min-height: 0; display: flex; flex-direction: column; background: var(--panel); }
+.crail-jobs { flex: none; border: 0; border-top: 2px solid var(--lv); padding: 8px 12px 4px; }
+.crail-jobs .cjobs { margin-top: 6px; }
+.crail-out { flex: 1 1 0; min-height: 84px; }
+.crail-audit { flex: 1 1 0; }
+.crail-head {
+  flex: none;
+  padding: 4px 12px;
+  background: var(--raised); color: var(--ink2);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em; line-height: 16px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cout { min-height: 0; overflow: auto; padding: 8px 12px; outline: none; }
+.cout-line { color: var(--ink2); font-size: 11px; line-height: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cout-line.good { color: var(--ink); }
+.cout-line.warn { color: var(--amber); }
+.cout-line.bad { color: var(--ask); }
+.cout-check {
+  display: grid; grid-template-columns: 34px minmax(0, 0.8fr) minmax(0, 1.6fr);
+  column-gap: 8px; align-items: baseline;
+  padding: 2px 0;
+  font-size: 11px; line-height: 15px;
+}
+.ck-tag { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; }
+.ck-ok .ck-tag { color: var(--bid); } .ck-warn .ck-tag { color: var(--amber); } .ck-bad .ck-tag { color: var(--ask); }
+.ck-name { color: var(--ink); overflow-wrap: anywhere; }
+.ck-detail { color: var(--ink2); overflow-wrap: anywhere; }
+.ck-warn .ck-detail { color: var(--amber); } .ck-bad .ck-detail { color: var(--ask); }
+.cout-empty { color: var(--dim); font-size: 11.5px; line-height: 17px; }
+
+.caudit { min-height: 0; overflow-y: auto; padding: 2px 12px 10px; }
+.caud { padding: 7px 0 7px 9px; border-bottom: 1px solid var(--hair); border-left: 2px solid var(--hair); margin-top: 6px; }
+.caud-top { display: flex; align-items: baseline; gap: 8px; }
+.caud-res { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; color: var(--bid); }
+.caud-act { color: var(--amber); font-size: 11px; font-weight: 700; }
+.caud-when { margin-left: auto; color: var(--dim); font-size: 10px; white-space: nowrap; }
+/* The effect is the sentence the operator was shown and agreed to: it wraps,
+   and is never clipped. */
+.caud-eff { margin-top: 2px; color: var(--ink2); font-size: 11px; line-height: 15px; overflow-wrap: anywhere; }
+.caud-err { margin-top: 2px; color: var(--ask); font-size: 11px; line-height: 15px; overflow-wrap: anywhere; }
+.ca-ok { border-left-color: var(--bid); }
+.ca-armed { border-left-color: var(--amber); } .ca-armed .caud-res { color: var(--amber); }
+.ca-refused, .ca-error { border-left-color: var(--ask); }
+.ca-refused .caud-res, .ca-error .caud-res { color: var(--ask); }
+
+.cfoot { flex: none; margin-top: 0; padding: 0 12px; line-height: 18px; border-top: 1px solid var(--hair); white-space: nowrap; overflow: hidden; }
+
+/* ---------- narrower screens ---------- */
+
+@media (max-width: 1350px) {
+  .clayout { grid-template-columns: minmax(0, 1fr) 340px; }
+  .cform-row { grid-template-columns: 132px auto minmax(0, 1fr); }
+}
+@media (max-width: 1100px) {
+  .clayout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 260px; }
+  .cgrid { grid-template-columns: minmax(0, 1fr); }
+  .csec-strip { display: flex; }
+  .crail { flex-direction: row; }
+  .crail-out { max-height: none; flex: 1 1 0; }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .cbtn { transition: none; }
+  .cbtn, .cjob-bar i { transition: none; }
 }

@@ -1026,3 +1026,51 @@ judgement is a pure function in `pages/system-model.js`, tested in node.
   looks healthy in a reconnect loop — every reconnect delivers snapshots.
 - Sentence case for the explanation and the fix: they are read, not scanned.
 
+## /control is sections that read alike, with the answer where you asked (2026-09-18)
+
+The page was five cards of uneven height with an uppercase paragraph under every
+control, START and STOP both always on screen, raw ticks in the limit fields,
+the audit trail below the fold, confirmations and receipts in a band at the top
+of the page, and DOCTOR's output nowhere at all. The five rules it was built on
+(descriptors from the server, no optimistic state, the server owns the confirm
+copy, build once and update in place, a no-op is not a success) are unchanged.
+What changed, and why:
+
+- **One anatomy per section** — light · TITLE · STATE, one sentence, numbers,
+  controls — ordered by use: PAPER and WATCH SET, the two universes, RECORDER
+  as a strip. JOBS, JOB OUTPUT and the AUDIT TRAIL share the right rail: work,
+  and its record, always on screen.
+- **State is loud; the button is a verb.** One button per switch, in the
+  header beside the state it changes. START+STOP always had one dead button; a
+  slider would imply the instant local flip that "no optimistic state" forbids.
+  A 700 ms lock after a flip stops a double-click flipping it back.
+- **The operator's units.** ¢ per contract, contracts, dollars — what /arb and
+  /paper print. Conversion lives in `pages/control-model.js` and is exact or
+  refused: 0.505¢ is not a whole number of ticks, so it is an error, never a
+  silent round. APPLY enables only for a valid change, and the line above it
+  lists the change ("min edge 0.50¢ → 0.75¢"): no dead presses.
+- **The answer appears where the question was asked.** A section's confirm box
+  and its receipt open inside that section, under its buttons. One pending
+  confirmation, owned by its action: finishing some other action used to clear
+  it wholesale.
+- **A confirm step is a tax, spent where a slip is expensive.** Switches and
+  limits apply at once — one value, and the inverse is one press away. Anything
+  that REPLACES a set is priced first through the new read-only
+  `{"preview": true}` on the control route: the server's own sentence, rows
+  changed and resulting poll cycle included, with nothing done and nothing
+  audited. `pairs.top` was deliberately NOT made a confirm-action on the server:
+  eight tests pin its one-call contract, and a preview gives the same sentence
+  without changing what `execute` means. G3 jobs still arm on the server.
+- **The universe boxes edit the base list only.** They showed base + watched-
+  pair legs and wrote the union back as the base, so one press of SUBSCRIBE made
+  every watched pair's leg a permanent base market.
+- **The bind warning is a header chip, not a red band.** Non-loopback is only
+  possible with `ARB_ALLOW_REMOTE_BIND=1`, i.e. on purpose; a full-width red bar
+  on every visit for a deliberate state teaches the operator to ignore red. It
+  stays on screen, in amber, with the explanation on hover.
+- **Settled pairs can be untracked in one action**, and the engine's memory of
+  them accumulates (it was overwritten by every reload, so the watch set
+  alternated between right and half-dead on every press).
+- **Explanations are one sentence in sentence case.** Labels are scanned;
+  sentences are read.
+

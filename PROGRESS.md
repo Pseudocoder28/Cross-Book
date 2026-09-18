@@ -509,6 +509,9 @@ exists; the other half is the part with money in it:
   traded; `PaperTrader.trade_pair` is the one entry point.
 - **Kalshi reconnect loop fixed**: a seq that restarts is a new subscription.
 - **SYSTEM redesigned** as verdict → pipeline → checks (`pages/system-model.js`).
+- **CONTROL redesigned**: uniform sections, switches as verbs, limits in ¢/contracts/$,
+  in-section confirm and receipt, preview-before-replace (`{"preview": true}`), base-only
+  universe boxes, jobs + live output + audit in the rail (`pages/control-model.js`).
 
 ## Open questions
 

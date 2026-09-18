@@ -194,36 +194,56 @@ const SCREENS = {
     ],
   },
   control: {
-    lead: "Where you operate the system. Everything that used to be a command-line flag or "
-      + "an `arb` subcommand is a control here, and every one of them goes through one "
-      + "server-side executor that refuses it in read-only mode, asks you to confirm the "
-      + "expensive ones, and writes an audit row recording the exact sentence you were shown.",
+    lead: "Where you operate the system. Every control goes through one server-side executor "
+      + "that refuses it in read-only mode, asks you to confirm the expensive ones, and writes an "
+      + "audit row recording the exact sentence you were shown. Every section reads the same way: "
+      + "its light and STATE, one sentence, its numbers, its controls.",
     groups: [
       {
-        name: "CARDS",
+        name: "SECTIONS",
         cols: [
-          ["RECORDER", "start and stop writing raw messages to Postgres. Off leaves a hole a "
-            + "replay reads straight across, so the audit row is the only sign it was deliberate"],
-          ["PAPER TRADING", "suspend or resume the trader and retune its risk limits live. "
-            + "Suspend keeps positions and the spend already committed — it is not a reset"],
-          ["UNIVERSE", "replace either venue's market list and reload the tracked pairs. The "
-            + "Kalshi change costs a reconnect; the Polymarket one retunes the staleness budget"],
-          ["JOBS", "doctor, pair proposal, slug backfill and replay. Propose takes about three "
-            + "minutes and writes thousands of rows; replay runs as a subprocess"],
-          ["AUDIT TRAIL", "what was done, the effect sentence shown at the time, and how it ended"],
+          ["PAPER TRADING", "one button — SUSPEND or RESUME, whichever applies — beside the state. "
+            + "Suspending is a pause: positions and deployed money are kept. The risk limits are in "
+            + "your units: minimum edge in ¢ per contract after fees, contracts per pair, dollars in "
+            + "total. APPLY enables only for a valid change, and the line above it says what will change"],
+          ["WATCH SET", "watched versus confirmed, how many are quoting, and what the watch set "
+            + "costs: seconds per Polymarket book. If a venue says watched pairs have settled, one "
+            + "button untracks them. SET WATCH SET replaces the whole set, one pair per event first"],
+          ["KALSHI / POLYMARKET US MARKETS", "the BASE list for each venue — markets followed besides "
+            + "the watched pairs' legs, which are counted beside the box and never written into it. "
+            + "One market per line; the line under the box counts what you added and removed"],
+          ["RECORDER", "whether raw venue messages are being saved, how many, and how many were lost"],
+          ["JOBS", "doctor, pair proposal, link backfill and replay (pick the run from the list). "
+            + "A running job shows its progress and a CANCEL; click a job's status to read its output"],
+          ["JOB OUTPUT", "what the selected job printed, live while it runs"],
+          ["AUDIT TRAIL", "what was done, the sentence shown at the time, and how it ended"],
+        ],
+        note: "Answers appear where you asked. A confirmation or a receipt opens inside the section "
+          + "you pressed in, under its buttons. NO CHANGE is a real answer — the action ran and "
+          + "nothing moved — and it stays until you dismiss it. ESC in a field puts the server's "
+          + "value back; REVERT does it for the whole form.",
+      },
+      {
+        name: "WHEN IT ASKS FIRST",
+        cols: [
+          ["AT ONCE", "switches and limits: one value, and the opposite press undoes it"],
+          ["SHOWN FIRST", "anything that REPLACES a set — the watch set, a market list, untracking "
+            + "settled pairs. The server prices it without doing it (rows changed, the new poll "
+            + "cycle) and you confirm that sentence"],
+          ["ARMED", "jobs that write many rows (amber left edge on the button). The server arms "
+            + "them, records that it did, and you confirm the sentence that will be audited"],
         ],
       },
       {
         name: "GRADES",
         cols: [
           ["G0", "read-only — runs even when the server is in read-only mode"],
-          ["G2", "changes this run — one click, audited"],
+          ["G2", "changes this run — audited"],
           ["G3", "writes many rows — arms first, and you confirm a sentence the server wrote"],
         ],
       },
     ],
   },
-
   system: {
     lead: "Is anything wrong, and what do I do about it. The page gives a verdict, draws the "
       + "machine as a pipeline, and lists one plain-English check per part — problems first. "
