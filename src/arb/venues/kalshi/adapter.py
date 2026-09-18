@@ -56,11 +56,19 @@ class KalshiMarketDataAdapter:
             if not isinstance(sid, int) or not isinstance(seq, int):
                 raise ParseError(f"kalshi ws envelope missing sid/seq: {sid!r}/{seq!r}")
             last = self._last_seq_by_sid.get(sid)
-            if last is not None and seq != last + 1:
+            if last is not None and seq > last + 1:
                 # Gap taints every market in the subscription — seq is
                 # subscription-scoped, so we can't tell which market missed.
                 SEQ_GAPS.labels(venue=VENUE).inc()
                 events.append(ResyncRequired(VENUE, None))
+            # seq <= last is NOT a gap: it is a new subscription. Kalshi
+            # restarts at sid=1, seq=1 on every connection (observed live,
+            # docs/venue-notes.md) and opens it with a full snapshot per
+            # market, so nothing was missed. Reading that restart as a gap
+            # asked for a resync — which reconnects, which restarts at seq=1,
+            # which read as a gap: after the first reconnect of a run the
+            # socket never stayed up again, and every Kalshi book sat
+            # untrusted until the process was restarted.
             self._last_seq_by_sid[sid] = seq
             if doc.get("type") == "orderbook_delta":
                 ts_ms = doc["msg"].get("ts_ms")

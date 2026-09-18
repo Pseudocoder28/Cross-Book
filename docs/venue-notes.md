@@ -201,6 +201,10 @@ _Verified 2026-09-13 against live docs at docs.kalshi.com._
 
 ### Open items
 
+- **`sid` and `seq` restart on every connection** (observed live 2026-09-18, in the
+  recorder: every `subscribed` frame of a run is followed by `orderbook_snapshot`
+  `sid=1, seq=1, 2, ...`). A seq that goes backwards is therefore a new subscription —
+  opened with a full snapshot per market — and not a gap; only `seq > last + 1` is.
 - Gap recovery policy is ours (docs specify none): track seq per `sid`; on a
   gap, `update_subscription` + `get_snapshot` (or resubscribe on terminal
   errors) and invalidate the affected books.

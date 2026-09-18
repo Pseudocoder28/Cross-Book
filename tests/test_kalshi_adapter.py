@@ -113,3 +113,25 @@ def test_malformed_payloads_raise_parse_error() -> None:
     del doc["sid"]
     with pytest.raises(ParseError):
         adapter.parse(raw(json.dumps(doc).encode()))
+
+
+def test_a_reconnect_restarting_at_seq_one_is_not_a_gap() -> None:
+    """Kalshi restarts at sid=1, seq=1 on every connection (recorded live:
+    every `subscribed` frame of a run is followed by snapshot seq 1, 2, ...).
+
+    The adapter outlives the connection, so it used to compare that seq=1
+    against the old connection's last seq, call it a gap and ask for a resync.
+    A resync IS a reconnect, which restarts at seq=1 again: from the first
+    reconnect of a run onward the socket was torn down within a second of
+    every connect, forever, and every Kalshi book stayed marked seq_gap."""
+    adapter = KalshiMarketDataAdapter()
+    all_frames = frames()
+    before = seq_gap_count()
+    for frame in all_frames:  # the first connection, to its end
+        adapter.parse(raw(frame))
+    resyncs = 0
+    for _ in range(3):  # three reconnects: the same stream from seq=1 again
+        for frame in all_frames:
+            resyncs += sum(isinstance(e, ResyncRequired) for e in adapter.parse(raw(frame)))
+    assert resyncs == 0
+    assert seq_gap_count() == before
