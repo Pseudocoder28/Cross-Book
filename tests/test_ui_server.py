@@ -380,7 +380,11 @@ def test_server_state_payload_shapes_from_real_capture() -> None:
         state.on_kalshi_frame()
         state.mark_dirty(books.apply(adapter.parse(raw), mono_ns=time.monotonic_ns()))
 
-    payloads = state.book_payloads()
+    frames = state.book_payloads()
+    # One book frame per market, then the current arb quotes — always sent,
+    # empty with nothing watched, so a fresh tab never keeps a stale /arb.
+    assert frames[-1] == {"t": "arb", "quotes": []}
+    payloads = frames[:-1]
     assert len(payloads) == 5
     for payload in payloads:
         assert payload["t"] == "book"
@@ -587,3 +591,94 @@ def test_universe_change_pushes_a_fresh_hello() -> None:
         "polymarket_us:bbb",
     ]
     assert hellos[-1]["run_id"] == "testrun"
+
+
+# ---------------------------------------------------------------------------
+# a /pairs decision reaches the running engine
+# ---------------------------------------------------------------------------
+
+
+def _pair(pair_id: int) -> Any:
+    from arb.arbmon import TrackedPair
+
+    def no_fee(*_a: Any, **_k: Any) -> int:
+        return 0
+
+    return TrackedPair(
+        pair_id=pair_id,
+        score=1.0,
+        kalshi_market_id=f"kalshi:K{pair_id}",
+        polymarket_market_id=f"polymarket_us:p{pair_id}",
+        kalshi_fee=no_fee,
+        polymarket_fee=no_fee,
+        label=f"pair {pair_id}",
+    )
+
+
+def test_both_decide_routes_make_the_running_engine_follow(monkeypatch: Any) -> None:
+    """The HTTP routes, not just the control method: a decision taken on /pairs
+    — one pair or a whole event at once — is handed to the control plane after
+    the database write, so a rejected pair leaves /arb and the paper trader."""
+    state = ServerState(run_id="t", recording=False, books=BookManager(staleness_limit_ns=10**12))
+    calls: list[tuple[list[int], str]] = []
+
+    class Control:
+        async def after_decision(self, ids: list[int], status: str) -> None:
+            calls.append((list(ids), status))
+
+    async def decide(_engine: Any, pair_id: int, status: str) -> dict[str, Any]:
+        return {"id": pair_id, "status": status}
+
+    async def decide_many(_engine: Any, ids: list[int], _status: str) -> int:
+        return len(ids)
+
+    monkeypatch.setattr("arb.ui.server.pairs_store.decide", decide)
+    monkeypatch.setattr("arb.ui.server.pairs_store.decide_many", decide_many)
+    state.control = cast(Any, Control())
+    state.set_pairs_engine(cast(Any, object()))
+    client = TestClient(create_app(state))
+
+    assert client.post("/api/pairs/7/decide", json={"status": "rejected"}).status_code == 200
+    assert client.post("/api/pairs/decide", json={"ids": [8, 9], "status": "proposed"}).json() == {
+        "updated": 2,
+        "status": "proposed",
+    }
+    assert calls == [([7], "rejected"), ([8, 9], "proposed")]
+
+
+def test_without_a_control_plane_a_rejected_pair_is_still_dropped(monkeypatch: Any) -> None:
+    """A process with no control plane has no reload path, but the rule holds:
+    a rejected pair leaves the running monitor, and /arb is told at once."""
+    from arb.arbmon import ArbMonitor
+
+    books = BookManager(staleness_limit_ns=10**12)
+    state = ServerState(run_id="t", recording=False, books=books)
+    state.arbmon = ArbMonitor(books, [_pair(1), _pair(2)])
+    frames: list[dict[str, Any]] = []
+    monkeypatch.setattr(state, "broadcast", frames.append)
+
+    async def decide(_engine: Any, pair_id: int, status: str) -> dict[str, Any]:
+        return {"id": pair_id, "status": status}
+
+    monkeypatch.setattr("arb.ui.server.pairs_store.decide", decide)
+    state.set_pairs_engine(cast(Any, object()))
+
+    asyncio.run(state.decide_pair(1, "confirmed"))
+    assert [p.pair_id for p in state.arbmon.pairs] == [1, 2], "confirming changes nothing live"
+
+    asyncio.run(state.decide_pair(1, "rejected"))
+    assert [p.pair_id for p in state.arbmon.pairs] == [2]
+    assert [q["pair_id"] for q in frames[-1]["quotes"]] == [2]
+
+    asyncio.run(state.decide_pair(2, "rejected"))
+    assert state.arbmon is None
+    assert frames[-1] == {"t": "arb", "quotes": []}
+
+
+def test_a_fresh_connection_learns_the_watch_set_is_empty() -> None:
+    """With nothing watched there is no monitor and the flush loop never sends
+    an arb frame, so a tab connecting then would keep whatever /arb it last
+    rendered. The connect-time payloads always carry the current quotes."""
+    state = ServerState(run_id="t", recording=False, books=BookManager(staleness_limit_ns=10**12))
+    arb = [p for p in state.book_payloads() if p["t"] == "arb"]
+    assert arb == [{"t": "arb", "quotes": []}]

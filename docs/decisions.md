@@ -944,3 +944,36 @@ an instrument cluster); the full spec is `.context/depth-panel-spec.md`.
   aria description that announces state changes at once and throttles only
   window churn.
 
+## A /pairs decision stops a pair trading the moment it commits (2026-09-18)
+
+Rejecting a watched pair on /pairs cleared `tracked` in the database and did
+nothing else: the running ArbMonitor kept the pair, so it stayed on /arb,
+stayed subscribed and polled, and stayed in front of the paper trader until
+some unrelated watch-set action happened to reload.
+
+The first fix — re-run the watch-set reload after the decision — was reviewed
+adversarially and was not enough: the reload makes one venue call per watched
+market (10s timeout each), so the rejected pair traded for that whole window;
+and a reload already in flight had read the database before the rejection and
+installed the pair straight back.
+
+What holds now:
+
+1. **Synchronous prune.** Right after the decision commits, before the
+   decide route awaits anything, the pair is dropped from the running monitor
+   and /arb is sent the new quotes. The flush loop rebinds the monitor every
+   tick, so the trader never sees it again.
+2. **Veto.** If a reload is in flight when the decision lands, the pair is
+   vetoed; every install drops vetoed ids, and a veto clears once a reload
+   that started after it has installed.
+3. **Reconcile in the background.** The usual reload then runs so
+   subscriptions and poll targets follow, and an audit row (`pairs.decide`)
+   says what stopped. If it fails, the stopped legs are dropped from the pair
+   universe directly. The decide route does not wait for it, so a slow venue
+   cannot stall /pairs or reorder its responses.
+
+Also: every change to the monitor publishes an arb frame at once, and every
+new connection gets the current quotes even when nothing is watched — /arb
+only heard about quotes when a watched book moved, so an emptied watch set
+left stale rows on screen for good.
+

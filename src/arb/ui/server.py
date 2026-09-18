@@ -609,12 +609,42 @@ class ServerState:
     async def decide_pair(self, pair_id: int, status: str) -> dict[str, Any] | None:
         if self._pairs_engine is None:
             return None
-        return await pairs_store.decide(self._pairs_engine, pair_id, status)
+        row = await pairs_store.decide(self._pairs_engine, pair_id, status)
+        if row is not None:
+            await self._follow_decision([pair_id], status)
+        return row
 
     async def decide_pairs(self, pair_ids: list[int], status: str) -> int:
         if self._pairs_engine is None:
             return 0
-        return await pairs_store.decide_many(self._pairs_engine, pair_ids, status)
+        updated = await pairs_store.decide_many(self._pairs_engine, pair_ids, status)
+        if updated:
+            await self._follow_decision(pair_ids, status)
+        return updated
+
+    async def _follow_decision(self, pair_ids: list[int], status: str) -> None:
+        """The running engine follows the decision the database just took.
+
+        A decision other than ``confirmed`` clears the watch flag in SQL; the
+        live monitor has to drop the pair too, or a rejected pair keeps being
+        quoted on /arb and offered to the paper trader. The decision itself is
+        already committed, so a failure here is logged and never turns the
+        operator's decide into an error.
+        """
+        if self.control is not None:
+            try:
+                await self.control.after_decision(pair_ids, status)
+            except Exception:
+                log.warning("watch set did not follow a %s decision", status, exc_info=True)
+            return
+        # No control plane (a read-only harness): drop the pairs directly.
+        if status != "confirmed" and self.arbmon is not None:
+            gone = set(pair_ids)
+            keep = [p for p in self.arbmon.pairs if p.pair_id not in gone]
+            if len(keep) != len(self.arbmon.pairs):
+                self.arbmon = ArbMonitor(self.books, keep) if keep else None
+                quotes = self.arbmon.snapshot() if self.arbmon else []
+                self.broadcast({"t": "arb", "quotes": quotes})
 
     def seed_detail_pm(self, market: PolymarketUSMarket, event: PolymarketUSEvent | None) -> None:
         mid = pm_market_id(market.slug)
@@ -641,8 +671,11 @@ class ServerState:
             payload = self.book_payload(market_id)
             if payload is not None:
                 payloads.append(payload)
-        if self.arbmon is not None:
-            payloads.append({"t": "arb", "quotes": self.arbmon.snapshot()})
+        # Always, even with nothing watched: a tab that connects after the
+        # watch set emptied must learn it is empty, or /arb keeps showing
+        # whatever it last saw (the flush loop never sends a frame for a
+        # monitor that does not exist).
+        payloads.append({"t": "arb", "quotes": self.arb_snapshot()})
         return payloads
 
     def arb_snapshot(self) -> list[dict[str, Any]]:
