@@ -94,6 +94,17 @@ RECORDER_QUEUE_DEPTH = Gauge(
     "Current recorder queue depth",
 )
 
+# A shutdown drain that ran out of time: whatever was still queued was
+# abandoned. `arb ui` increments this after its HTTP server has stopped, so
+# Prometheus cannot scrape the new value from that process — the log line
+# beside the increment is the record there. No caller outlives its drain
+# today (the pairs jobs borrow this recorder and drain nothing), so tests are
+# the only place the counter is seen to move.
+RECORDER_DRAIN_TIMEOUTS = Counter(
+    "arb_recorder_drain_timeouts_total",
+    "Shutdown drains that timed out with messages still queued (abandoned)",
+)
+
 # Incremented by a venue adapter when the envelope sequence number skips —
 # a subscription-level gap. The venue's books get invalidated (reason
 # "seq_gap") and resynced from fresh snapshots.

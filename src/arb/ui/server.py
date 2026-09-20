@@ -71,6 +71,7 @@ from arb.interfaces import ParseError, ResyncRequired
 from arb.metrics import (
     CLOCK_SKEW_MS,
     PARSE_ERRORS,
+    RECORDER_DRAIN_TIMEOUTS,
     UI_WS_CLIENTS,
     UI_WS_CLIENTS_DROPPED,
     WS_ONE_WAY_LATENCY_MS,
@@ -82,6 +83,7 @@ from arb.pairs.tracked import load_tracked_pairs
 from arb.paper import PaperLimits, PaperTrader
 from arb.recorder import Recorder
 from arb.run import RunContext
+from arb.shutdown import Shutdown, serve_then_cleanup
 from arb.storage.db import insert_raw_messages, make_engine
 from arb.storage.models import RawMessageRow
 from arb.supervise import supervise
@@ -118,7 +120,17 @@ from arb.venues.polymarket_us.source import PolymarketUSRestSource
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+# Shutdown budget. docker-compose.yml's stop_grace_period has to cover all of
+# it (tests/test_shutdown.py holds the two together): uvicorn's graceful
+# shutdown, then a cancelled subprocess job's SIGTERM-to-SIGKILL grace
+# (control.JOB_TERMINATE_GRACE_S), then the Kalshi socket's closing handshake
+# (the websockets library's close_timeout), then this drain. The engine
+# dispose after it has no timeout of its own; compose's slack covers it.
 DRAIN_TIMEOUT_S = 10.0
+# uvicorn waits for open connections with no limit unless told otherwise, and
+# everything after serve() — the recorder drain included — waits behind it. A
+# browser tab's WebSocket closes at once; this bounds a request that hangs.
+HTTP_GRACEFUL_TIMEOUT_S = 5
 # No inbound WS frame for this long → the venue is reported "down".
 VENUE_DOWN_AFTER_S = 30.0
 # Book pushes are coalesced to at most one per market per interval (<= 10/s).
@@ -989,6 +1001,20 @@ async def fetch_database_status(engine: AsyncEngine) -> DatabaseStatus:
     )
 
 
+async def drain_recorder(recorder: Recorder, timeout_s: float) -> bool:
+    """Wait for the recorder queue to be written out; count a wait that ran out.
+
+    False means queued messages were abandoned. That happens when the sink
+    cannot write (no database) or is still inside a retry backoff, which can
+    be longer than the timeout.
+    """
+    if await recorder.drain(timeout_s):
+        return True
+    RECORDER_DRAIN_TIMEOUTS.inc()
+    log.warning("recorder drain timed out after %.0fs; queued messages were not written", timeout_s)
+    return False
+
+
 async def run_ui(
     config: AppConfig,
     *,
@@ -1057,7 +1083,9 @@ async def run_ui(
 
     tasks: list[asyncio.Task[object]] = []
     control: ControlPlane | None = None
-    try:
+
+    async def start_and_serve(shutdown: Shutdown) -> None:
+        nonlocal tickers, tasks, control
         if not tickers:
             discovered = await fetch_liquid_markets(config, run, top_n=top_n, sink=record_raw)
             log.info("discovered %d liquid kalshi markets", len(discovered))
@@ -1438,7 +1466,14 @@ async def run_ui(
             allowed_origins=parse_csv(config.ui_allowed_origins),
         )
         server = uvicorn.Server(
-            uvicorn.Config(guarded, host=host, port=port, log_config=None, access_log=False)
+            uvicorn.Config(
+                guarded,
+                host=host,
+                port=port,
+                log_config=None,
+                access_log=False,
+                timeout_graceful_shutdown=HTTP_GRACEFUL_TIMEOUT_S,
+            )
         )
         log.info(
             "ui listening on http://%s:%d%s%s",
@@ -1447,8 +1482,13 @@ async def run_ui(
             "" if bind.loopback else " (NON-LOOPBACK)",
             " [read-only]" if control.read_only else "",
         )
-        await server.serve()  # returns (or raises KeyboardInterrupt) on Ctrl-C
-    finally:
+        # Not server.serve() directly: uvicorn re-delivers SIGTERM once it has
+        # shut down, and with nothing installed that kills the process before
+        # cleanup() below runs. See arb.shutdown.
+        await shutdown.serve(server)
+
+    async def cleanup() -> None:
+        started = time.monotonic()
         if control is not None:
             await control.shutdown()
         for task in tasks:
@@ -1456,10 +1496,23 @@ async def run_ui(
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        feeds_closed = time.monotonic()
         # Flush what's queued before tearing the writer down.
-        if not await recorder.drain(DRAIN_TIMEOUT_S):
-            log.warning("recorder drain timed out; some queued messages were not written")
+        drained = await drain_recorder(recorder, DRAIN_TIMEOUT_S)
+        drain_ended = time.monotonic()
         writer.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await writer
         await engine.dispose()
+        # The last line of a clean exit, and where a slow one spent its time.
+        log.info(
+            "shutdown complete in %.1fs (jobs and feeds %.1fs, recorder drain %.1fs, %s)",
+            time.monotonic() - started,
+            feeds_closed - started,
+            drain_ended - feeds_closed,
+            "drained" if drained else "TIMED OUT",
+        )
+
+    # Startup, serving and cleanup as one unit, so cleanup runs to completion
+    # on Ctrl+C and on SIGTERM alike (`docker compose stop` sends SIGTERM).
+    await serve_then_cleanup(start_and_serve, cleanup)

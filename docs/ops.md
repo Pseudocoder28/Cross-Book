@@ -80,6 +80,100 @@ Putting it in `.env` also hands it to host-side `uv run arb ui`, where it is
 inert: the hatch is only consulted when a non-loopback host is actually
 requested, and the host default is `127.0.0.1`.
 
+### Stopping, and what a stop flushes
+
+`docker compose stop`, `down` and `restart` all send the app **SIGTERM**, and
+`arb ui` treats it exactly like Ctrl+C in a terminal: the HTTP server stops,
+then cleanup runs to the end, then the process exits 0. (Until M22 it did
+not: SIGTERM killed the process the moment uvicorn finished, and every stop
+silently dropped whatever the recorder still had queued. See
+[`decisions.md`](decisions.md), M22.) In order, with the most each step can
+take:
+
+| Step | At most | What bounds it |
+| --- | --- | --- |
+| uvicorn closes browser connections | 5 s | `HTTP_GRACEFUL_TIMEOUT_S`; normally 0.1 s |
+| running jobs are cancelled | 5 s | a `replay` subprocess gets SIGTERM, then SIGKILL (`JOB_TERMINATE_GRACE_S`) |
+| venue feeds are closed | 10 s | the Kalshi socket's closing handshake (`websockets` default `close_timeout`) |
+| the recorder queue is written to Postgres | 10 s | `DRAIN_TIMEOUT_S` |
+| writer cancelled, database engine disposed | — | no timeout of its own; normally instant |
+| the interpreter exits | — | waits for any worker thread still running (see the 137 bullet below) |
+
+A normal stop is well under a second. The bounded steps add up to 30 s, which
+is why the `app` service sets `stop_grace_period: 45s`: Docker's default is
+10 s, after which it sends SIGKILL, and SIGKILL flushes nothing. The 15 s of
+slack is what covers the unbounded engine dispose. `tests/test_shutdown.py`
+fails if those constants outgrow the compose number, or if `init: true` goes.
+`uv run` does forward SIGTERM to the Python process (documented by uv, and
+checked), so `init: true` is not what makes the drain work — it is there so a
+stop never depends on how PID 1 treats a signal it has no handler for.
+
+The last log line of a clean stop says where cleanup's time went:
+
+```
+shutdown complete in 0.2s (jobs and feeds 0.0s, recorder drain 0.1s, drained)
+```
+
+It times cleanup only. uvicorn's own step comes first and is not in the total
+(compare the timestamp of uvicorn's `Shutting down` line with this line's),
+and neither is whatever the interpreter does after cleanup.
+
+What to do with what you see in `docker compose logs app`:
+
+- **`recorder drain timed out after 10s` and `TIMED OUT` in the last line** —
+  queued messages were abandoned. The sink could not write for the whole
+  window: Postgres was down or unreachable, or the writer was still inside a
+  retry backoff (up to 30 s) after an outage. The run has a hole at its end;
+  `arb_recorder_write_failures_total` in the minutes before the stop says how
+  long the database had been gone. Stopping `postgres` before `app` does this
+  every time — `docker compose stop` orders it correctly; stopping services by
+  hand may not.
+- **About 10 s under `jobs and feeds`** — the Kalshi socket did not complete
+  its closing handshake. Nothing is lost; it is just slow.
+- **uvicorn's `Cancel N running task(s), timeout graceful shutdown exceeded`
+  (ERROR)** — the stop spent its first 5 s on an HTTP request that never
+  answered; uvicorn cancelled it and cleanup went ahead. Nothing is lost.
+- **No `shutdown complete` line at all** — the process was killed before
+  cleanup finished: SIGKILL, `docker compose kill`, an OOM kill, or a grace
+  period that ran out (`docker inspect` shows exit code 137). Assume the tail
+  of the run is missing. The one harmless case is exit code 143 from a stop
+  issued in the container's first second: until `arb ui` has finished
+  importing and building its engine SIGTERM still has its default effect, and
+  by then nothing has been recorded or spawned.
+- **Exit code 137 (or 143 after a repeated `kill`) *with* a `shutdown
+  complete` line** — cleanup finished and nothing was lost. The process was
+  waiting for a worker thread to end: a propose or backfill job's scoring
+  stage runs in a thread for minutes and cannot be interrupted, and Python
+  does not exit until it returns. A stop, restart or redeploy during scoring
+  therefore takes the full 45 s and ends in SIGKILL. Do not raise
+  `stop_grace_period` to cover it, and `jobs.cancel` cannot stop the thread
+  either: wait for scoring to finish before stopping, or accept the 45 s.
+- **A second SIGTERM changes nothing**, by design; cleanup carries on. Neither
+  does one Ctrl+C: if cleanup is already running when it arrives (`kill <pid>`,
+  then Ctrl+C in the terminal), it is held until cleanup has finished — the log
+  says `interrupted during cleanup: finishing it first` — and the exit status
+  is 130 instead of 0. A **second** Ctrl+C, or SIGKILL, is the way to abandon
+  cleanup, and abandoning it means losing whatever was still queued.
+- **Before a host reboot or a Docker daemon restart, run `docker compose stop`
+  yourself.** `depends_on` ordering is applied by the Compose client; when the
+  daemon shuts containers down on its own it does not know about it, so
+  Postgres can be gone while the app is still draining — the `TIMED OUT` case
+  above. (Reasoned from how Compose works; not exercised here.)
+- Do not use `docker compose kill` or `docker compose down -t 0` on a
+  recording container unless losing the queue is the intent.
+
+On the host it is the same path: Ctrl+C, or `kill <pid>` aimed at either the
+`uv run` process or the Python one, drains and exits 0. Use plain `kill`
+(SIGTERM) for a stop from another shell: uv always forwards SIGTERM to the
+process it started, but
+[by its own rule](https://docs.astral.sh/uv/concepts/projects/run/#signal-handling)
+it forwards a SIGINT only if it is sent more than once or the child is in a
+different process group. (Checked with uv 0.8.3 from a script with no
+terminal: SIGTERM aimed at uv alone reached the child, and so did a single
+SIGINT — which is more than the documented rule promises, so do not count on
+it at a prompt.) Ctrl+C itself is unaffected: the terminal signals the whole
+foreground process group, Python included.
+
 ## Dockerfile
 
 [`Dockerfile`](../Dockerfile). `python:3.12-slim` base, `uv` installed by
@@ -357,6 +451,7 @@ gets a new metric there, per `CLAUDE.md`. Current metrics:
 | `arb_recorder_written_total` | — | raw messages durably written |
 | `arb_recorder_write_failures_total` | — | sink write attempts that failed (retried in place) |
 | `arb_recorder_queue_depth` | — | current queue depth (gauge) |
+| `arb_recorder_drain_timeouts_total` | — | shutdown drains that timed out with messages still queued. **Not scrapeable from `arb ui`** — see below |
 | `arb_seq_gaps_total` | `venue` | subscription-level sequence gaps detected |
 | `arb_ui_ws_clients` | — | connected terminal-UI WS clients (gauge) |
 | `arb_ui_ws_clients_dropped_total` | — | UI WS clients dropped for a full send queue |
@@ -370,10 +465,21 @@ gets a new metric there, per `CLAUDE.md`. Current metrics:
 | `arb_control_job_output_dropped_total` | `job` | output lines dropped from a job's bounded buffer; nonzero means its log is incomplete |
 | `arb_ui_requests_rejected_total` | `scope`, `reason` | requests refused by the origin/host guard (`reason` is `host`, `origin` or `sec_fetch_site`) |
 
-The last one is declared in
-[`src/arb/ui/security.py`](../src/arb/ui/security.py) rather than
-`metrics.py`, with a `TODO` to move it — the only exception to the
-one-declaration-site rule above, and worth closing.
+The last one is incremented from
+[`src/arb/ui/security.py`](../src/arb/ui/security.py) and declared in
+`metrics.py` like every other metric.
+
+`arb_recorder_drain_timeouts_total` is declared because every failure mode
+gets a metric, and it should not be oversold: `arb ui` runs its drain *after*
+the HTTP server that serves `/metrics` has stopped, so the value it increments
+is never scraped from that process, and the process is gone a moment later. It
+will read 0 on every dashboard. The record of an abandoned queue is the WARNING
+in the container log and the `TIMED OUT` in the last line
+([above](#stopping-and-what-a-stop-flushes)); the signal Prometheus *can* see
+is the one before the stop — `arb_recorder_write_failures_total` climbing with
+`arb_recorder_queue_depth`. The counter would earn its keep in a caller that
+outlives its drain; there is none today (the pairs jobs borrow the server's
+recorder and drain nothing), so tests are the only place it is seen to move.
 
 The clock group exists because a local clock running behind the venue's makes
 every one-way latency reading negative, and until they were added that failure

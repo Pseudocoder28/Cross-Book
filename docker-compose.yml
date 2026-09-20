@@ -75,6 +75,22 @@ services:
     # explicit here and matches UI_HOST above; the host port mapping keeps it
     # 127.0.0.1-only. Metrics are served on GET /metrics of this same port.
     command: ["uv", "run", "arb", "ui", "--top", "20", "--host", "0.0.0.0"]
+    # `docker compose stop` sends SIGTERM, and `arb ui` answers it by flushing
+    # the recorder queue to Postgres before it exits. Docker's default grace is
+    # 10s — the length of the drain alone — after which it sends SIGKILL and the
+    # queue is gone. The worst case is 30s: uvicorn's graceful shutdown (5s), a
+    # cancelled replay job's SIGTERM-to-SIGKILL grace (5s), the Kalshi socket's
+    # closing handshake (10s) and the drain (10s). 45s is that plus half again;
+    # tests/test_shutdown.py fails if the constants outgrow it. A normal stop
+    # takes well under a second, so this costs nothing until it matters.
+    stop_grace_period: 45s
+    # tini as PID 1. `uv run` does forward SIGTERM to its child (documented,
+    # and checked with uv 0.8), so this is not what makes the drain work. It is
+    # here because PID 1 gets no default signal dispositions: whatever ends up
+    # as the entrypoint, a SIGTERM it has no handler for would be ignored and
+    # Docker would wait out the whole grace period and SIGKILL. With an init
+    # that cannot happen, and orphaned job subprocesses get reaped.
+    init: true
 
 volumes:
   pgdata:
