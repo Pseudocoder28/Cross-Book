@@ -64,6 +64,7 @@
   handshake is the other 10 s wait in the path; the new last log line tells the
   two apart.
 - 387 Python tests (33 in `tests/test_shutdown.py`); ruff and pyright clean.
+  (394 since the capture-script repair below.)
 - **Open**: the compose change has not been exercised in a container (the
   Docker daemon was not running); the Kalshi close is bounded only by the
   `websockets` default in `src/arb/ws.py`; the writer's 30 s retry backoff can
@@ -588,6 +589,41 @@ exists; the other half is the part with money in it:
 - **/arb's BOOKS column became K · P AGE**: Kalshi reads LIVE (streamed — a quiet
   book is an exact book), Polymarket US reads its quote's age in seconds (polled — age
   is freshness), amber only on the leg with a problem (`pages/arb-model.js`).
+
+## Since M22 (2026-09-19)
+
+- **`scripts/capture_kalshi_ws.py --help` no longer captures.** The script had
+  no argument parsing and defaulted its output to the tracked
+  `tests/fixtures/kalshi/ws_orderbook_capture.jsonl`, so any invocation —
+  `--help` included, which is how it was found — opened an authenticated Kalshi
+  WebSocket and replaced the capture five test modules pin. Read-only data, and
+  the fixture was restored from git, so nothing was lost. Now: `OUT` is a
+  required positional (a bare invocation is exit 2, not a 90 s capture), an
+  existing file is refused without `--overwrite` (any file — the NO-side
+  capture is as pinned as the primary), both refusals happen before config,
+  keys or the network, and the `arb`/`websockets` imports are deferred into
+  `capture()` so the `--help` path holds nothing that could connect. The
+  `CAPTURE_*` environment variables are deleted in favour of `--seconds`,
+  `--min-deltas`, `--top`, `--require-side`: `CAPTURE_OUT` left exported would
+  have been the same footgun. `docs/testing.md` had been describing a
+  `--require-side` flag that did not exist; it does now.
+- **`tests/test_capture_kalshi_ws.py`, 7 tests, no network and no
+  credentials**: real subprocesses in an empty directory (no `.env`) with
+  `KALSHI_*` stripped, so even a regressed script stops at its own "key id not
+  set"; in-process tests replace `capture()`. Mutation-checked: all 7 fail
+  against the previous script, each at that exit and none at a socket, and
+  hoisting `arb.config` back to module level fails the import probe alone.
+  394 Python tests; ruff, ruff format and pyright clean.
+- **The other entry points were checked and are fine**: `preview_ui.py`,
+  `snap.py` and `arb.cli` parse before acting and touch no venue, key or
+  tracked file; the two `tests/*_target.py` children cannot reach anything by
+  construction. Reasoning in [decisions.md](docs/decisions.md).
+- **Not done, deliberately**: the capture was not run against live Kalshi, so
+  the network half of the script is exercised only by reading — its body is
+  unchanged apart from taking its four knobs as arguments instead of module
+  globals. `scripts/` stays outside pyright's `include`; all three scripts
+  carry the same `__doc__.splitlines()` optional-access note if pointed at
+  directly.
 
 ## Open questions
 

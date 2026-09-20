@@ -753,6 +753,9 @@ Design choices and why. Newest first.
 - **The capture script is parameterized** (`CAPTURE_OUT`, `_SECONDS`,
   `_TOP_N`, `_MIN_DELTAS`, `_REQUIRE_SIDE`) so rarer message shapes can be
   captured into new fixture files without disturbing the pinned one.
+  *Superseded 2026-09-19:* the environment variables are gone; they are flags
+  now, and the output file is a required argument (see "The capture script
+  writes only where it is told").
 
 ## M15 — replay and paper trading
 
@@ -1294,3 +1297,57 @@ while the Polymarket quotes reading OK were 0.8s to 63s old.
 - The server-side model is untouched: `stale` is still a `Book` invalid reason
   and the SYSTEM check and the DEPTH banner still say QUIET, where the words
   "last update 6m ago" sit right next to it.
+
+## The capture script writes only where it is told (2026-09-19)
+
+`scripts/capture_kalshi_ws.py` had no argument parsing: `main()` went straight
+to `asyncio.run(capture())`, and the output path defaulted to the tracked
+`tests/fixtures/kalshi/ws_orderbook_capture.jsonl`. So every invocation,
+`--help` included, opened an authenticated Kalshi WebSocket and replaced the
+capture that `test_kalshi_ws.py`, `test_kalshi_adapter.py`, `test_books.py`,
+`test_replay.py` and `test_ui_server.py` read. A reviewer asking for usage
+text got a live capture. It was read-only market data and the fixture was
+restored from git, so nothing was lost — but those tests pin frame counts,
+tickers and prices, and "real captured payloads, never invented ones" is only
+worth something if the payloads do not change underneath the tests.
+
+- **`OUT` is a required positional, as in `scripts/snap.py`.** The alternative
+  was a default path somewhere harmless. Rejected: a bare invocation would
+  still authenticate and hold a socket open for 90 s, and the footgun was that
+  the script acts before it is told anything. With no default there is no
+  accidental target, and a bare invocation is a usage error (exit 2).
+- **An existing file is refused without `--overwrite` — any file, not only the
+  pinned one.** A flag named for one fixture would have left
+  `ws_orderbook_capture_no_side.jsonl`, which is just as pinned, unprotected,
+  along with every fixture captured after it. The write uses mode `xb` unless
+  `--overwrite` was given, so the promise holds even for a file that appeared
+  while the capture ran.
+- **Refusals come before the capture, not after it.** Arguments are parsed and
+  `OUT` checked (exists, parent is a directory) before anything else happens. A
+  capture that cannot be written is 90 s lost; one that should not be written
+  is worse.
+- **The `arb` and `websockets` imports moved inside `capture()`**, the way
+  `arb.cli` defers its own. Importing `arb.config` connects to nothing, but
+  with it out of the `--help` path that path is safe by construction rather
+  than by auditing every import's side effects. A test runs `--help` and reads
+  `sys.modules` afterwards, so hoisting the imports back fails.
+- **The `CAPTURE_*` environment variables are deleted, not kept as defaults.**
+  `CAPTURE_OUT` left exported in a shell would have been the same footgun with
+  an extra step. Flags are the one interface: `--seconds`, `--min-deltas`,
+  `--top` (the name `arb ui` uses), `--require-side {yes,no}`.
+- **The tests cannot reach Kalshi whatever the script regresses to.** The
+  subprocess tests run in an empty directory, so `AppConfig` finds no `.env`,
+  with every `KALSHI_*` variable stripped: a script that got past its
+  arguments stops at its own "KALSHI_API_KEY_ID not set". Checked the way it
+  matters — all seven tests fail against the previous script, and each failure
+  is that exit, not a connection.
+- **The other entry points do not have the problem.** `scripts/preview_ui.py`
+  and `scripts/snap.py` parse arguments first and touch no venue, key or
+  tracked file (`snap.py` writes only the `OUT` it is given). `arb.cli` parses
+  before it imports `AppConfig`. `tests/run_ui_target.py` and
+  `tests/shutdown_target.py` take raw `sys.argv` with no `--help`, but they are
+  children of the test suite, not tools, and neither can reach anything:
+  `shutdown_target.py` loads no config at all (a trivial ASGI app and a
+  sentinel file it is handed), and `run_ui_target.py` builds its `AppConfig`
+  with `_env_file=None`, closed local ports, in-memory sqlite and a throwaway
+  key.

@@ -72,12 +72,23 @@ including any wrong assumption.
   and pair-matcher tests.
 
 Capturing new fixtures re-runs
-[`scripts/capture_kalshi_ws.py`](../scripts/capture_kalshi_ws.py), which is
-parameterized (`CAPTURE_OUT`, duration, top-N markets, minimum delta count,
-`--require-side`) precisely so a rarer message shape (like the NO-side
-delta above) can be captured into its own file without disturbing the
-pinned primary capture that other tests depend on. It never prints key
-material, even though it authenticates to capture.
+[`scripts/capture_kalshi_ws.py`](../scripts/capture_kalshi_ws.py)` OUT`, which
+is parameterized (`--seconds`, `--top`, `--min-deltas`, `--require-side`)
+precisely so a rarer message shape (like the NO-side delta above) can be
+captured into its own file without disturbing the pinned primary capture that
+other tests depend on. `OUT` is required and an existing file is refused
+without `--overwrite`, so replacing a pinned capture is something you type,
+never something that happens: the script once had no argument parsing, and
+`--help` opened an authenticated socket and rewrote
+`ws_orderbook_capture.jsonl`. Arguments are parsed, and `OUT` checked, before
+config, keys or the network are touched
+([`tests/test_capture_kalshi_ws.py`](../tests/test_capture_kalshi_ws.py) pins
+that with no network and no credentials). It never prints key material, even
+though it authenticates to capture.
+
+After any re-capture of a pinned file, run the suite before committing: the
+tests that read it assert on its contents (frame counts, tickers, specific
+prices), so a new capture is a test change, not a data refresh.
 
 ## Property-based tests: `hypothesis`
 
