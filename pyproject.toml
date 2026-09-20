@@ -3,6 +3,8 @@ name = "arb"
 version = "0.0.0"
 description = "Cross-venue arbitrage between Kalshi and Polymarket US binary markets"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.2",
