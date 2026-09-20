@@ -124,7 +124,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 # it (tests/test_shutdown.py holds the two together): uvicorn's graceful
 # shutdown, then a cancelled subprocess job's SIGTERM-to-SIGKILL grace
 # (control.JOB_TERMINATE_GRACE_S), then the Kalshi socket's closing handshake
-# (the websockets library's close_timeout), then this drain.
+# (the websockets library's close_timeout), then this drain. The engine
+# dispose after it has no timeout of its own; compose's slack covers it.
 DRAIN_TIMEOUT_S = 10.0
 # uvicorn waits for open connections with no limit unless told otherwise, and
 # everything after serve() — the recorder drain included — waits behind it. A

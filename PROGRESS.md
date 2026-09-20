@@ -21,14 +21,32 @@
   pending after uvicorn replays SIGINT used to land on cleanup's first `await`
   and survive only because that await sat in `suppress(CancelledError)`. It now
   lands before cleanup starts. Same outcome, no luck involved.
-- **A real-process test.** `tests/test_shutdown.py` spawns the production
-  helper around a real uvicorn server on an ephemeral port, makes a request,
-  delivers a real signal and reads the sentinel cleanup writes: SIGTERM and
-  SIGINT, on uvloop and asyncio, during serving and during startup, plus a
-  second SIGTERM the child must have handled before its cleanup may finish.
-  Event-synchronised, no sleeps. Mutation-checked three ways (handler install
-  removed, landing pad removed, `run_ui` taken off the helper); 6 consecutive
-  green runs at ~3 s.
+- **One Ctrl+C cannot abandon a cleanup any more (review repair).** `kill
+  <pid>` and then Ctrl+C in the terminal used to cut the drain short: uvicorn
+  replays only the SIGTERM, so that Ctrl+C was asyncio's *first*, and its
+  cancellation landed on whatever cleanup was awaiting (reproduced: exit 130,
+  writer never cancelled, engine never disposed). Cleanup now runs in a task
+  of its own; a cancellation that arrives while it runs is held and re-raised
+  when it has finished — everything flushed, exit 130. A second Ctrl+C still
+  abandons it, and a test pins that too. 120-trial signal fuzz (SIGTERM and
+  SIGINT in every order with at most one Ctrl+C, random offsets, both loops):
+  cleanup completed 120 times.
+- **Real-process tests, of the helper and of `run_ui` itself.**
+  `tests/test_shutdown.py` spawns the production helper around a real uvicorn
+  server on an ephemeral port, makes a request, delivers a real signal and
+  reads the sentinel cleanup writes: SIGTERM and SIGINT, on uvloop and
+  asyncio, during serving, during startup and inside synchronous startup
+  code, a second SIGTERM and a Ctrl+C that the child must have been sent
+  before its cleanup may finish, and the second Ctrl+C that abandons one.
+  Review showed the helper alone was not enough — a `run_ui` whose cleanup
+  skipped the drain passed everything — so `tests/run_ui_target.py` runs the
+  real `run_ui` against closed local ports with a throwaway key, and the test
+  requires exit 0 and the `shutdown complete … drained` line; the wiring test
+  runs `run_ui`'s real closures and asserts the drain call and uvicorn's 5 s
+  bound. Event-synchronised, no sleeps. Mutation-checked against a scratch
+  copy, 13 mutations, each caught. The children no longer depend on how pytest
+  was launched (`pytest &` starts them with SIGINT ignored, which hung one
+  test for 60 s) and remove themselves if the runner is killed.
 - **uvicorn's graceful shutdown is bounded at 5 s.** Unbounded, one request
   that never answers held the drain off forever (measured).
 - **Compose**: `stop_grace_period: 45s` — Docker's default 10 s was exactly the
@@ -45,12 +63,19 @@
   design, and there was no Postgres on `:5432` that day. The Kalshi closing
   handshake is the other 10 s wait in the path; the new last log line tells the
   two apart.
-- 370 Python tests (16 new); ruff and pyright clean.
+- 387 Python tests (33 in `tests/test_shutdown.py`); ruff and pyright clean.
 - **Open**: the compose change has not been exercised in a container (the
   Docker daemon was not running); the Kalshi close is bounded only by the
-  `websockets` default in `src/arb/ws.py`; `pairs/run.py`'s own drain timeout
-  is still uncounted; the writer's 30 s retry backoff can outlast the 10 s
-  drain after a database outage.
+  `websockets` default in `src/arb/ws.py`; the writer's 30 s retry backoff can
+  outlast the 10 s drain after a database outage; `pairs/run.py`'s
+  owned-runtime drain is uncounted but has no caller since M20. **A stop during
+  a propose/backfill scoring stage takes the whole 45 s grace period and ends
+  in SIGKILL** — after cleanup has finished, so nothing is lost: the scoring
+  thread cannot be interrupted and Python will not exit until it returns. The
+  fix belongs in `pairs/run.py` (a `threading.Event` between scoring blocks),
+  not in a longer grace period. A Docker daemon restart or host reboot does
+  not honour `depends_on` order, so `docker compose stop` first
+  ([ops.md](docs/ops.md#stopping-and-what-a-stop-flushes)).
 
 ### From M21 — the frontend gets tested, in two layers
 

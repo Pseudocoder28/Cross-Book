@@ -116,9 +116,11 @@ lose the last few messages. "Clean" covers SIGTERM as well as Ctrl-C:
 `serve_then_cleanup` ([`shutdown.py`](../src/arb/shutdown.py)), which installs
 a SIGTERM handler that does not terminate before uvicorn takes the signals.
 Without it, uvicorn's re-delivery of SIGTERM after its own graceful shutdown
-killed the process before the drain — on every `docker compose stop`. A drain
-that runs out of time (the sink cannot write) is logged and counted
-(`arb_recorder_drain_timeouts_total`); see
+killed the process before the drain — on every `docker compose stop`. Cleanup
+runs in a task of its own, so a Ctrl+C that arrives while it is running is
+held until it has finished instead of landing on the drain; a second Ctrl+C,
+or SIGKILL, is what abandons it. A drain that runs out of time (the sink
+cannot write) is logged and counted (`arb_recorder_drain_timeouts_total`); see
 [`ops.md`](ops.md#stopping-and-what-a-stop-flushes) for the sequence, its
 time budget and why that counter is not one Prometheus will ever see move.
 

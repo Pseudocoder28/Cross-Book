@@ -26,14 +26,31 @@ uvicorn's window — inside the event loop's internals or inside another task
 
 What SIGTERM does, by phase:
 
+- **before the call** (interpreter start, imports, config, building the engine:
+  about a second for ``arb ui``): the default disposition still applies and
+  SIGTERM ends the process. Nothing has been queued or spawned by then, so
+  there is nothing to flush.
 - **startup** (before ``serve()``): cancels the main task, exactly what
   ``asyncio.Runner`` does for Ctrl+C. Cleanup runs, and the cancellation is
   claimed on the way out so the process exits 0 instead of with a traceback.
 - **serving**: uvicorn owns the signal; this handler only sees the replay.
 - **cleanup**: nothing. Cleanup is bounded, asking twice does not make a drain
   faster, and turning a repeated polite request into data loss is the opposite
-  of the point. uvicorn treats a second SIGTERM the same way. SIGKILL is the
-  force; so is a second Ctrl+C.
+  of the point. uvicorn treats a second SIGTERM the same way.
+- **after cleanup**: the previous disposition is back, so SIGTERM ends the
+  process at once. That is deliberate. What is left is interpreter teardown,
+  which can wait a long time for a worker thread (``asyncio.to_thread``) to
+  finish, and a process in that state has to stay killable.
+
+Cleanup is also out of reach of a *cancellation*. It runs in a task of its
+own, so a Ctrl+C that arrives while it is running — ``asyncio.Runner`` answers
+the first one by cancelling the main task — cannot land on one of its awaits
+and abandon a drain halfway. The cancellation is held until cleanup has
+finished and re-raised then: everything is flushed and the exit status is 130.
+Without this a single Ctrl+C after a SIGTERM-initiated stop (``kill <pid>``,
+then Ctrl+C in the terminal) cut the drain short. What still abandons cleanup
+is what should: a **second** Ctrl+C, which ``asyncio.Runner`` turns into
+``KeyboardInterrupt`` and a teardown that cancels every task, and SIGKILL.
 
 ``signal.signal`` only works on the main thread, so off it (an in-process
 caller, a test) nothing is installed and nothing crashes — uvicorn does not
@@ -94,10 +111,6 @@ class Shutdown:
     def sigterms(self) -> int:
         """SIGTERMs seen so far, uvicorn's replay included."""
         return self._sigterms
-
-    @property
-    def requested(self) -> bool:
-        return self._sigterms > 0
 
     async def serve(self, server: Server) -> None:
         """``await server.serve()`` with SIGTERM routed to a clean return."""
@@ -198,6 +211,36 @@ class Shutdown:
         return self._task.uncancel() == 0
 
 
+async def _run_to_completion(cleanup: Callable[[], Awaitable[None]]) -> None:
+    """``await cleanup()``, except that cancelling the caller cannot stop it.
+
+    ``cleanup`` runs in its own task. A cancellation of *this* task while it
+    waits — the first Ctrl+C during a cleanup that SIGTERM started, or an
+    in-process caller's timeout — is held, not swallowed: it is re-raised once
+    cleanup has finished, so whoever sent it still sees it arrive.
+
+    Cancelling the cleanup task itself still stops it. That is what
+    ``asyncio.run`` does to every task after a second Ctrl+C, and it is the
+    way out that has to keep working.
+    """
+    inner = asyncio.ensure_future(cleanup())
+    held: asyncio.CancelledError | None = None
+    while not inner.done():
+        try:
+            # wait(), not wait_for() or a bare await: when the waiting task is
+            # cancelled, wait() leaves the task it was waiting on alone.
+            await asyncio.wait([inner])
+        except asyncio.CancelledError as exc:
+            if held is None:
+                log.info("interrupted during cleanup: finishing it first (Ctrl+C again abandons)")
+            held = exc
+    if inner.cancelled():
+        raise held if held is not None else asyncio.CancelledError()
+    inner.result()  # cleanup's own exception, if it raised one
+    if held is not None:
+        raise held
+
+
 async def serve_then_cleanup(
     main: Callable[[Shutdown], Awaitable[None]],
     cleanup: Callable[[], Awaitable[None]],
@@ -206,7 +249,8 @@ async def serve_then_cleanup(
 
     ``main`` does its startup and then ``await shutdown.serve(server)``.
     ``cleanup`` runs to completion after a normal return, an exception, Ctrl+C
-    or SIGTERM; only SIGKILL and a second Ctrl+C cut it short. Exceptions from
+    or SIGTERM, and a cancellation that arrives while it runs waits for it to
+    finish. Only SIGKILL and a second Ctrl+C cut it short. Exceptions from
     ``main`` propagate once cleanup is done.
     """
     shutdown = Shutdown()
@@ -217,7 +261,7 @@ async def serve_then_cleanup(
         finally:
             shutdown._begin_cleanup()
             await shutdown._absorb_pending_cancel()
-            await cleanup()
+            await _run_to_completion(cleanup)
     except asyncio.CancelledError:
         if not shutdown._claim_cancellation():
             raise
