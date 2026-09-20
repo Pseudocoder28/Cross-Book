@@ -110,8 +110,17 @@ batches are never reordered or silently dropped. `Recorder.run()` is always
 run under `supervise()` (see below).
 
 On shutdown, `Recorder.drain(timeout_s)` waits for the queue to empty
-(`Queue.join()`) before the writer task is cancelled, so a clean Ctrl-C
-doesn't lose the last few messages.
+(`Queue.join()`) before the writer task is cancelled, so a clean stop doesn't
+lose the last few messages. "Clean" covers SIGTERM as well as Ctrl-C:
+`run_ui` hands its startup-and-serve and its cleanup to
+`serve_then_cleanup` ([`shutdown.py`](../src/arb/shutdown.py)), which installs
+a SIGTERM handler that does not terminate before uvicorn takes the signals.
+Without it, uvicorn's re-delivery of SIGTERM after its own graceful shutdown
+killed the process before the drain — on every `docker compose stop`. A drain
+that runs out of time (the sink cannot write) is logged and counted
+(`arb_recorder_drain_timeouts_total`); see
+[`ops.md`](ops.md#stopping-and-what-a-stop-flushes) for the sequence, its
+time budget and why that counter is not one Prometheus will ever see move.
 
 Recording is a runtime toggle, so the recorder and its supervised writer are
 built whatever `--no-record` said and the server's sink (`record_raw()`) reads a

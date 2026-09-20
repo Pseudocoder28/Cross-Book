@@ -38,6 +38,112 @@ Design choices and why. Newest first.
   flash-on-change, depth bars, function-key strip, and an intentional
   Polymarket US down-screen driven by live REST reachability.
 
+## M22 — SIGTERM takes the Ctrl+C path
+
+- **`docker compose stop` never ran `run_ui`'s `finally`.** `uvicorn.Server`
+  takes SIGINT and SIGTERM for itself with `signal.signal`, shuts down
+  gracefully, restores the previous handlers and then *re-delivers* what it
+  captured with `signal.raise_signal` (`capture_signals`, uvicorn 0.53). For
+  SIGINT the previous handler is `asyncio.Runner`'s, which cancels the main
+  task, so cleanup ran. For SIGTERM nothing was installed, the previous handler
+  was `SIG_DFL`, and the replay killed the process in the kernel. Reproduced in
+  a real process before anything was changed: exit −15, not one line after
+  `serve()`. Queued recorder messages were lost, a running replay subprocess
+  was orphaned and the engine was never disposed — on every stop, down and
+  restart of the container.
+- **A handler that does not terminate, installed before uvicorn looks — not
+  one that raises.** uvicorn saves ours as "previous", restores it and replays
+  SIGTERM into it; the replay is a no-op, `serve()` returns and cleanup runs. A
+  raising handler passes the same test, because the replay happens
+  synchronously inside the main task — but the handler also fires wherever the
+  main thread is when a signal arrives *outside* uvicorn's window: in the event
+  loop's internals, or inside the recorder writer mid-batch. Where the
+  exception lands would be luck. `loop.add_signal_handler` was rejected too:
+  uvicorn only saves and restores what `signal.signal` reports, and what a loop
+  registers there differs between asyncio and uvloop.
+- **By phase.** During startup SIGTERM cancels the main task, which is exactly
+  what `asyncio.Runner` does for Ctrl+C, and the cancellation is claimed on the
+  way out (`Task.uncancel() == 0`) so the process exits 0 rather than with a
+  traceback. While serving, uvicorn owns the signal. During cleanup it does
+  nothing: cleanup is bounded, asking twice does not make a drain faster, and
+  turning a repeated polite request into data loss is the opposite of the
+  point. uvicorn treats a second SIGTERM the same way. SIGKILL is the force;
+  so is a second Ctrl+C, unchanged.
+- **Ctrl+C was working by accident.** uvicorn replays SIGINT inside the main
+  task, the Runner cancels that task *while it is running*, and the
+  cancellation lands on the next suspension — cleanup's first `await`. It
+  survived only because that await happened to sit in
+  `suppress(CancelledError)`. With a plain `await` first, the same probe
+  aborted cleanup and exited 130. `serve_then_cleanup` now gives a pending
+  cancellation a place to land before cleanup starts and declares it handled
+  (`uncancel`), as the asyncio docs require of anyone who swallows one. What
+  an operator sees is unchanged — cleanup completes, exit 0; Ctrl+C during
+  startup is still 130; a job running at Ctrl+C still gets its 5 s (checked:
+  the stray cancellation and the job's own collapse into one). What changed is
+  that none of it depends any more on which `await` cleanup reaches first.
+- **Exit status 0 for SIGTERM.** A requested stop that finished its cleanup is
+  not a failure, and `restart: unless-stopped` does not read the code anyway.
+- **The seam is `arb.shutdown.serve_then_cleanup(main, cleanup)`, and the test
+  signals a real process.** `run_ui` needs two venues and a database, so its
+  `try`/`finally` became two closures handed to the helper that owns "serve,
+  then always clean up". `tests/test_shutdown.py` spawns that helper around a
+  real uvicorn server on an ephemeral port, makes a request to prove it is
+  serving, delivers a real SIGTERM and reads the sentinel cleanup writes — on
+  uvloop and on asyncio. It also covers SIGINT, either signal during startup,
+  and a second SIGTERM that the child must have *handled* before its cleanup is
+  allowed to finish. Mutation-checked the M21 way: with the install removed
+  the four real-process SIGTERM tests fail (exit −15, no sentinel); with the
+  landing pad removed the SIGINT ones do; with `run_ui` taken off the helper
+  its wiring test fails — on a missing key id, before anything could reach a
+  venue.
+- **The handler never leaks and never needs the main thread.** `signal.signal`
+  raises off the main thread, so there nothing is installed and nothing
+  crashes (uvicorn skips its own capture there too). On exit the previous
+  handler goes back — only if the current one is still ours — so a pytest
+  process that calls `run_ui` keeps its own SIGTERM disposition.
+- **uvicorn's graceful shutdown is now bounded (5 s).** It waits for open
+  connections with no limit by default, and the drain sits behind it: measured,
+  one request that never answers held cleanup off indefinitely, which under
+  Docker means SIGKILL and no drain at all. A browser tab's WebSocket is not
+  the problem — uvicorn closes those itself in 0.1 s.
+- **Compose: `stop_grace_period: 45s`, `init: true`, and `uv run` stays.**
+  Docker's default grace is 10 s, which is `DRAIN_TIMEOUT_S` exactly. The worst
+  case is 30 s — uvicorn 5, a cancelled job's SIGTERM-to-SIGKILL grace 5, the
+  Kalshi socket's closing handshake 10 (the `websockets` default
+  `close_timeout`, measured against a peer that never answers the close), the
+  drain 10 — and a test fails if those constants outgrow the compose number.
+  `uv run` as PID 1 is not the hazard it looks like: uv stays the parent and
+  forwards SIGTERM ([documented](https://docs.astral.sh/uv/concepts/projects/run/#signal-handling),
+  and checked against uv 0.8.3, the line the Dockerfile pins, by signalling
+  uv's PID alone and watching the child's handler run). Forwarding needs a
+  handler, so PID 1's missing default dispositions do not apply to it.
+  `init: true` is therefore not what makes the drain work; it makes the answer
+  stop depending on what the entrypoint is, and reaps orphans. Exec-ing Python
+  directly was rejected: it buys nothing over this, makes Python PID 1 (where
+  SIGTERM is ignored until `run_ui` installs its handler), and the compose
+  argv is pinned by a test and quoted in the docs.
+- **`arb_recorder_drain_timeouts_total` exists, and `arb ui` cannot show it to
+  Prometheus.** The rule is a metric per failure mode, so the drain that runs
+  out of time has one. But `/metrics` is served by the uvicorn server that has
+  already stopped by the time the drain runs, so from this process the new
+  value is never scraped. The record that reaches anyone is the log: a WARNING,
+  then `shutdown complete in … (jobs and feeds …, recorder drain …, TIMED OUT)`
+  as the last line. The counter is for a caller that outlives its drain.
+- **The 11 s Ctrl+C was not a drain bug.** With a sink that works the drain
+  returns as soon as the queue is written — 0.27 s from SIGINT to exit with a
+  browser socket open and the feeds running. The writer is still alive at that
+  point and `Queue.join()` does become true once the sources are cancelled.
+  With a sink that cannot write, the drain sits out its full 10.00 s by design
+  (10.30 s to exit), and on the day there was no Postgres on `:5432`. The
+  other 10 s wait in the path is the Kalshi closing handshake, which a run
+  that is not allowed to contact Kalshi cannot rule in or out; the new last log
+  line splits the two, so the next slow shutdown says which it was.
+- **Not done.** The Kalshi close is bounded only by the library default
+  (`src/arb/ws.py`). `pairs/run.py` has its own drain whose timeout is still
+  uncounted — and that one *is* scrapeable, because the server outlives it. The
+  writer's retry backoff tops out at 30 s against a 10 s drain, so a database
+  that comes back seconds before a stop can still lose the queue.
+
 ## M21 — the frontend gets tested, in two layers
 
 - **Two suites, because the two shipped bugs failed in different layers.**

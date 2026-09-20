@@ -2,9 +2,57 @@
 
 ## Current milestone
 
-**M21 — the frontend gets tested, in two layers.**
+**M22 — SIGTERM takes the Ctrl+C path.**
 
 ## What works
+
+- **`docker compose stop` flushes the recorder now.** It never did: uvicorn
+  re-delivers SIGTERM once it has shut down, nothing had a handler installed,
+  and the process died in the kernel before `run_ui`'s `finally` — queue lost,
+  replay subprocess orphaned, engine never disposed. Reproduced first in a real
+  process (exit −15, nothing after `serve()`), then fixed in
+  `src/arb/shutdown.py`: `serve_then_cleanup(main, cleanup)` installs a SIGTERM
+  handler that does not terminate before uvicorn looks, so the replay is a
+  no-op, `serve()` returns and cleanup runs to the end. Exit status 0. SIGTERM
+  during startup cancels it the way Ctrl+C does; a second SIGTERM during
+  cleanup changes nothing; off the main thread nothing is installed; the
+  previous handler is always put back.
+- **Ctrl+C no longer works by accident.** The cancellation asyncio leaves
+  pending after uvicorn replays SIGINT used to land on cleanup's first `await`
+  and survive only because that await sat in `suppress(CancelledError)`. It now
+  lands before cleanup starts. Same outcome, no luck involved.
+- **A real-process test.** `tests/test_shutdown.py` spawns the production
+  helper around a real uvicorn server on an ephemeral port, makes a request,
+  delivers a real signal and reads the sentinel cleanup writes: SIGTERM and
+  SIGINT, on uvloop and asyncio, during serving and during startup, plus a
+  second SIGTERM the child must have handled before its cleanup may finish.
+  Event-synchronised, no sleeps. Mutation-checked three ways (handler install
+  removed, landing pad removed, `run_ui` taken off the helper); 6 consecutive
+  green runs at ~3 s.
+- **uvicorn's graceful shutdown is bounded at 5 s.** Unbounded, one request
+  that never answers held the drain off forever (measured).
+- **Compose**: `stop_grace_period: 45s` — Docker's default 10 s was exactly the
+  drain timeout — against a 30 s worst case that a test ties to the constants,
+  and `init: true`. `uv run` stays: it forwards SIGTERM to its child
+  (documented; checked with uv 0.8.3).
+- **`arb_recorder_drain_timeouts_total`**, with the limit written down: `arb
+  ui` increments it after the server that serves `/metrics` has stopped, so
+  Prometheus never sees it move. The log is the record — a WARNING, and a new
+  last line, `shutdown complete in …s (jobs and feeds …, recorder drain …,
+  drained|TIMED OUT)`.
+- **The 11 s Ctrl+C was not a drain bug.** Healthy sink: 0.27 s from signal to
+  exit with a browser socket open. Sink down: the drain sits out its 10.00 s by
+  design, and there was no Postgres on `:5432` that day. The Kalshi closing
+  handshake is the other 10 s wait in the path; the new last log line tells the
+  two apart.
+- 370 Python tests (16 new); ruff and pyright clean.
+- **Open**: the compose change has not been exercised in a container (the
+  Docker daemon was not running); the Kalshi close is bounded only by the
+  `websockets` default in `src/arb/ws.py`; `pairs/run.py`'s own drain timeout
+  is still uncounted; the writer's 30 s retry backoff can outlast the 10 s
+  drain after a database outage.
+
+### From M21 — the frontend gets tested, in two layers
 
 - **A frontend unit suite on `node --test`** — 109 tests, and no
   `package.json`, no `node_modules`, no npm dependency: node 22 ships the

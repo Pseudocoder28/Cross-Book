@@ -168,7 +168,10 @@ def _run_ui(args: argparse.Namespace) -> int:
             )
         )
     except KeyboardInterrupt:
+        # Ctrl+C during startup, or a second Ctrl+C that cut cleanup short.
         return 130
+    # A requested stop — Ctrl+C or SIGTERM (`docker compose stop`) — whose
+    # cleanup ran to the end. See arb.shutdown for why SIGTERM gets here.
     return 0
 
 
