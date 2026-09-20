@@ -166,9 +166,9 @@ Design choices and why. Newest first.
   outgrow the compose number. The last step, cancelling the writer and
   disposing the engine, has no timeout of its own (SQLAlchemy's asyncpg
   `close()` takes none); it has never been seen to take measurable time, and
-  the 15 s of slack is what covers it. One state is *not* covered and should
-  not be bought with a longer grace period: see the scoring thread under "Not
-  done".
+  the 15 s of slack is what covers it. One state was *not* covered, and was
+  fixed where it lived rather than bought with a longer grace period: see "A
+  cancelled propose or backfill ends its scoring thread" below.
   `uv run` as PID 1 is not the hazard it looks like: uv stays the parent and
   forwards SIGTERM ([documented](https://docs.astral.sh/uv/concepts/projects/run/#signal-handling),
   and checked against uv 0.8.3, the line the Dockerfile pins, by signalling
@@ -196,6 +196,50 @@ Design choices and why. Newest first.
   other 10 s wait in the path is the Kalshi closing handshake, which a run
   that is not allowed to contact Kalshi cannot rule in or out; the new last log
   line splits the two, so the next slow shutdown says which it was.
+- **A cancelled propose or backfill ends its scoring thread (follow-up; this
+  was the last entry under "Not done").** Scoring runs in `asyncio.to_thread`
+  for minutes. Cancelling the job always returned at once, cleanup finished
+  and logged `shutdown complete` within a second — and then `asyncio.run`'s
+  teardown joined the default executor, so the process waited for the thread
+  (measured with the production helper: cleanup done at 0.2 s, process exit at
+  4.0 s for a 4 s thread). Under Docker that was SIGKILL at 45 s and exit 137
+  *with* a `shutdown complete` line on every stop during scoring; nothing
+  lost, because the drain comes before the join, but a stop that took the
+  whole grace period. A thread cannot be interrupted from outside, so it is
+  asked: `pairs/run.py`'s `_offload` hands the stage a `threading.Event` and
+  sets it on the way out of the `await` — in a `finally`, not an `except
+  CancelledError`, so a coroutine closed by a dying loop tells its thread too,
+  and on a normal return the thread is already gone. The thread reads the
+  event between stages and, through `propose_pairs(should_stop=…)`, before
+  every event comparison. *Per comparison, not per block:* a block is every
+  Kalshi event sharing a title token with one Polymarket US event —
+  `MAX_TOKEN_DF` allows 400 per token — and the check costs a method call. *It
+  raises `ScoringCancelled`, it does not return early:* a truncated candidate
+  list looks exactly like a complete one, and the exception lands in a future
+  whose waiter is already cancelled, where asyncio drops it without a log line
+  (checked under `-X dev`). *The matcher takes a callable, not the event,* so
+  `matcher.py` still knows nothing about threads, and the thread still touches
+  no loop, engine or `RunContext` — the event is the one shared object and the
+  thread only reads it. Measured in a real process under `uvloop.run`,
+  cancelling a propose one second into a synthetic scoring stage of about
+  10.5 s (the fixture events cloned 100 times): the job returned 0.013 s after
+  the cancel before the change and 0.008 s after it now; `uvloop.run` returned
+  9.6 s after the cancel before, and 0.015 s now. What still cannot be
+  interrupted is the work between two checks; the longest is building one
+  venue's `event_refs`, and both venues' together come to under half a second
+  at the size of the live universes (an estimate: 4.0 s for 744k synthetic
+  markets, scaled linearly to the live 88k). `stop_grace_period` stays at
+  45 s. Tests: a job cancelled while its thread is held inside a comparison
+  must see that thread end, having started no other comparison — any later
+  comparison would hold for 60 s, which is the scorer that cannot be stopped;
+  the matcher stops at the next comparison, on captured refs doubled so that a
+  block holds two; both thread stages refuse to run with the event already
+  set. Mutation-checked against a scratch copy: event never set, matcher
+  ignoring `should_stop`, the check moved out to once per Polymarket US event,
+  the stage checks removed, the event not handed to the matcher, the
+  cancellation swallowed — each fails a test. The first version of the matcher
+  test could *not* fail the third one (every fixture block holds a single
+  Kalshi event), which is why the refs are doubled.
 - **Not done.** The Kalshi close is bounded only by the library default
   (`src/arb/ws.py`). `pairs/run.py`'s owned-runtime path has its own drain
   whose timeout is uncounted, but nothing reaches it: both production callers
@@ -203,20 +247,12 @@ Design choices and why. Newest first.
   drains nothing; the standalone path lost its caller when M20 deleted `arb
   pairs`. The writer's retry backoff tops out at 30 s against a 10 s drain, so
   a database that comes back seconds before a stop can still lose the queue.
-  **A stop during a propose/backfill scoring stage outlasts the grace period.**
-  Scoring runs in `asyncio.to_thread` for minutes and cannot be interrupted;
-  cancelling the job returns at once, cleanup finishes and logs `shutdown
-  complete` within a second — and then `asyncio.run`'s teardown joins the
-  default executor, so the process waits for the thread (measured with the
-  production helper: cleanup done at 0.2 s, process exit at 4.0 s for a 4 s
-  thread). Under Docker that is SIGKILL at 45 s and exit 137 *with* a
-  `shutdown complete` line. Nothing is lost, because the drain comes before
-  the join; the cost is a stop that takes the whole grace period. The fix is a
-  `threading.Event` checked between scoring blocks in `pairs/run.py`, not a
-  longer `stop_grace_period`. Also not exercised: a Docker daemon restart or a
-  host reboot, where the daemon stops containers itself and `depends_on`
-  ordering — which the Compose client applies, not the daemon — is not there
-  to keep Postgres up while the app drains.
+  The one worker thread left that a stop cannot end is `doctor`'s clock query
+  (`clock.py`, `asyncio.to_thread`): a DNS lookup on the resolver's own
+  timeout, then at most 4 × 1.5 s of SNTP exchanges. Also not exercised: a
+  Docker daemon restart or a host reboot, where the daemon stops containers
+  itself and `depends_on` ordering — which the Compose client applies, not the
+  daemon — is not there to keep Postgres up while the app drains.
 
 ## M21 — the frontend gets tested, in two layers
 

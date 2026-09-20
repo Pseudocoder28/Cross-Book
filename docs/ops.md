@@ -97,7 +97,7 @@ take:
 | venue feeds are closed | 10 s | the Kalshi socket's closing handshake (`websockets` default `close_timeout`) |
 | the recorder queue is written to Postgres | 10 s | `DRAIN_TIMEOUT_S` |
 | writer cancelled, database engine disposed | — | no timeout of its own; normally instant |
-| the interpreter exits | — | waits for any worker thread still running (see the 137 bullet below) |
+| the interpreter exits | — | joins any worker thread still running. A cancelled propose or backfill ends its scoring thread within milliseconds (see the 137 bullet below); the only other one is `doctor`'s clock query, a DNS lookup and at most 4 × 1.5 s of SNTP exchanges |
 
 A normal stop is well under a second. The bounded steps add up to 30 s, which
 is why the `app` service sets `stop_grace_period: 45s`: Docker's default is
@@ -141,13 +141,19 @@ What to do with what you see in `docker compose logs app`:
   importing and building its engine SIGTERM still has its default effect, and
   by then nothing has been recorded or spawned.
 - **Exit code 137 (or 143 after a repeated `kill`) *with* a `shutdown
-  complete` line** — cleanup finished and nothing was lost. The process was
-  waiting for a worker thread to end: a propose or backfill job's scoring
-  stage runs in a thread for minutes and cannot be interrupted, and Python
-  does not exit until it returns. A stop, restart or redeploy during scoring
-  therefore takes the full 45 s and ends in SIGKILL. Do not raise
-  `stop_grace_period` to cover it, and `jobs.cancel` cannot stop the thread
-  either: wait for scoring to finish before stopping, or accept the 45 s.
+  complete` line** — cleanup finished and nothing was lost; the process was
+  then waiting for a worker thread, because Python does not exit until every
+  `asyncio.to_thread` thread has returned. This used to be every stop, restart
+  or redeploy during a propose or backfill scoring stage: the thread ran the
+  cross product to the end, for minutes, so the stop took the full 45 s and
+  ended in SIGKILL. It should not happen any more. Cancelling the job — which
+  a stop does, and `jobs.cancel` does — now sets a flag the thread checks
+  before every event comparison, and the thread ends within milliseconds
+  (measured: the event loop's teardown returned 0.015 s after the cancel, and
+  9.6 s after it before the change, with that much scoring left to run). You
+  can stop during scoring. If you see this combination anyway, some worker
+  thread did not stop, and that is a bug to fix where the thread is — not a
+  reason to raise `stop_grace_period`.
 - **A second SIGTERM changes nothing**, by design; cleanup carries on. Neither
   does one Ctrl+C: if cleanup is already running when it arrives (`kill <pid>`,
   then Ctrl+C in the terminal), it is held until cleanup has finished — the log
@@ -357,7 +363,9 @@ Long actions become jobs: `jobs.doctor`, `jobs.propose`, `jobs.backfill`,
   to a worker thread inside `arb.pairs.run`); `replay` runs as a **subprocess**
   (`python -m arb.cli replay ...`) because its per-row loop has no `await`
   and would hold the event loop past the 10 s WS ping timeout, killing the
-  Kalshi socket. Cancelling sends `SIGTERM`, then `SIGKILL` after 5 s.
+  Kalshi socket. Cancelling a `replay` sends `SIGTERM`, then `SIGKILL` after
+  5 s; cancelling a `propose` or `backfill` returns at once and its scoring
+  thread stops at the next event comparison, milliseconds later.
 - **Output survives the browser.** The last 32 jobs are kept with up to 500
   output lines each, readable at `GET /api/control/jobs/<id>` after they
   finish. Dropped overflow lines are counted

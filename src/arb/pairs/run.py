@@ -27,20 +27,31 @@ NOT wrap the whole coroutine in :func:`asyncio.to_thread`:
   sequencing and every database write. ``AsyncEngine``, ``RunContext`` and
   the sink are loop-affine and must never cross a thread boundary.
 * **worker thread**: the scoring stage only (:func:`_score_universes` /
-  :func:`_event_slug_map`), offloaded here with :func:`asyncio.to_thread`.
-  It is pure CPU over immutable data — no loop, no engine, no ``RunContext``
-  — which is what makes the offload safe. It is also the dominant cost
-  (~minutes), so this is what keeps the ingest loop from stalling past
-  ``ws.py``'s 10 s ping timeout.
+  :func:`_event_slug_map`), offloaded here with :func:`_offload`
+  (:func:`asyncio.to_thread`). It is pure CPU over immutable data — no loop,
+  no engine, no ``RunContext`` — which is what makes the offload safe. It is
+  also the dominant cost (~minutes), so this is what keeps the ingest loop
+  from stalling past ``ws.py``'s 10 s ping timeout. The one object the
+  thread shares with the loop is the ``threading.Event`` it is handed, and
+  it only ever reads it.
 * **progress callback**: only ever called from the caller's event loop
   thread, never from the worker. It must not block and must not raise; a
   raising callback is logged once and then ignored for the rest of the job.
 
 Cancellation: cancelling the awaiting task takes effect at any ``await`` —
-in practice at a venue page boundary or a phase boundary. The scoring stage
-is a plain function in a thread and cannot be interrupted, so a cancel
-during scoring returns to the caller at once while that thread runs on to
-completion (it touches nothing shared).
+in practice at a venue page boundary or a phase boundary. A thread cannot be
+interrupted from outside, so the scoring stage is asked instead: a cancel
+during scoring returns to the caller at once *and* sets the thread's
+``threading.Event``, which the thread checks between stages and before every
+event comparison of the cross product. It then raises
+:class:`~arb.pairs.matcher.ScoringCancelled` — into a future nobody is
+waiting on any more — and ends within one comparison, which is milliseconds.
+That is not cosmetic: ``asyncio.run`` joins the default executor on its way
+out, so a thread that ran on to completion used to hold a stopping ``arb
+ui`` open for the rest of the scoring, past Docker's grace period and into
+SIGKILL. What still cannot be interrupted is the work between two checks;
+the longest stretch is building one venue's refs, a fraction of a second at
+the size of the live universes (88k markets across both venues).
 """
 
 from __future__ import annotations
@@ -59,7 +70,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from arb.config import AppConfig
 from arb.pairs import store as pairs_store
-from arb.pairs.matcher import PairCandidate, propose_pairs
+from arb.pairs.matcher import PairCandidate, ScoringCancelled, propose_pairs
 from arb.pairs.store import upsert_proposals
 from arb.recorder import Recorder
 from arb.run import RunContext, new_run_id
@@ -310,9 +321,32 @@ async def _checkpoint() -> None:
     await asyncio.sleep(0)
 
 
+async def _offload[T](stage: Callable[[threading.Event], T]) -> T:
+    """Run ``stage(cancel)`` in a worker thread that ends when the caller stops waiting.
+
+    :func:`asyncio.to_thread` alone gives a cancelled caller its
+    ``CancelledError`` at once and leaves the thread running to completion;
+    ``asyncio.run`` then joins that thread before the process may exit. So
+    the thread is handed an event, and it is set on *every* way out of the
+    ``await`` — a cancel, and a coroutine closed by a dying loop as well. On
+    a normal return the thread has already finished and setting it is a no-op.
+    """
+    cancel = threading.Event()
+    try:
+        return await asyncio.to_thread(stage, cancel)
+    finally:
+        cancel.set()
+
+
+def _stop_if_cancelled(cancel: threading.Event) -> None:
+    if cancel.is_set():
+        raise ScoringCancelled("the job was cancelled")
+
+
 def _score_universes(
     kalshi_universe: list[tuple[KalshiEvent, list[KalshiMarket]]],
     pm_markets: list[pm_discovery.DiscoveredPMMarket],
+    cancel: threading.Event,
     *,
     min_score: float,
 ) -> tuple[int, int, list[PairCandidate]]:
@@ -320,21 +354,34 @@ def _score_universes(
 
     Reads only immutable/already-parsed venue data and returns fresh objects,
     which is what lets :func:`asyncio.to_thread` carry it off the loop.
+    ``cancel`` is read between stages and handed to the matcher, which reads
+    it before every event comparison; once it is set this raises
+    :class:`~arb.pairs.matcher.ScoringCancelled` instead of returning.
     """
     kalshi_refs = kalshi_discovery.event_refs(kalshi_universe)
+    _stop_if_cancelled(cancel)
     pm_refs = pm_discovery.event_refs(pm_markets)
-    return len(kalshi_refs), len(pm_refs), propose_pairs(kalshi_refs, pm_refs, min_score=min_score)
+    _stop_if_cancelled(cancel)
+    candidates = propose_pairs(kalshi_refs, pm_refs, min_score=min_score, should_stop=cancel.is_set)
+    return len(kalshi_refs), len(pm_refs), candidates
 
 
 def _event_slug_map(
     kalshi_universe: list[tuple[KalshiEvent, list[KalshiMarket]]],
     pm_markets: list[pm_discovery.DiscoveredPMMarket],
+    cancel: threading.Event,
 ) -> tuple[int, int, dict[str, str]]:
-    """Pure CPU, thread-safe (same contract as :func:`_score_universes`)."""
+    """Pure CPU, thread-safe (same contract as :func:`_score_universes`).
+
+    One linear pass — a fraction of a second, not minutes — so ``cancel`` is
+    read once per Kalshi event and once between the venues.
+    """
     by_market_id: dict[str, str] = {}
     for event, markets in kalshi_universe:
+        _stop_if_cancelled(cancel)
         for m in markets:
             by_market_id[kalshi_market_id(m.ticker)] = event.event_ticker
+    _stop_if_cancelled(cancel)
     for dm in pm_markets:
         by_market_id[pm_market_id(dm.slug)] = dm.event.slug
     return len(kalshi_universe), len({m.event.slug for m in pm_markets}), by_market_id
@@ -378,8 +425,8 @@ async def run_propose(
             await _checkpoint()
             prog.emit(PHASE_SCORE, "scoring the cross product (this is the slow part)")
             # Minutes of blocked CPU: off the loop or the Kalshi socket dies.
-            kalshi_events, pm_events, candidates = await asyncio.to_thread(
-                _score_universes, kalshi_universe, pm_markets, min_score=min_score
+            kalshi_events, pm_events, candidates = await _offload(
+                partial(_score_universes, kalshi_universe, pm_markets, min_score=min_score)
             )
             log.info(
                 "universes: %d kalshi events, %d polymarket_us events, %d candidates",
@@ -440,8 +487,8 @@ async def run_backfill(
             )
             await _checkpoint()
             prog.emit(PHASE_SCORE, "resolving market ids to event slugs")
-            kalshi_events, pm_events, by_market_id = await asyncio.to_thread(
-                _event_slug_map, kalshi_universe, pm_markets
+            kalshi_events, pm_events, by_market_id = await _offload(
+                partial(_event_slug_map, kalshi_universe, pm_markets)
             )
             log.info("backfill: resolved %d market -> event slugs", len(by_market_id))
             prog.emit(PHASE_PERSIST, f"updating pairs from {len(by_market_id)} market ids")
