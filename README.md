@@ -1,8 +1,9 @@
-# arb — Kalshi × Polymarket US cross-venue arbitrage
+# Cross-Book — Kalshi × Polymarket US cross-venue arbitrage
 
-`arb` detects — and, from a later milestone on, trades — price gaps between
-equivalent binary markets listed on both **Kalshi** and **Polymarket US**
-(docs.polymarket.us; the international Polymarket is out of scope).
+Cross-Book (`arb` on the command line) detects — and, from a later milestone
+on, trades — price gaps between equivalent binary markets listed on both
+**Kalshi** and **Polymarket US** (docs.polymarket.us; the international
+Polymarket is out of scope).
 
 Everything built so far is **read-only measurement and simulation**: venue
 adapters, a normalized order book, a raw-message recorder, a cross-venue
