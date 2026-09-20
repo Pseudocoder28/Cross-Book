@@ -1351,3 +1351,45 @@ worth something if the payloads do not change underneath the tests.
   sentinel file it is handed), and `run_ui_target.py` builds its `AppConfig`
   with `_env_file=None`, closed local ports, in-memory sqlite and a throwaway
   key.
+
+## The image puts the venv's scripts on PATH (2026-09-20)
+
+CLAUDE.md, `docs/ops.md`, `docs/cli.md` and the `arb.cli` docstring all promise
+`docker compose exec app arb ...`. The image never delivered it. `uv sync`
+writes the console script to `/app/.venv/bin/arb`; `python:3.12-slim` ships
+`PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
+nothing joined the two. Nobody noticed because the container's own command is
+`uv run arb ui`, which finds the venv without PATH, and the one time the exec
+form was exercised (M7, PROGRESS.md) it was typed as `uv run arb doctor`.
+
+Checked in a container, not reasoned: built from the unmodified Dockerfile,
+`docker run --rm IMG arb --help` exits 127 with `exec: "arb": executable file
+not found in $PATH` and `docker run --rm IMG uv run arb --help` exits 0.
+
+- **Fix the image, not the docs.** `ENV PATH="/app/.venv/bin:$PATH"`. The rule
+  in CLAUDE.md is "every CLI command works both locally and on the VM", and
+  the bare form is what four documents and an operator's fingers already say.
+  Rewriting them to `uv run arb` would have made the docs true and left the
+  next person who types the obvious thing with the same 127.
+- **After the syncs, not beside the other `ENV`.** The build never needs it, and
+  placed last it invalidates no layer: the rebuild was all `CACHED`.
+- **`uv run` stays the container's command.** M22 depends on it (it forwards
+  SIGTERM to its child) and `tests/test_cli.py` pins the argv. Re-checked on
+  the fixed image: `uv run arb ui` served `/`, `/api/status` and `/metrics`,
+  `uv run python` still reports `/app/.venv` as its prefix, and `docker stop`
+  ended it with exit 0 and the `shutdown complete … drained` line. That run
+  used `--network none`, a throwaway key generated inside the container and
+  `--no-record`: no venue, credential, database or published port.
+- **What else changes inside the container.** `python` and `alembic` now
+  resolve to the venv too (`/app/.venv/bin/…`; they were `/usr/local/bin/python`
+  and absent). That is the interpreter the app already ran under, so
+  `docker compose exec app python …` now sees the project's packages instead
+  of a bare interpreter. `uv` is untouched at `/usr/bin/uv`.
+- **Pinned by text, proven by build.** `tests/test_cli.py` asserts the `ENV`
+  line exists and agrees with `WORKDIR`. It cannot prove a container finds the
+  script — no test here builds an image, and there is no CI to build one in —
+  so it guards the regression that matters (someone tidying the line away) and
+  this entry records the build that proved it.
+- **An image built before today does not have it.** The bare form works after
+  `docker compose up -d --build app`; until then `docker compose exec app uv
+  run arb ...` is the form that works.

@@ -63,10 +63,27 @@
   design, and there was no Postgres on `:5432` that day. The Kalshi closing
   handshake is the other 10 s wait in the path; the new last log line tells the
   two apart.
+- **`docker compose exec app arb ...` works now; it never did (2026-09-20).**
+  Four documents promised the bare form and the image could not deliver it:
+  the console script is `/app/.venv/bin/arb` and that directory was not on
+  `PATH`. Built from the old Dockerfile, `docker run IMG arb --help` exits 127
+  (`executable file not found in $PATH`) while `uv run arb --help` exits 0 —
+  which is why the container ran and nobody noticed. Fixed in the image
+  (`ENV PATH="/app/.venv/bin:$PATH"`, after the syncs, no layer invalidated),
+  not in the docs. Re-verified on the rebuilt image: bare `arb --help`, `uv
+  run arb --help`, the default `CMD`, `docker exec CTR arb doctor`, and `uv
+  run arb ui` serving `/`, `/api/status` and `/metrics`. `alembic` and
+  `python` resolve to the venv too. One text pin in `tests/test_cli.py`,
+  mutation-checked (line removed; wrong directory). See decisions.md.
 - 387 Python tests (33 in `tests/test_shutdown.py`); ruff and pyright clean.
-  (394 since the capture-script repair below.)
-- **Open**: the compose change has not been exercised in a container (the
-  Docker daemon was not running); the Kalshi close is bounded only by the
+  (394 since the capture-script repair below; 395 with the Dockerfile pin.)
+- **Open**: the compose change has not been exercised under `docker compose`
+  (a first partial check, 2026-09-20: a container started with `--init`
+  running `uv run arb ui`, stopped with `docker stop -t 45`, exited 0 with the
+  `shutdown complete … drained` line — so the signal does travel tini → uv →
+  Python in a container. It ran `--no-record` with no network, so the drain it
+  reported was an empty one, and `stop_grace_period` itself was not what
+  bounded it); the Kalshi close is bounded only by the
   `websockets` default in `src/arb/ws.py`; the writer's 30 s retry backoff can
   outlast the 10 s drain after a database outage; `pairs/run.py`'s
   owned-runtime drain is uncounted but has no caller since M20. **A stop during
@@ -561,6 +578,22 @@ exists; the other half is the part with money in it:
 - Fix the two deployment gaps above first: `ARB_ALLOW_REMOTE_BIND` in
   `docker-compose.yml` (the app container will not start without it) and
   `alembic upgrade head` in the deploy path.
+- **The stack running on the dev machine is not the one the compose file
+  names (seen 2026-09-20, left untouched).** Its four containers were created
+  on 2026-09-14 under the project name `prediction-markets-stat-arb`; the
+  `name: arb` pin landed on 2026-09-16. From any current checkout `docker
+  compose ps` lists nothing and `docker compose exec app ...` finds no `app`
+  — the PATH fix above cannot be reached that way — and `docker compose up
+  -d` would build a second stack and die on the port collision the pin's own
+  comment describes. The app image is also from 2026-09-14, so it predates
+  M18–M22 and the PATH line. Bringing it over is an operator's call, for two
+  reasons. It stops a running recorder. And Compose names volumes per
+  project: every recorded run is in `prediction-markets-stat-arb_pgdata`
+  (checked), and a stack brought up as `arb` starts on a new, empty
+  `arb_pgdata` — the old data is not lost, but the UI, `arb replay` and the
+  confirmed pairs would all see an empty database until the volume is carried
+  over (dump and restore, or an `external` volume with `name:` in the compose
+  file). Never `down -v` on the old project before that is done.
 - Order placement, amend and cancel — still unwritten, still gated on a prompt
   that asks for it. It is **G4**, so by the rule set in M19 it is never a
   hotkey and never a one-click button: a typed command plus a typed

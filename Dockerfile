@@ -16,4 +16,9 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
+# The venv's scripts on PATH, so `docker compose exec app arb ...` (the form
+# the docs promise) finds the console script. After the syncs on purpose: it
+# costs no cache, and the build itself never needed it.
+ENV PATH="/app/.venv/bin:$PATH"
+
 CMD ["uv", "run", "arb"]

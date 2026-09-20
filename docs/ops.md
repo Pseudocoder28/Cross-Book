@@ -185,6 +185,17 @@ so that `uv run` *inside the running container* uses the environment baked
 at build time rather than re-syncing (and potentially pulling dev
 dependencies) at container start.
 
+`ENV PATH="/app/.venv/bin:$PATH"` comes after the syncs. `uv sync` writes the
+console script to `/app/.venv/bin/arb` and the base image's `PATH` does not
+include that directory, so without the line a bare `docker compose exec app
+arb doctor` fails with `exec: "arb": executable file not found in $PATH`
+while the container itself runs fine — its command goes through `uv run`,
+which finds the venv on its own. With it, `arb`, `alembic` and `python` all
+resolve to the venv inside the container, and the `uv run …` forms keep
+working unchanged. An image built before this line needs a rebuild (`docker
+compose up -d --build app`) before the bare form works against it; until
+then, `docker compose exec app uv run arb doctor` does.
+
 ## `arb doctor`
 
 The pre-flight check for all of the above — see
