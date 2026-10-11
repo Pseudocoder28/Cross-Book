@@ -63,19 +63,35 @@
   design, and there was no Postgres on `:5432` that day. The Kalshi closing
   handshake is the other 10 s wait in the path; the new last log line tells the
   two apart.
+- **A stop during scoring no longer sits out the grace period (follow-up).**
+  A cancelled propose or backfill always returned at once, but its scoring
+  thread ran the cross product to the end, and `asyncio.run` joins the default
+  executor before the process may exit — so every `docker compose stop` during
+  scoring took the whole 45 s and ended in SIGKILL, exit 137, after a clean
+  `shutdown complete`. `pairs/run.py` now hands the thread a `threading.Event`
+  (`_offload`), sets it on the way out of the `await`, and the thread checks
+  it between stages and before every event comparison, then raises
+  `ScoringCancelled` rather than return a truncated list. Still pure CPU over
+  immutable data: the event is the one shared object and the thread only reads
+  it; `matcher.py` takes a `should_stop` callable and knows nothing about
+  threads. Measured in a real process under `uvloop.run`, cancelling one
+  second into a ~10.5 s synthetic scoring stage: `uvloop.run` returned 9.6 s
+  after the cancel before, 0.015 s now. `jobs.cancel` stops the thread the
+  same way. `stop_grace_period` is unchanged. Three new tests, mutation-checked
+  against a scratch copy (6 mutations, each caught — one only after the
+  matcher test was given blocks of two).
 - 387 Python tests (33 in `tests/test_shutdown.py`); ruff and pyright clean.
-  (394 since the capture-script repair below.)
+  (397 since the scoring follow-up above and the capture-script repair below.)
 - **Open**: the compose change has not been exercised in a container (the
   Docker daemon was not running); the Kalshi close is bounded only by the
   `websockets` default in `src/arb/ws.py`; the writer's 30 s retry backoff can
   outlast the 10 s drain after a database outage; `pairs/run.py`'s
-  owned-runtime drain is uncounted but has no caller since M20. **A stop during
-  a propose/backfill scoring stage takes the whole 45 s grace period and ends
-  in SIGKILL** — after cleanup has finished, so nothing is lost: the scoring
-  thread cannot be interrupted and Python will not exit until it returns. The
-  fix belongs in `pairs/run.py` (a `threading.Event` between scoring blocks),
-  not in a longer grace period. A Docker daemon restart or host reboot does
-  not honour `depends_on` order, so `docker compose stop` first
+  owned-runtime drain is uncounted but has no caller since M20. The scoring
+  fix is measured in a real process but not under Docker, and its
+  between-checks bound (both venues' `event_refs`, under half a second) is
+  scaled from a synthetic universe, not timed on the live ones. A Docker
+  daemon restart or host reboot does not honour `depends_on` order, so
+  `docker compose stop` first
   ([ops.md](docs/ops.md#stopping-and-what-a-stop-flushes)).
 
 ### From M21 — the frontend gets tested, in two layers

@@ -176,7 +176,11 @@ automated suite.
   be tested deterministically without hitting the real gateway).
 - `test_pairs.py` — the matcher's scoring and blocking, on event fixtures
   taken verbatim from both venues' captured universes (not synthetic
-  titles), plus the storage layer's upsert/decide semantics.
+  titles), plus the storage layer's upsert/decide semantics. Also the
+  `propose`/`backfill` jobs: borrowing a live server's runtime, single-flight,
+  and cancellation — including that a job cancelled mid-scoring ends its
+  worker thread (the thread is held inside a comparison by a
+  `threading.Event`, so the test has no sleeps and no venue or Postgres).
 - `test_fees_edge.py` — fee formulas against each venue's documented
   worked examples, and the depth-aware edge walk against hand-constructed
   (not fixture-derived — these are pure math, no wire format involved)

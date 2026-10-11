@@ -312,7 +312,7 @@ corrupts the one-way latency measurement.
 
 | Job | Strategy | Why that one |
 | --- | --- | --- |
-| `jobs.propose`, `jobs.backfill` | `await`ed on the loop; the **scoring stage only** is carried to a worker thread inside [`pairs/run.py`](../src/arb/pairs/run.py) (`asyncio.to_thread`) | the loop-affine parts (venue fetches, the recorder sink, `RunContext` sequencing, every database write) must stay on the loop; the dominant cost (~minutes of pure CPU over immutable data) must not. `pairs/run.py`'s contract is explicit that the caller must **not** wrap the whole coroutine in `to_thread` |
+| `jobs.propose`, `jobs.backfill` | `await`ed on the loop; the **scoring stage only** is carried to a worker thread inside [`pairs/run.py`](../src/arb/pairs/run.py) (`asyncio.to_thread`), which is handed a `threading.Event` so that a cancelled job ends its thread too | the loop-affine parts (venue fetches, the recorder sink, `RunContext` sequencing, every database write) must stay on the loop; the dominant cost (~minutes of pure CPU over immutable data) must not. `pairs/run.py`'s contract is explicit that the caller must **not** wrap the whole coroutine in `to_thread` |
 | `jobs.replay` | a **subprocess** (`python -m arb.cli replay ...`), stdout streamed back line by line | `replay.py`'s per-row loop contains no `await` and yields only every 2000 rows, so in-process it holds the loop for seconds to minutes. A subprocess cannot stall this loop at all. Cancellation is SIGTERM, then SIGKILL after a 5 s grace |
 | `jobs.doctor` | plain in-process `await` | it is a handful of short network and disk checks; a thread or a process would be ceremony |
 

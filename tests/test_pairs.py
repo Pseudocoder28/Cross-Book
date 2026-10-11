@@ -5,18 +5,19 @@ import asyncio
 import json
 import threading
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from arb.config import AppConfig
+from arb.pairs import matcher, store
 from arb.pairs import run as pairs_run
-from arb.pairs import store
-from arb.pairs.matcher import EventRef, MarketRef, PairCandidate, propose_pairs
+from arb.pairs.matcher import EventRef, MarketRef, PairCandidate, ScoringCancelled, propose_pairs
 from arb.pairs.text import name_similarity, name_tokens, title_tokens
 from arb.pairs.tracked import load_tracked_pairs
 from arb.recorder import Recorder
@@ -29,6 +30,8 @@ from arb.venues.polymarket_us import discovery as pd
 from arb.venues.polymarket_us.rest import parse_events_response
 
 FIX = Path(__file__).parent / "fixtures"
+
+type _Matches = list[tuple[MarketRef, MarketRef, float]]  # what ``_outcome_matches`` returns
 
 
 def raw(venue: str, payload: bytes) -> RawMessage:
@@ -104,6 +107,36 @@ class TestMatcher:
         assert all(c.score >= 0.5 for c in cands)
         # Detail carries both rules texts for the reviewer.
         assert dem.kalshi.rules and dem.polymarket.rules
+
+    def test_should_stop_abandons_the_scan_rather_than_return_part_of_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A truncated list is indistinguishable from a complete one, so a
+        stopped scan raises — and it stops at the next comparison, not at the
+        end of the block or of the universe."""
+        compared: list[tuple[int, int]] = []
+        real = matcher._outcome_matches
+
+        def spy(a: tuple[MarketRef, ...], b: tuple[MarketRef, ...]) -> _Matches:
+            compared.append((len(a), len(b)))
+            return real(a, b)
+
+        monkeypatch.setattr(matcher, "_outcome_matches", spy)
+        # The captured Kalshi events, each listed twice: every Polymarket
+        # event's block now holds two comparisons, which is what tells "the
+        # next comparison" apart from "the end of the block".
+        kalshi = kalshi_refs()
+        kalshi += [replace(e, event_id=f"{e.event_id}-TWIN") for e in kalshi]
+        full = propose_pairs(kalshi, pm_refs(), min_score=0.5)
+        assert len(compared) == 2 * len(pm_refs())
+        # A flag that never fires changes nothing.
+        assert propose_pairs(kalshi, pm_refs(), min_score=0.5, should_stop=lambda: False) == full
+
+        compared.clear()
+        with pytest.raises(ScoringCancelled):
+            # Turns true once the first comparison has been made.
+            propose_pairs(kalshi, pm_refs(), min_score=0.5, should_stop=lambda: bool(compared))
+        assert len(compared) == 1
 
 
 async def _pairs_engine(n: int) -> AsyncEngine:
@@ -535,6 +568,87 @@ async def test_cancelling_a_job_frees_the_slot_and_spares_the_lent_engine(
     assert not pairs_run.job_running()
     gate.release.set()
     assert (await pairs_run.run_propose(AppConfig(), min_score=0.5, deps=deps)).proposed > 0
+
+
+async def test_cancelling_mid_scoring_ends_the_scoring_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cancel always came back at once; the scorer's thread did not stop.
+
+    It ran the cross product to the end, and ``asyncio.run`` joins the default
+    executor before the process may exit — so ``docker compose stop`` during
+    scoring sat out the whole grace period and was SIGKILLed (exit 137). The
+    thread has to end with the job, not minutes after it.
+    """
+    _patch_discovery(monkeypatch)
+    _patch_owned_construction(monkeypatch)
+    monkeypatch.setattr(pairs_run, "upsert_proposals", _count_upsert)
+    deps = pairs_run.JobDeps(engine=_engine(FakeEngine()), run=RunContext("r"))
+
+    comparing = threading.Event()  # the worker is inside an event comparison
+    resume = threading.Event()  # releases the comparison the cancel lands in
+    teardown = threading.Event()  # releases any later one: cleanup, never the test
+    thread_ended = threading.Event()
+    compared: list[int] = []
+    real_compare = matcher._outcome_matches
+    real_score = pairs_run._score_universes
+
+    def slow_compare(a: tuple[MarketRef, ...], b: tuple[MarketRef, ...]) -> _Matches:
+        # Every comparison is slow: it holds until somebody lets it go. The
+        # test lets go of the first, the one in flight at the cancel. A second
+        # one is the thread running on, and nothing lets go of that until the
+        # assertions are over — the scorer that cannot be stopped.
+        compared.append(threading.get_ident())
+        comparing.set()
+        (resume if len(compared) == 1 else teardown).wait(60.0)
+        return real_compare(a, b)
+
+    def tracked_score(*args: Any, **kwargs: Any) -> tuple[int, int, list[PairCandidate]]:
+        try:
+            return real_score(*args, **kwargs)
+        finally:
+            thread_ended.set()
+
+    monkeypatch.setattr(matcher, "_outcome_matches", slow_compare)
+    monkeypatch.setattr(pairs_run, "_score_universes", tracked_score)
+
+    task = asyncio.create_task(pairs_run.run_propose(AppConfig(), min_score=0.5, deps=deps))
+    try:
+        assert await asyncio.to_thread(comparing.wait, 5.0), "scoring never started"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Mid-scoring, provably: the job is back and its thread is not.
+        assert compared and threading.get_ident() not in compared
+        assert not thread_ended.is_set()
+        assert not pairs_run.job_running()
+
+        resume.set()
+        assert await asyncio.to_thread(thread_ended.wait, 5.0), (
+            "the scoring thread ran on after the job was cancelled"
+        )
+        assert len(compared) == 1  # and it never started another comparison
+    finally:
+        task.cancel()
+        resume.set()
+        teardown.set()
+        if comparing.is_set():  # leave no worker behind for the next test
+            await asyncio.to_thread(thread_ended.wait, 5.0)
+
+
+def test_both_thread_stages_refuse_to_run_once_cancelled() -> None:
+    """The checks outside the matcher's loop: between ``_score_universes``'
+    stages, and in backfill's pass, which never reaches the matcher at all."""
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(ScoringCancelled):
+        pairs_run._score_universes(kalshi_universe(), pm_discovered(), cancelled, min_score=0.5)
+    with pytest.raises(ScoringCancelled):
+        pairs_run._event_slug_map(kalshi_universe(), pm_discovered(), cancelled)
+    # Unset, the same calls are the ordinary ones.
+    live = threading.Event()
+    assert pairs_run._score_universes(kalshi_universe(), pm_discovered(), live, min_score=0.5)[2]
+    assert pairs_run._event_slug_map(kalshi_universe(), pm_discovered(), live)[2]
 
 
 async def test_backfill_borrows_a_live_engine_and_leaves_it_usable(

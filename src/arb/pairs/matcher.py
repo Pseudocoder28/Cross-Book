@@ -11,12 +11,19 @@ Two stages, both explainable:
 Dates are a weak feature only: Kalshi ``close_time`` often trails the real
 event by months. Rules text is *not* scored — it is carried in the detail
 for the human reviewer, because that is where equivalence actually lives.
+
+The cross product is minutes of CPU on the full universes, so
+:func:`propose_pairs` can be told to give up: it polls an optional
+``should_stop`` before every event comparison (milliseconds of work at
+most) and raises :class:`ScoringCancelled` rather than return a partial
+list that would look like a complete one.
 """
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -64,6 +71,10 @@ class PairCandidate:
     features: dict[str, Any] = field(default_factory=dict)
     kalshi_event: str = ""
     polymarket_event: str = ""
+
+
+class ScoringCancelled(Exception):
+    """Scoring was told to stop; it was abandoned and there is no result."""
 
 
 def _days_apart(a: datetime | None, b: datetime | None) -> float | None:
@@ -117,7 +128,14 @@ def propose_pairs(
     polymarket_events: list[EventRef],
     *,
     min_score: float = 0.5,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[PairCandidate]:
+    """Best Kalshi twin for each Polymarket US market, best score first.
+
+    ``should_stop`` is polled before every event comparison; once it returns
+    true the scan raises :class:`ScoringCancelled`. It is called from
+    whatever thread runs this function, so it must be safe to call there.
+    """
     # Inverted index over Kalshi title tokens for blocking; document
     # frequencies across both venues drive IDF weights.
     k_tokens = [title_tokens(e.title) for e in kalshi_events]
@@ -142,6 +160,8 @@ def propose_pairs(
         for t in p_toks:
             block.update(index.get(t, ()))
         for ki in block:
+            if should_stop is not None and should_stop():
+                raise ScoringCancelled("stopped before the cross product was finished")
             ke = kalshi_events[ki]
             title_sim = _weighted_jaccard(p_toks, k_tokens[ki], idf)
             matches = _outcome_matches(ke.markets, pe.markets)
