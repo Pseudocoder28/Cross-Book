@@ -17,6 +17,14 @@ The cross product is minutes of CPU on the full universes, so
 ``should_stop`` before every event comparison (milliseconds of work at
 most) and raises :class:`ScoringCancelled` rather than return a partial
 list that would look like a complete one.
+
+Numbers are identity (see :mod:`arb.pairs.text`). Two outcome names that
+disagree on a number never pair; two event titles that do are still scored,
+with the title similarity halved and the disagreement recorded in the
+features, because the reviewer should see the near-miss rather than have it
+hidden. Every proposal also records its ``margin``: how far the chosen twin
+beat the next-best one for the same Polymarket market. A 1.000 that won by
+0.001 is a coin the matcher flipped, and the score column alone cannot say so.
 """
 
 from __future__ import annotations
@@ -24,16 +32,25 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
-from arb.pairs.text import name_similarity, name_tokens, title_tokens
+from arb.pairs.text import (
+    name_similarity,
+    name_tokens,
+    numbers_conflict,
+    numeric_tokens,
+    title_tokens,
+)
 
 MIN_EVENT_SCORE = 0.40
 MIN_NAME_SIM = 0.75
 MAX_TOKEN_DF = 400  # tokens this common don't block ("election" tier)
 DATE_SLACK_DAYS = 400.0
+# Title similarity is multiplied by this when the two titles disagree on a
+# number ("Map 1" / "Map 2"): still proposed, no longer mistaken for a twin.
+NUMBER_CONFLICT_PENALTY = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +181,9 @@ def propose_pairs(
                 raise ScoringCancelled("stopped before the cross product was finished")
             ke = kalshi_events[ki]
             title_sim = _weighted_jaccard(p_toks, k_tokens[ki], idf)
+            conflict = numbers_conflict(p_toks, k_tokens[ki])
+            if conflict:
+                title_sim *= NUMBER_CONFLICT_PENALTY
             matches = _outcome_matches(ke.markets, pe.markets)
             if not matches:
                 continue
@@ -172,6 +192,19 @@ def propose_pairs(
             event_score = 0.55 * title_sim + 0.35 * overlap + 0.10 * _date_feature(days)
             if event_score < MIN_EVENT_SCORE:
                 continue
+            features: dict[str, Any] = {
+                "title_similarity": round(title_sim, 4),
+                "outcome_overlap": round(overlap, 4),
+                "days_apart": round(days, 1) if days is not None else None,
+                "event_score": round(event_score, 4),
+                "number_conflict": conflict,
+            }
+            k_nums, p_nums = numeric_tokens(k_tokens[ki]), numeric_tokens(p_toks)
+            if k_nums or p_nums:
+                features["numbers"] = {
+                    "kalshi": sorted(k_nums),
+                    "polymarket_us": sorted(p_nums),
+                }
             for km, pm, sim in matches:
                 score = 0.6 * event_score + 0.4 * sim
                 if score < min_score:
@@ -181,21 +214,42 @@ def propose_pairs(
                         kalshi=km,
                         polymarket=pm,
                         score=round(score, 4),
-                        features={
-                            "title_similarity": round(title_sim, 4),
-                            "outcome_overlap": round(overlap, 4),
-                            "outcome_similarity": round(sim, 4),
-                            "days_apart": round(days, 1) if days is not None else None,
-                            "event_score": round(event_score, 4),
-                        },
+                        features={**features, "outcome_similarity": round(sim, 4)},
                         kalshi_event=ke.title,
                         polymarket_event=pe.title,
                     )
                 )
-    # One proposal per Polymarket market: keep the best-scoring Kalshi twin.
+    return _best_per_polymarket_market(candidates)
+
+
+def _best_per_polymarket_market(candidates: list[PairCandidate]) -> list[PairCandidate]:
+    """One proposal per Polymarket market: the best-scoring Kalshi twin, with
+    the gap to the runner-up recorded as ``margin`` (None when it had none).
+
+    A rival is always a different Kalshi market — outcome matching is
+    one-to-one within an event pair — so the margin says how clearly this
+    twin beat the alternatives, which a 1.000 on its own cannot.
+    """
     best: dict[str, PairCandidate] = {}
+    runner_up: dict[str, float] = {}
     for c in candidates:
-        cur = best.get(c.polymarket.market_id)
-        if cur is None or c.score > cur.score:
-            best[c.polymarket.market_id] = c
-    return sorted(best.values(), key=lambda c: -c.score)
+        pm_id = c.polymarket.market_id
+        cur = best.get(pm_id)
+        if cur is None:
+            best[pm_id] = c
+        elif c.score > cur.score:
+            runner_up[pm_id] = cur.score
+            best[pm_id] = c
+        else:
+            runner_up[pm_id] = max(runner_up.get(pm_id, 0.0), c.score)
+    out = [
+        replace(
+            c,
+            features={
+                **c.features,
+                "margin": round(c.score - runner_up[pm_id], 4) if pm_id in runner_up else None,
+            },
+        )
+        for pm_id, c in best.items()
+    ]
+    return sorted(out, key=lambda c: -c.score)

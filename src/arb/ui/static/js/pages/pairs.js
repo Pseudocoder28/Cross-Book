@@ -900,6 +900,19 @@ function renderDetail() {
   setText("pd-outcome", f.outcome_similarity != null ? Number(f.outcome_similarity).toFixed(2) : "—");
   setText("pd-overlap", f.outcome_overlap != null ? Number(f.outcome_overlap).toFixed(2) : "—");
   setText("pd-days", f.days_apart != null ? String(f.days_apart) : "—");
+  // A 1.000 that beat its rival by 0.001 is a coin flip; "—" means it had none.
+  setText("pd-margin", f.margin != null ? "+" + Number(f.margin).toFixed(3) : "—");
+  const numEl = $("pd-numbers");
+  const nums = f.numbers || null;
+  if (!nums) {
+    numEl.textContent = "—";
+    numEl.className = "v num";
+  } else {
+    const k = nums.kalshi.length ? nums.kalshi.join(" ") : "none";
+    const p = nums.polymarket_us.length ? nums.polymarket_us.join(" ") : "none";
+    numEl.textContent = "K " + k + (f.number_conflict ? " ≠ P " : " · P ") + p;
+    numEl.className = "v num" + (f.number_conflict ? " warn" : "");
+  }
   const st = $("pd-status");
   st.textContent = String(row.status).toUpperCase();
   st.className = "v " + (row.status === "confirmed" ? "st-live" : row.status === "rejected" ? "st-off" : "");

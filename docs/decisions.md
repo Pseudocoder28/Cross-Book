@@ -1434,3 +1434,40 @@ not found in $PATH` and `docker run --rm IMG uv run arb --help` exits 0.
 - **An image built before 2026-09-20 does not have it.** The bare form works after
   `docker compose up -d --build app`; until then `docker compose exec app uv
   run arb ...` is the form that works.
+
+## Numbers are identity in the pair matcher (2026-10-11)
+
+Kalshi "Map 2" was confirmed against Polymarket US "Map 1" at a score of
+1.000, twice. The digit was the only token telling the two events apart and
+`title_tokens` dropped every single-character token, so the titles were
+identical, the team-name outcomes paired perfectly, and the "best twin per
+Polymarket market" rule broke the tie by iteration order. `fold()` had a
+second version of the same blindness: it turned "2.5" into "2" and "5", so
+"Over 2.5" and "Over 5.2" were the same name.
+
+- **Digits survive the single-character filter; decimals survive folding.**
+  "a" and "x" still go. On the real fixture universes this changes nothing:
+  34 proposals before and after, same pairs, same scores.
+- **Two outcome names that disagree on a number score zero.** "Over 2.5" /
+  "Over 3.5", "Game 1" / "Game 2". Plain Jaccard would have passed "Los
+  Angeles Lakers to win Game 1" against "... Game 2" at exactly the 0.75
+  floor, so a penalty was not enough at this level. A subset is not a
+  disagreement ("Game 1 of 7" / "Game 1"), and a number on one side only is
+  judged as before.
+- **Two event titles that disagree on a number are still proposed, with the
+  title similarity halved and the disagreement in the features.** Vetoing at
+  the event level would drop the pair entirely, and the project's rule is
+  that the matcher proposes and a human decides: the reviewer should see
+  the near-miss. `number_conflict` and the `numbers` each side named go into
+  the detail, and the /pairs panel shows them as `K 1 ≠ P 2` in amber.
+- **Every proposal records its `margin` over the runner-up.** The open
+  question said the score column carried no information, and that is half
+  right: a lexically perfect match scores 1.000 whether or not another
+  Kalshi event scored 0.999 for the same market. The margin is that gap
+  (`None` with no rival), and it is the number that says whether the matcher
+  chose or guessed. The score formula and weights are unchanged.
+- **Stored rows are safe to re-propose over.** `upsert_proposals` refreshes
+  `score` and `detail` and never touches `status` or a decision, so a
+  re-propose re-scores every row and un-confirms nothing. The two false
+  positives have to be rejected by hand; the new scoring would now show them
+  at roughly 0.8 with the conflict marked.
