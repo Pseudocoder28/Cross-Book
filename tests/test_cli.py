@@ -11,6 +11,7 @@ import inspect
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -70,6 +71,20 @@ def test_compose_ui_argv_still_parses() -> None:
     restart-loops."""
     args = build_parser().parse_args(["ui", "--top", "20", "--host", "0.0.0.0"])
     assert (args.command, args.top, args.host) == ("ui", 20, "0.0.0.0")
+
+
+def test_dockerfile_puts_the_console_script_on_path() -> None:
+    """``docker compose exec app arb ...`` is the form CLAUDE.md and the docs
+    promise, and ``exec`` does not go through ``uv run``: it needs the venv's
+    ``bin`` on PATH. Drop the line and the image still builds and the container
+    still runs (its command is ``uv run arb ui``); only the documented ``exec``
+    dies, with "executable file not found in $PATH". Text cannot prove a
+    container finds the script — a build did, see docs/decisions.md — but it
+    fails when the line goes."""
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+    workdir = re.search(r"^WORKDIR (\S+)$", dockerfile, re.MULTILINE)
+    assert workdir is not None
+    assert f'ENV PATH="{workdir.group(1)}/.venv/bin:$PATH"' in dockerfile.splitlines()
 
 
 def test_ui_flags_are_starting_values_with_defaults() -> None:
