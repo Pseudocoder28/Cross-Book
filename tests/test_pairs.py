@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import re
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -18,7 +19,7 @@ from arb.config import AppConfig
 from arb.pairs import matcher, store
 from arb.pairs import run as pairs_run
 from arb.pairs.matcher import EventRef, MarketRef, PairCandidate, ScoringCancelled, propose_pairs
-from arb.pairs.text import name_similarity, name_tokens, title_tokens
+from arb.pairs.text import fold, name_similarity, name_tokens, title_tokens
 from arb.pairs.tracked import load_tracked_pairs
 from arb.recorder import Recorder
 from arb.run import RunContext
@@ -83,6 +84,91 @@ class TestText:
         assert name_similarity(name_tokens("Los Angeles Dodgers"), name_tokens("Dodgers")) == 1.0
         # One shared common token must not pair different people.
         assert name_similarity(name_tokens("Chris Sale"), name_tokens("Chris Paddack")) < 0.75
+
+
+def _event(venue: str, event_id: str, title: str, outcomes: tuple[str, ...]) -> EventRef:
+    markets = tuple(
+        MarketRef(venue, f"{venue}:{event_id}-{i}", f"{event_id}-{i}", name, "", None)
+        for i, name in enumerate(outcomes)
+    )
+    return EventRef(venue, event_id, title, "esports", markets)
+
+
+def _map_number(title: str) -> str:
+    match = re.search(r"Map (\d)", title)
+    assert match is not None, title
+    return match.group(1)
+
+
+class TestNumbersAreIdentity:
+    """Kalshi "Map 2" was confirmed against Polymarket US "Map 1" at 1.000.
+    The digit was the only token telling the two events apart, and
+    ``title_tokens`` dropped every single-character token."""
+
+    def test_titles_keep_their_digits_and_decimals(self) -> None:
+        assert title_tokens("Liquid vs G2 — Map 1 winner") != title_tokens(
+            "Liquid vs G2 — Map 2 winner"
+        )
+        assert {"map", "1"} <= title_tokens("Map 1 winner")
+        assert "a" not in title_tokens("a map 1")  # letters that short still go
+        assert fold("Over 2.5 goals") == "over 2.5 goals"  # one token, not "2" and "5"
+        assert fold("$1,000,000 or more") == "1000000 or more"
+
+    def test_names_that_disagree_on_a_number_are_different(self) -> None:
+        def sim(a: str, b: str) -> float:
+            return name_similarity(name_tokens(a), name_tokens(b))
+
+        assert sim("Map 1", "Map 2") == 0.0
+        assert sim("Over 2.5", "Over 3.5") == 0.0
+        assert sim("Over 2.5", "Over 5.2") == 0.0  # the tokens "2" and "5" would have tied
+        # Plain Jaccard scores this one 6/8, exactly the 0.75 floor.
+        assert sim("Los Angeles Lakers to win Game 1", "Los Angeles Lakers to win Game 2") == 0.0
+        # Agreeing, contained or absent numbers keep the containment rule.
+        assert sim("Game 7", "Game 7 (if necessary)") == 1.0
+        assert sim("Game 1 of 7", "Game 1") == 1.0
+        assert sim("Over 2.5", "2.5") == 1.0
+        assert sim("Dodgers", "Los Angeles Dodgers") == 1.0
+
+    def test_each_map_pairs_with_its_own_and_records_how_close_the_rival_came(self) -> None:
+        teams = ("Team Liquid", "G2 Esports")
+        kalshi = [
+            _event("kalshi", f"MAP{n}", f"Liquid vs G2: Map {n} winner", teams) for n in (1, 2)
+        ]
+        poly = [
+            _event("polymarket_us", f"map-{n}", f"Team Liquid vs G2 Esports - Map {n}", teams)
+            for n in (1, 2)
+        ]
+        cands = propose_pairs(kalshi, poly, min_score=0.5)
+        assert len(cands) == 4  # two teams on each of two maps
+        for c in cands:
+            assert _map_number(c.kalshi_event) == _map_number(c.polymarket_event)
+            assert c.features["number_conflict"] is False
+            n = _map_number(c.kalshi_event)
+            assert c.features["numbers"] == {"kalshi": [n], "polymarket_us": [n]}
+            # The other map was a rival for every one of these: the margin says
+            # by how much it lost, which the score alone never could.
+            assert c.features["margin"] is not None and c.features["margin"] > 0.05
+
+    def test_a_number_conflict_is_proposed_but_marked_and_scored_down(self) -> None:
+        """Only Map 1 exists on Kalshi. Polymarket's Map 2 still has to go
+        somewhere — the reviewer should see the near-miss, not nothing — but
+        it must not look like a twin."""
+        teams = ("Team Liquid", "G2 Esports")
+        kalshi = [_event("kalshi", "MAP1", "Liquid vs G2: Map 1 winner", teams)]
+        poly = [
+            _event("polymarket_us", f"map-{n}", f"Team Liquid vs G2 Esports - Map {n}", teams)
+            for n in (1, 2)
+        ]
+        by_event = {}
+        for c in propose_pairs(kalshi, poly, min_score=0.5):
+            by_event.setdefault(_map_number(c.polymarket_event), c)
+        right, wrong = by_event["1"], by_event["2"]
+        assert right.features["number_conflict"] is False
+        assert right.features["margin"] is None  # nothing else to beat
+        assert wrong.features["number_conflict"] is True
+        assert wrong.features["numbers"] == {"kalshi": ["1"], "polymarket_us": ["2"]}
+        assert wrong.score < right.score - 0.1
+        assert wrong.features["title_similarity"] < right.features["title_similarity"] / 2
 
 
 class TestMatcher:

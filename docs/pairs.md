@@ -34,7 +34,12 @@ below). Two features combine into an `event_score`:
   equally. This is what stops "American League" (extremely common across
   hundreds of MLB markets) from outweighing "Silver Slugger" (the token
   that actually identifies *which* MLB award market this is) when scoring
-  two titles that share both.
+  two titles that share both. When the two titles **disagree on a number**
+  ("Map 1" against "Map 2" — both name a number and neither side's numbers
+  contain the other's, `numbers_conflict()`), the similarity is halved
+  (`NUMBER_CONFLICT_PENALTY`). The pair is still proposed, because the
+  reviewer should see the near-miss, but it no longer reads as a twin, and
+  the features record `number_conflict` and the `numbers` each side named.
 - **Outcome overlap** — `len(matches) / min(len(ke.markets), len(pe.markets))`,
   where `matches` is the one-to-one outcome pairing computed in stage 2
   (yes, stage 2 runs *inside* stage 1's scoring loop — see the code). This
@@ -68,7 +73,11 @@ count, so the similarity is `max(containment, jaccard)` where containment
 is `|intersection| / min(|a|, |b|)`. A single shared token is only treated
 as decisive when it dominates one side entirely (`inter == 1 and
 min(len(a), len(b)) > 1` falls back to plain Jaccard, so a one-word overlap
-between two multi-word names doesn't over-score).
+between two multi-word names doesn't over-score). Numbers are identity, not
+vocabulary: two names that disagree on a number — `"Over 2.5"` / `"Over
+3.5"`, `"Game 1"` / `"Game 2"` — score **zero** however much else they
+share. Plain Jaccard would have passed `"Los Angeles Lakers to win Game 1"`
+against `"... Game 2"` at exactly the 0.75 floor.
 
 The final per-market score blends the event-level and outcome-level
 signals:
@@ -80,7 +89,12 @@ score = 0.6 * event_score + 0.4 * outcome_similarity
 Candidates below the caller's `min_score` (CLI default 0.75) are dropped.
 For any Polymarket US market that matched multiple Kalshi candidates, only
 the best-scoring one survives (`propose_pairs` keeps one proposal per
-Polymarket market id).
+Polymarket market id), and the gap to the runner-up is recorded as the
+`margin` feature — `None` when there was no rival. The score column alone
+cannot tell a 1.000 that had no competition from a 1.000 that beat a 0.999:
+the first is a twin, the second is a coin the matcher flipped for you. A
+rival is always a different Kalshi market, because outcome matching is
+one-to-one within an event pair.
 
 **Rules text is deliberately never scored** — it rides along in the
 proposal's `detail` purely for the human reviewer, because judging
@@ -95,12 +109,17 @@ proposal anyway, the goal is high recall with an explainable score, not
 cleverness):
 
 - `fold()` — lowercase, Unicode NFKD accent-folding, punctuation collapsed
-  to spaces.
+  to spaces — except a decimal point between digits, so `"2.5"` is one
+  token rather than the `"2"` and `"5"` that `"5.2"` would also produce,
+  and a thousands comma, so `"1,000"` is `"1000"`.
 - `title_tokens()` — expands venue shorthand first via `TITLE_SYNONYMS`
   (`"nl"` → `"national league"`, `"mvp"`, `"gov"` → `"governor"`, etc.),
   then folds and drops `TITLE_STOPWORDS` (generic election/race vocabulary
   that carries no identifying signal — "winner", "election", "2026", ...)
-  and single-character tokens.
+  and single-character tokens **unless they are digits**. "Map 1" and "Map
+  2" are different events, and the digit is the only token that says so;
+  dropping it is how a Kalshi "Map 2" market was confirmed against a
+  Polymarket US "Map 1" market at a score of 1.000.
 - `name_tokens()` — strips parenthetical decoration (`"(D)"`, `"(Ind)"`)
   and name suffixes (`Jr.`, `Sr.`, `II`/`III`/`IV`) via regex before
   folding, then drops `NAME_STOPWORDS` (`fc`, `sc`, `party`, ...) — this is
